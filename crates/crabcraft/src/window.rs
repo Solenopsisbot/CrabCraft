@@ -16,7 +16,7 @@ use crab_render::{
 use glam::Vec3;
 use wgpu::util::DeviceExt;
 use winit::application::ApplicationHandler;
-use winit::event::{DeviceEvent, DeviceId, ElementState, KeyEvent, WindowEvent};
+use winit::event::{DeviceEvent, DeviceId, ElementState, KeyEvent, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
@@ -55,6 +55,78 @@ fn first_person_camera(
     }
 }
 
+/// A tiny white "+" drawn in screen-centre NDC, depth-test disabled.
+const CROSSHAIR_WGSL: &str = "
+@vertex fn vs(@location(0) p: vec2<f32>) -> @builtin(position) vec4<f32> {
+    return vec4<f32>(p, 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4<f32> { return vec4<f32>(0.9, 0.9, 0.9, 1.0); }
+";
+
+/// Two thin bars (a "+") in NDC, kept pixel-square via `aspect`.
+fn crosshair_vertices(aspect: f32) -> Vec<[f32; 2]> {
+    let arm = 0.018;
+    let thick = 0.0022;
+    let (hx, hy) = (arm / aspect, thick);
+    let (vx, vy) = (thick / aspect, arm);
+    let quad = |x: f32, y: f32| [[-x, -y], [x, -y], [x, y], [-x, -y], [x, y], [-x, y]];
+    let mut v = Vec::new();
+    v.extend_from_slice(&quad(hx, hy));
+    v.extend_from_slice(&quad(vx, vy));
+    v
+}
+
+fn build_crosshair_pipeline(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+) -> wgpu::RenderPipeline {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("crosshair shader"),
+        source: wgpu::ShaderSource::Wgsl(CROSSHAIR_WGSL.into()),
+    });
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("crosshair layout"),
+        bind_group_layouts: &[],
+        push_constant_ranges: &[],
+    });
+    const ATTRS: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![0 => Float32x2];
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("crosshair pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: "vs",
+            buffers: &[wgpu::VertexBufferLayout {
+                array_stride: 8,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &ATTRS,
+            }],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: "fs",
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::REPLACE),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: false,
+            depth_compare: wgpu::CompareFunction::Always,
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    })
+}
+
 /// GPU + window resources, created once the event loop is `resumed`.
 struct Graphics {
     window: Arc<Window>,
@@ -69,6 +141,9 @@ struct Graphics {
     depth_view: wgpu::TextureView,
     /// Cached vertex buffer per chunk column.
     chunk_meshes: HashMap<(i32, i32), (wgpu::Buffer, u32)>,
+    crosshair_pipeline: wgpu::RenderPipeline,
+    crosshair_buffer: wgpu::Buffer,
+    crosshair_count: u32,
 }
 
 impl Graphics {
@@ -138,6 +213,15 @@ impl Graphics {
         });
         let atlas_bind_group = upload_atlas(&device, &queue, &texture_bgl, atlas);
 
+        let crosshair_pipeline = build_crosshair_pipeline(&device, config.format);
+        let crosshair_verts = crosshair_vertices(width as f32 / height as f32);
+        let crosshair_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("crosshair"),
+            contents: bytemuck::cast_slice(&crosshair_verts),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let crosshair_count = crosshair_verts.len() as u32;
+
         let depth_view = create_depth(&device, width, height);
 
         Self {
@@ -152,6 +236,9 @@ impl Graphics {
             atlas_bind_group,
             depth_view,
             chunk_meshes: HashMap::new(),
+            crosshair_pipeline,
+            crosshair_buffer,
+            crosshair_count,
         }
     }
 
@@ -239,6 +326,10 @@ impl Graphics {
                 pass.set_vertex_buffer(0, buffer.slice(..));
                 pass.draw(0..*count, 0..1);
             }
+            // Crosshair overlay (no camera/atlas bind groups).
+            pass.set_pipeline(&self.crosshair_pipeline);
+            pass.set_vertex_buffer(0, self.crosshair_buffer.slice(..));
+            pass.draw(0..self.crosshair_count, 0..1);
         }
         self.queue.submit(Some(encoder.finish()));
         frame.present();
@@ -396,6 +487,18 @@ impl ApplicationHandler for App {
                     self.keys.insert(code);
                 } else {
                     self.keys.remove(&code);
+                }
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button,
+                ..
+            } => {
+                let mut controls = self.shared.controls.lock().unwrap();
+                match button {
+                    MouseButton::Left => controls.attack = true,
+                    MouseButton::Right => controls.use_item = true,
+                    _ => {}
                 }
             }
             WindowEvent::RedrawRequested => {

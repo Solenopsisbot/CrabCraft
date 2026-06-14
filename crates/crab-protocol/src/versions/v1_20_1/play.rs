@@ -14,6 +14,7 @@ use bytes::{Buf, BufMut};
 
 use crate::error::ProtoError;
 use crate::io::{BufExt, BufMutExt};
+use crate::nbt;
 use crate::packet::{Bound, Packet, State};
 
 // ===========================================================================
@@ -399,6 +400,139 @@ impl Packet for ClientInformation {
     }
 }
 
+/// `0x1d` — block dig/break action. `status`: 0 = start, 1 = cancel, 2 =
+/// finish (creative breaks on start). `face` is the dug face (0=down..5=east).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlayerDigging {
+    pub status: i32,
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+    pub face: i8,
+    pub sequence: i32,
+}
+
+impl Packet for PlayerDigging {
+    const ID: i32 = 0x1d;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Serverbound;
+
+    fn encode<B: BufMut>(&self, dst: &mut B) -> Result<(), ProtoError> {
+        dst.put_varint(self.status);
+        dst.put_position(self.x, self.y, self.z);
+        dst.put_i8(self.face);
+        dst.put_varint(self.sequence);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(src: &mut B) -> Result<Self, ProtoError> {
+        let status = src.read_varint()?;
+        let (x, y, z) = src.read_position()?;
+        Ok(Self {
+            status,
+            x,
+            y,
+            z,
+            face: src.read_i8()?,
+            sequence: src.read_varint()?,
+        })
+    }
+}
+
+/// `0x31` — use item on a block (place). `direction` is the clicked face
+/// (0=down..5=east); `cursor` is the hit point on that face (0..1).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct UseItemOn {
+    pub hand: i32,
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+    pub direction: i32,
+    pub cursor: [f32; 3],
+    pub inside_block: bool,
+    pub sequence: i32,
+}
+
+impl Packet for UseItemOn {
+    const ID: i32 = 0x31;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Serverbound;
+
+    fn encode<B: BufMut>(&self, dst: &mut B) -> Result<(), ProtoError> {
+        dst.put_varint(self.hand);
+        dst.put_position(self.x, self.y, self.z);
+        dst.put_varint(self.direction);
+        dst.put_f32(self.cursor[0]);
+        dst.put_f32(self.cursor[1]);
+        dst.put_f32(self.cursor[2]);
+        dst.put_bool(self.inside_block);
+        dst.put_varint(self.sequence);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(src: &mut B) -> Result<Self, ProtoError> {
+        let hand = src.read_varint()?;
+        let (x, y, z) = src.read_position()?;
+        Ok(Self {
+            hand,
+            x,
+            y,
+            z,
+            direction: src.read_varint()?,
+            cursor: [src.read_f32()?, src.read_f32()?, src.read_f32()?],
+            inside_block: src.read_bool()?,
+            sequence: src.read_varint()?,
+        })
+    }
+}
+
+/// A simple item stack (no NBT) for creative slot setting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SlotItem {
+    pub item_id: i32,
+    pub count: i8,
+}
+
+/// `0x2b` — set a creative-mode inventory slot (used to hold a block to place).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SetCreativeSlot {
+    pub slot: i16,
+    pub item: Option<SlotItem>,
+}
+
+impl Packet for SetCreativeSlot {
+    const ID: i32 = 0x2b;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Serverbound;
+
+    fn encode<B: BufMut>(&self, dst: &mut B) -> Result<(), ProtoError> {
+        dst.put_i16(self.slot);
+        match self.item {
+            Some(item) => {
+                dst.put_bool(true);
+                dst.put_varint(item.item_id);
+                dst.put_i8(item.count);
+                dst.put_u8(0x00); // optionalNbt: none (TAG_End)
+            }
+            None => dst.put_bool(false),
+        }
+        Ok(())
+    }
+
+    fn decode<B: Buf>(src: &mut B) -> Result<Self, ProtoError> {
+        let slot = src.read_i16()?;
+        let item = if src.read_bool()? {
+            let item_id = src.read_varint()?;
+            let count = src.read_i8()?;
+            let _nbt = nbt::read_nbt(src)?; // optionalNbt (0x00 => End)
+            Some(SlotItem { item_id, count })
+        } else {
+            None
+        };
+        Ok(Self { slot, item })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -481,5 +615,46 @@ mod tests {
     #[test]
     fn client_information_roundtrips() {
         roundtrip(&ClientInformation::sensible_defaults());
+    }
+
+    #[test]
+    fn player_digging_roundtrips() {
+        roundtrip(&PlayerDigging {
+            status: 0,
+            x: 10,
+            y: -60,
+            z: -7,
+            face: 1,
+            sequence: 42,
+        });
+    }
+
+    #[test]
+    fn use_item_on_roundtrips() {
+        roundtrip(&UseItemOn {
+            hand: 0,
+            x: 1,
+            y: 2,
+            z: 3,
+            direction: 1,
+            cursor: [0.5, 0.5, 0.5],
+            inside_block: false,
+            sequence: 7,
+        });
+    }
+
+    #[test]
+    fn set_creative_slot_roundtrips() {
+        roundtrip(&SetCreativeSlot {
+            slot: 36,
+            item: Some(SlotItem {
+                item_id: 1,
+                count: 64,
+            }),
+        });
+        roundtrip(&SetCreativeSlot {
+            slot: 36,
+            item: None,
+        });
     }
 }

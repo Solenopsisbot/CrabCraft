@@ -214,6 +214,100 @@ pub fn collide_z(world: &World, aabb: &Aabb, dz: f64) -> f64 {
     dz
 }
 
+/// A voxel raycast hit: the solid block struck and the face it was entered
+/// through (as a normal, e.g. `[0,1,0]` = top).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RayHit {
+    pub block: [i32; 3],
+    pub face: [i32; 3],
+}
+
+impl RayHit {
+    /// The empty cell against the hit face — where a placed block would go.
+    pub fn place_position(&self) -> [i32; 3] {
+        [
+            self.block[0] + self.face[0],
+            self.block[1] + self.face[1],
+            self.block[2] + self.face[2],
+        ]
+    }
+}
+
+/// Casts a ray from `origin` along `dir` (need not be normalised) up to
+/// `max_dist` blocks, returning the first solid block hit (Amanatides–Woo DDA).
+pub fn raycast(world: &World, origin: [f64; 3], dir: [f64; 3], max_dist: f64) -> Option<RayHit> {
+    let len = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
+    if len < 1e-9 {
+        return None;
+    }
+    let d = [dir[0] / len, dir[1] / len, dir[2] / len];
+    let mut cell = [
+        origin[0].floor() as i32,
+        origin[1].floor() as i32,
+        origin[2].floor() as i32,
+    ];
+    let step = [sign(d[0]), sign(d[1]), sign(d[2])];
+    let t_delta = [inv_abs(d[0]), inv_abs(d[1]), inv_abs(d[2])];
+    let mut t_max = [
+        boundary_t(origin[0], d[0], cell[0]),
+        boundary_t(origin[1], d[1], cell[1]),
+        boundary_t(origin[2], d[2], cell[2]),
+    ];
+    let mut face = [0i32; 3];
+    let max_steps = (max_dist as i32) * 3 + 9;
+    for _ in 0..max_steps {
+        if is_solid(world, cell[0], cell[1], cell[2]) {
+            return Some(RayHit { block: cell, face });
+        }
+        // advance along the axis with the nearest voxel boundary
+        let axis = if t_max[0] <= t_max[1] && t_max[0] <= t_max[2] {
+            0
+        } else if t_max[1] <= t_max[2] {
+            1
+        } else {
+            2
+        };
+        if t_max[axis] > max_dist {
+            return None;
+        }
+        cell[axis] += step[axis];
+        t_max[axis] += t_delta[axis];
+        face = [0, 0, 0];
+        face[axis] = -step[axis];
+    }
+    None
+}
+
+fn sign(v: f64) -> i32 {
+    if v > 0.0 {
+        1
+    } else if v < 0.0 {
+        -1
+    } else {
+        0
+    }
+}
+
+fn inv_abs(v: f64) -> f64 {
+    if v.abs() < 1e-9 {
+        f64::INFINITY
+    } else {
+        (1.0 / v).abs()
+    }
+}
+
+fn boundary_t(origin: f64, dir: f64, cell: i32) -> f64 {
+    if dir.abs() < 1e-9 {
+        return f64::INFINITY;
+    }
+    let next = if dir > 0.0 {
+        f64::from(cell + 1)
+    } else {
+        f64::from(cell)
+    };
+    (next - origin) / dir
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,6 +367,28 @@ mod tests {
         }
         assert!(grounded, "should be on the ground");
         assert!((pos[1] - (-59.0)).abs() < 1e-6, "rested at y={}", pos[1]);
+    }
+
+    #[test]
+    fn raycast_hits_floor_from_above() {
+        let world = world_with_floor(-60); // block at y=-60, top at -59
+        let hit = raycast(&world, [8.5, -50.0, 8.5], [0.0, -1.0, 0.0], 20.0).unwrap();
+        assert_eq!(hit.block, [8, -60, 8]);
+        assert_eq!(hit.face, [0, 1, 0]); // entered through the top
+        assert_eq!(hit.place_position(), [8, -59, 8]);
+    }
+
+    #[test]
+    fn raycast_misses_into_open_sky() {
+        let world = world_with_floor(-60);
+        assert!(raycast(&world, [8.5, -50.0, 8.5], [0.0, 1.0, 0.0], 20.0).is_none());
+    }
+
+    #[test]
+    fn raycast_respects_max_distance() {
+        let world = world_with_floor(-60);
+        // floor is 10 blocks below; a 3-block ray shouldn't reach it
+        assert!(raycast(&world, [8.5, -50.0, 8.5], [0.0, -1.0, 0.0], 3.0).is_none());
     }
 
     #[test]

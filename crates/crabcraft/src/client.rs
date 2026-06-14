@@ -16,8 +16,8 @@ use crab_protocol::versions::v1_20_1::login::{
 };
 use crab_protocol::versions::v1_20_1::play::{
     ClientChatMessage, ClientInformation, ConfirmTeleport, KeepAlive, KeepAliveResponse,
-    PlayDisconnect, SetPlayerPosition, SetPlayerPositionRotation, SynchronizePlayerPosition,
-    SystemChat,
+    PlayDisconnect, PlayerDigging, SetCreativeSlot, SetPlayerPosition, SetPlayerPositionRotation,
+    SlotItem, SynchronizePlayerPosition, SystemChat, UseItemOn,
 };
 use crab_protocol::versions::PROTOCOL_1_20_1;
 use crab_protocol::BufExt;
@@ -57,6 +57,23 @@ pub struct Controls {
     pub yaw: f32,
     /// Look pitch in degrees (positive = down).
     pub pitch: f32,
+    /// Edge-triggered: break the targeted block (left click).
+    pub attack: bool,
+    /// Edge-triggered: place a block (right click).
+    pub use_item: bool,
+}
+
+/// Maps a face normal to the Minecraft direction enum (0=down..5=east).
+fn face_direction(face: [i32; 3]) -> i32 {
+    match face {
+        [0, -1, 0] => 0,
+        [0, 1, 0] => 1,
+        [0, 0, -1] => 2,
+        [0, 0, 1] => 3,
+        [-1, 0, 0] => 4,
+        [1, 0, 0] => 5,
+        _ => 1,
+    }
 }
 
 impl PlayerState {
@@ -249,6 +266,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let mut greeted = false;
+    let mut block_sequence: i32 = 0;
     // ~20 Hz physics + position updates, like the vanilla client.
     let tick_dt = 0.05;
     let mut pos_tick = tokio::time::interval(Duration::from_secs_f64(tick_dt));
@@ -295,6 +313,16 @@ where
                         if just_spawned {
                             tracing::info!("spawned at ({:.1}, {:.1}, {:.1})", pos.x, pos.y, pos.z);
                             conn.send(&ClientInformation::sensible_defaults()).await?;
+                            // Hold a stack of stone in hotbar slot 0 (creative) so
+                            // right-click placing has something to place.
+                            conn.send(&SetCreativeSlot {
+                                slot: 36,
+                                item: Some(SlotItem {
+                                    item_id: 1,
+                                    count: 64,
+                                }),
+                            })
+                            .await?;
                         }
                         if !greeted {
                             greeted = true;
@@ -344,6 +372,7 @@ where
                     id if id == ID_BLOCK_CHANGE => {
                         let mut body = raw.body.clone();
                         if let (Ok((bx, by, bz)), Ok(s)) = (body.read_position(), body.read_varint()) {
+                            tracing::debug!("server block_change ({bx},{by},{bz}) -> state {s}");
                             shared.world.lock().unwrap().set_block_state(bx, by, bz, s as u32);
                             mark_dirty(shared, bx >> 4, bz >> 4);
                         }
@@ -357,8 +386,68 @@ where
                 }
             }
             _ = pos_tick.tick() => {
-                let controls = *shared.controls.lock().unwrap();
+                // Read controls; consume edge-triggered click flags.
+                let (controls, do_break, do_place) = {
+                    let mut c = shared.controls.lock().unwrap();
+                    let snap = *c;
+                    c.attack = false;
+                    c.use_item = false;
+                    (snap, snap.attack, snap.use_item)
+                };
                 let snapshot = { *shared.player.lock().unwrap() };
+
+                // Break / place the targeted block.
+                if snapshot.spawned && (do_break || do_place) {
+                    let yaw = f64::from(controls.yaw).to_radians();
+                    let pitch = f64::from(controls.pitch).to_radians();
+                    let eye = [snapshot.x, snapshot.y + 1.62, snapshot.z];
+                    let dir = [
+                        -yaw.sin() * pitch.cos(),
+                        -pitch.sin(),
+                        yaw.cos() * pitch.cos(),
+                    ];
+                    let hit = crab_physics::raycast(&shared.world.lock().unwrap(), eye, dir, 5.0);
+                    if let Some(hit) = hit {
+                        let dir_enum = face_direction(hit.face);
+                        if do_break {
+                            block_sequence += 1;
+                            conn.send(&PlayerDigging {
+                                status: 0,
+                                x: hit.block[0],
+                                y: hit.block[1],
+                                z: hit.block[2],
+                                face: dir_enum as i8,
+                                sequence: block_sequence,
+                            })
+                            .await?;
+                            shared.world.lock().unwrap().set_block_state(
+                                hit.block[0],
+                                hit.block[1],
+                                hit.block[2],
+                                0,
+                            );
+                            mark_dirty(shared, hit.block[0] >> 4, hit.block[2] >> 4);
+                        }
+                        if do_place {
+                            let p = hit.place_position();
+                            block_sequence += 1;
+                            conn.send(&UseItemOn {
+                                hand: 0,
+                                x: hit.block[0],
+                                y: hit.block[1],
+                                z: hit.block[2],
+                                direction: dir_enum,
+                                cursor: [0.5, 0.5, 0.5],
+                                inside_block: false,
+                                sequence: block_sequence,
+                            })
+                            .await?;
+                            shared.world.lock().unwrap().set_block_state(p[0], p[1], p[2], 1);
+                            mark_dirty(shared, p[0] >> 4, p[2] >> 4);
+                        }
+                    }
+                }
+
                 if snapshot.spawned {
                     // Step client physics (input-driven horizontal velocity +
                     // gravity + collision) if our chunk is loaded.
