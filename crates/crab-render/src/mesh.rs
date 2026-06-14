@@ -131,6 +131,30 @@ pub fn mesh_region(world: &World, atlas: &Atlas, min: [i32; 3], max: [i32; 3]) -
     Mesh { vertices }
 }
 
+/// Builds a 36-vertex box spanning `[min, max]`, textured with `uv` (an atlas
+/// rect, e.g. a white tile) tinted by `tint`. Used for entity boxes.
+pub fn box_mesh(min: [f32; 3], max: [f32; 3], uv: [f32; 4], tint: [f32; 3]) -> Vec<Vertex> {
+    let [u0, v0, u1, v1] = uv;
+    let mut verts = Vec::with_capacity(36);
+    for face in &FACES {
+        for &ci in &[0usize, 1, 2, 0, 2, 3] {
+            let c = face.corners[ci];
+            let [cu, cv] = face.uvs[ci];
+            verts.push(Vertex {
+                position: [
+                    min[0] + c[0] * (max[0] - min[0]),
+                    min[1] + c[1] * (max[1] - min[1]),
+                    min[2] + c[2] * (max[2] - min[2]),
+                ],
+                normal: face.normal,
+                uv: [u0 + cu * (u1 - u0), v0 + cv * (v1 - v0)],
+                tint,
+            });
+        }
+    }
+    verts
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

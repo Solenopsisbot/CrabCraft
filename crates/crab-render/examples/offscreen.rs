@@ -83,7 +83,21 @@ fn main() {
         }
     }
 
-    let mesh = mesh_region(&world, &atlas, [0, -64, 0], [39, -50, 39]);
+    let mut mesh = mesh_region(&world, &atlas, [0, -64, 0], [39, -50, 39]);
+    // Two "entities" (player-ish red + mob-ish blue boxes) to verify box_mesh.
+    let w = atlas.white_uv();
+    mesh.vertices.extend(crab_render::box_mesh(
+        [34.7, -60.0, 19.7],
+        [35.3, -58.2, 20.3],
+        w,
+        [0.9, 0.3, 0.3],
+    ));
+    mesh.vertices.extend(crab_render::box_mesh(
+        [19.5, -60.0, 34.5],
+        [20.4, -58.7, 35.4],
+        w,
+        [0.3, 0.45, 0.9],
+    ));
     eprintln!("meshed {} triangles", mesh.triangle_count());
 
     let (width, height) = (1280u32, 720u32);

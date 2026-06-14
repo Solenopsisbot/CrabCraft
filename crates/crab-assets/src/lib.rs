@@ -64,6 +64,7 @@ pub struct Atlas {
     pub height: u32,
     blocks: HashMap<String, BlockModel>,
     fallback: BlockModel,
+    white_uv: [f32; 4],
 }
 
 impl Atlas {
@@ -71,6 +72,12 @@ impl Atlas {
     pub fn model(&self, block_name: &str) -> &BlockModel {
         let bare = block_name.strip_prefix("minecraft:").unwrap_or(block_name);
         self.blocks.get(bare).unwrap_or(&self.fallback)
+    }
+
+    /// UV of the solid-white tile (for tinting flat-coloured geometry like
+    /// entity boxes).
+    pub fn white_uv(&self) -> [f32; 4] {
+        self.white_uv
     }
 
     /// A trivial 1-tile white atlas where every block maps to a flat white tile.
@@ -89,6 +96,7 @@ impl Atlas {
                 faces: [white; 6],
                 textured: false,
             },
+            white_uv: [0.0, 0.0, 1.0, 1.0],
         }
     }
 }
@@ -205,6 +213,7 @@ pub fn load_block_atlas(jar_path: &Path, block_names: &[String]) -> Result<Atlas
         height: dim,
         blocks,
         fallback,
+        white_uv,
     })
 }
 

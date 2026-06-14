@@ -55,6 +55,23 @@ fn first_person_camera(
     }
 }
 
+/// Builds box vertices for every tracked entity, tinted by entity colour.
+fn entity_vertices(shared: &Shared, white_uv: [f32; 4]) -> Vec<Vertex> {
+    let entities = shared.entities.lock().unwrap();
+    let mut verts = Vec::new();
+    for e in entities.values() {
+        let hw = f64::from(e.half_width);
+        let min = [(e.x - hw) as f32, e.y as f32, (e.z - hw) as f32];
+        let max = [
+            (e.x + hw) as f32,
+            (e.y + f64::from(e.height)) as f32,
+            (e.z + hw) as f32,
+        ];
+        verts.extend(crab_render::box_mesh(min, max, white_uv, e.color));
+    }
+    verts
+}
+
 /// A tiny white "+" drawn in screen-centre NDC, depth-test disabled.
 const CROSSHAIR_WGSL: &str = "
 @vertex fn vs(@location(0) p: vec2<f32>) -> @builtin(position) vec4<f32> {
@@ -144,6 +161,8 @@ struct Graphics {
     crosshair_pipeline: wgpu::RenderPipeline,
     crosshair_buffer: wgpu::Buffer,
     crosshair_count: u32,
+    /// Per-frame entity box mesh (drawn with the block pipeline).
+    entity_buffer: Option<(wgpu::Buffer, u32)>,
 }
 
 impl Graphics {
@@ -239,7 +258,23 @@ impl Graphics {
             crosshair_pipeline,
             crosshair_buffer,
             crosshair_count,
+            entity_buffer: None,
         }
+    }
+
+    fn upload_entities(&mut self, vertices: &[Vertex]) {
+        if vertices.is_empty() {
+            self.entity_buffer = None;
+            return;
+        }
+        let buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("entities"),
+                contents: bytemuck::cast_slice(vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+        self.entity_buffer = Some((buffer, vertices.len() as u32));
     }
 
     fn resize(&mut self, width: u32, height: u32) {
@@ -323,6 +358,11 @@ impl Graphics {
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
             pass.set_bind_group(1, &self.atlas_bind_group, &[]);
             for (buffer, count) in self.chunk_meshes.values() {
+                pass.set_vertex_buffer(0, buffer.slice(..));
+                pass.draw(0..*count, 0..1);
+            }
+            // Entities (same block pipeline + camera/atlas bind groups).
+            if let Some((buffer, count)) = &self.entity_buffer {
                 pass.set_vertex_buffer(0, buffer.slice(..));
                 pass.draw(0..*count, 0..1);
             }
@@ -516,10 +556,12 @@ impl ApplicationHandler for App {
                 self.update_input(dt);
                 self.process_dirty();
 
+                let entity_verts = entity_vertices(&self.shared, self.atlas.white_uv());
                 if let Some(gfx) = self.gfx.as_mut() {
                     let aspect = gfx.aspect();
                     let eye = Vec3::new(player.x as f32, player.y as f32, player.z as f32);
                     let camera = first_person_camera(eye, self.yaw, self.pitch, aspect);
+                    gfx.upload_entities(&entity_verts);
                     gfx.render(&camera);
                 }
 

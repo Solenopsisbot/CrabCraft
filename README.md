@@ -82,8 +82,10 @@ jar (assets are loaded from your own install, never bundled):
 CRABCRAFT_JAR=/path/to/1.20.1.jar cargo run -p crabcraft -- render 127.0.0.1:25565
 ```
 
-Windowed controls: **WASD** move, **Space** jump, **arrow keys** look, **Esc**
-quit. Movement is client-physics-simulated and sent to the server.
+Windowed controls: **WASD** move · **Space** jump · **mouse** (or arrow keys)
+look · **left-click** break · **right-click** place · **Esc** quit. Movement is
+client-physics-simulated and sent to the server. (Run with `--release` for
+smooth framerates — debug builds mesh chunks slowly.)
 
 Render the bundled synthetic test world to a PNG (headless, no server needed):
 
@@ -123,11 +125,14 @@ the official server jar:
 - [x] Microsoft auth + AES encryption — join online-mode servers
 - [x] Block collision + gravity (physics)
 - [x] Texture atlas from the client jar (full-cube blocks)
-- [x] First-person player movement (WASD/jump/look), sent to the server
+- [x] First-person player movement (WASD/jump/mouse-look), sent to the server
+- [x] Block breaking + placing (raycast) with a crosshair
+- [x] Per-chunk mesh caching (only dirty chunks rebuild)
+- [x] Entity tracking + box rendering (other players/mobs)
 - [ ] Block models beyond full cubes (stairs/slabs/fences/plants), biome tint
-- [ ] Entity rendering + interpolation
+- [ ] Entity models/textures + interpolation
 - [ ] Precise per-block collision shapes (slabs/stairs/fluids)
-- [ ] HUD (hotbar/health), inventory, block break/place
+- [ ] HUD (hotbar/health bars), inventory GUI, crafting
 - [ ] More protocol versions (1.20.2+, 1.21, …) as sibling modules
 - [ ] (Far future, maybe) Forge mod support — see the note below
 

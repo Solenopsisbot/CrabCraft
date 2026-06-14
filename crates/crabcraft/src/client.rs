@@ -1,7 +1,7 @@
 //! The networking client: connects, logs in, and runs the play loop, updating
 //! shared state ([`Shared`]) that other threads (e.g. the renderer) can read.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -29,6 +29,23 @@ const ID_JOIN_GAME: i32 = 0x28;
 const ID_MAP_CHUNK: i32 = 0x24;
 const ID_UNLOAD_CHUNK: i32 = 0x1e;
 const ID_BLOCK_CHANGE: i32 = 0x0a;
+const ID_SPAWN_ENTITY: i32 = 0x01;
+const ID_SPAWN_PLAYER: i32 = 0x03;
+const ID_REL_MOVE: i32 = 0x2b;
+const ID_MOVE_LOOK: i32 = 0x2c;
+const ID_ENTITY_TELEPORT: i32 = 0x68;
+const ID_ENTITY_DESTROY: i32 = 0x3e;
+
+/// A tracked non-self entity (other player, mob, item, …) for rendering.
+#[derive(Clone, Copy, Debug)]
+pub struct Entity {
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+    pub half_width: f32,
+    pub height: f32,
+    pub color: [f32; 3],
+}
 
 /// Our current position/orientation as last told by the server.
 #[derive(Default, Clone, Copy, Debug)]
@@ -116,6 +133,8 @@ pub struct Shared {
     pub controls: Mutex<Controls>,
     /// Chunk columns whose mesh needs (re)building, drained by the renderer.
     pub dirty_chunks: Mutex<HashSet<(i32, i32)>>,
+    /// Other entities (players/mobs/...) by entity id.
+    pub entities: Mutex<HashMap<i32, Entity>>,
     /// Cleared to `false` when the session ends, so readers can stop.
     pub running: AtomicBool,
 }
@@ -127,9 +146,19 @@ impl Shared {
             player: Mutex::new(PlayerState::default()),
             controls: Mutex::new(Controls::default()),
             dirty_chunks: Mutex::new(HashSet::new()),
+            entities: Mutex::new(HashMap::new()),
             running: AtomicBool::new(true),
         }
     }
+}
+
+fn kind_color(kind: i32) -> [f32; 3] {
+    let h = (kind as u32).wrapping_mul(2_654_435_761);
+    [
+        0.4 + ((h >> 16) & 0xff) as f32 / 255.0 * 0.5,
+        0.4 + ((h >> 8) & 0xff) as f32 / 255.0 * 0.5,
+        0.4 + (h & 0xff) as f32 / 255.0 * 0.5,
+    ]
 }
 
 /// Marks a chunk and its 4 neighbours dirty (neighbours so border face-culling
@@ -283,7 +312,8 @@ where
         tokio::select! {
             biased;
             _ = &mut deadline_fut => {
-                tracing::info!("session deadline reached");
+                let entities = shared.entities.lock().unwrap().len();
+                tracing::info!(entities, "session deadline reached");
                 break;
             }
             result = conn.read_packet() => {
@@ -376,6 +406,21 @@ where
                             shared.world.lock().unwrap().set_block_state(bx, by, bz, s as u32);
                             mark_dirty(shared, bx >> 4, bz >> 4);
                         }
+                    }
+                    id if id == ID_SPAWN_ENTITY => {
+                        let _ = handle_spawn_object(&raw, shared);
+                    }
+                    id if id == ID_SPAWN_PLAYER => {
+                        let _ = handle_spawn_player(&raw, shared);
+                    }
+                    id if id == ID_REL_MOVE || id == ID_MOVE_LOOK => {
+                        let _ = handle_rel_move(&raw, shared);
+                    }
+                    id if id == ID_ENTITY_TELEPORT => {
+                        let _ = handle_entity_teleport(&raw, shared);
+                    }
+                    id if id == ID_ENTITY_DESTROY => {
+                        let _ = handle_entity_destroy(&raw, shared);
                     }
                     id if id == PlayDisconnect::ID => {
                         let d: PlayDisconnect = raw.decode()?;
@@ -538,6 +583,81 @@ fn handle_join_game(raw: &crab_net::RawPacket, shared: &Arc<Shared>) -> Result<(
     if let Some((min_y, height)) = crab_world::dimension_extent(&codec, &dimension_type) {
         *shared.world.lock().unwrap() = World::new(min_y, height);
         tracing::info!("dimension {dimension_type}: min_y={min_y} height={height}");
+    }
+    Ok(())
+}
+
+fn handle_spawn_object(raw: &crab_net::RawPacket, shared: &Arc<Shared>) -> Result<()> {
+    let mut b = raw.body.clone();
+    let id = b.read_varint()?;
+    let _uuid = b.read_uuid()?;
+    let kind = b.read_varint()?;
+    let (x, y, z) = (b.read_f64()?, b.read_f64()?, b.read_f64()?);
+    shared.entities.lock().unwrap().insert(
+        id,
+        Entity {
+            x,
+            y,
+            z,
+            half_width: 0.45,
+            height: 1.3,
+            color: kind_color(kind),
+        },
+    );
+    Ok(())
+}
+
+fn handle_spawn_player(raw: &crab_net::RawPacket, shared: &Arc<Shared>) -> Result<()> {
+    let mut b = raw.body.clone();
+    let id = b.read_varint()?;
+    let _uuid = b.read_uuid()?;
+    let (x, y, z) = (b.read_f64()?, b.read_f64()?, b.read_f64()?);
+    shared.entities.lock().unwrap().insert(
+        id,
+        Entity {
+            x,
+            y,
+            z,
+            half_width: 0.3,
+            height: 1.8,
+            color: [0.9, 0.35, 0.35],
+        },
+    );
+    Ok(())
+}
+
+/// Relative move (works for both `rel_entity_move` and `entity_move_look`;
+/// trailing look bytes are ignored).
+fn handle_rel_move(raw: &crab_net::RawPacket, shared: &Arc<Shared>) -> Result<()> {
+    let mut b = raw.body.clone();
+    let id = b.read_varint()?;
+    let (dx, dy, dz) = (b.read_i16()?, b.read_i16()?, b.read_i16()?);
+    if let Some(e) = shared.entities.lock().unwrap().get_mut(&id) {
+        e.x += f64::from(dx) / 4096.0;
+        e.y += f64::from(dy) / 4096.0;
+        e.z += f64::from(dz) / 4096.0;
+    }
+    Ok(())
+}
+
+fn handle_entity_teleport(raw: &crab_net::RawPacket, shared: &Arc<Shared>) -> Result<()> {
+    let mut b = raw.body.clone();
+    let id = b.read_varint()?;
+    let (x, y, z) = (b.read_f64()?, b.read_f64()?, b.read_f64()?);
+    if let Some(e) = shared.entities.lock().unwrap().get_mut(&id) {
+        e.x = x;
+        e.y = y;
+        e.z = z;
+    }
+    Ok(())
+}
+
+fn handle_entity_destroy(raw: &crab_net::RawPacket, shared: &Arc<Shared>) -> Result<()> {
+    let mut b = raw.body.clone();
+    let count = b.read_varint()?.max(0);
+    let mut entities = shared.entities.lock().unwrap();
+    for _ in 0..count {
+        entities.remove(&b.read_varint()?);
     }
     Ok(())
 }
