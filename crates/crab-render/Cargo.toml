@@ -1,0 +1,16 @@
+[package]
+name = "crab-render"
+description = "wgpu-based renderer for the Crabcraft world: chunk meshing and rasterization."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+crab-world.workspace = true
+crab-registry.workspace = true
+wgpu = "22"
+glam = "0.29"
+bytemuck = { version = "1", features = ["derive"] }
+pollster = "0.3"
+image = { version = "0.25", default-features = false, features = ["png"] }
