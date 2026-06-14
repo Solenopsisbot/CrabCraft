@@ -16,6 +16,7 @@ crab-net.workspace = true
 crab-world.workspace = true
 crab-render.workspace = true
 crab-auth.workspace = true
+crab-physics.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
 tracing.workspace = true

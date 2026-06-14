@@ -38,6 +38,8 @@ pub struct PlayerState {
     pub yaw: f32,
     pub pitch: f32,
     pub spawned: bool,
+    /// Velocity `[x, y, z]` for client-side physics.
+    pub vel: [f64; 3],
 }
 
 impl PlayerState {
@@ -67,6 +69,7 @@ impl PlayerState {
         } else {
             p.pitch
         };
+        self.vel = [0.0, 0.0, 0.0]; // a teleport cancels momentum
     }
 }
 
@@ -208,7 +211,9 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let mut greeted = false;
-    let mut pos_tick = tokio::time::interval(Duration::from_secs(1));
+    // ~20 Hz physics + position updates, like the vanilla client.
+    let tick_dt = 0.05;
+    let mut pos_tick = tokio::time::interval(Duration::from_secs_f64(tick_dt));
 
     let deadline_fut = async {
         match deadline {
@@ -300,9 +305,33 @@ where
                 }
             }
             _ = pos_tick.tick() => {
-                let pos = { *shared.player.lock().unwrap() };
-                if pos.spawned {
-                    conn.send(&SetPlayerPosition { x: pos.x, y: pos.y, z: pos.z, on_ground: true }).await?;
+                let snapshot = { *shared.player.lock().unwrap() };
+                if snapshot.spawned {
+                    // Step client physics (gravity + collision) if our chunk is
+                    // loaded; otherwise just hold position until it arrives.
+                    let stepped = {
+                        let world = shared.world.lock().unwrap();
+                        let (fx, fz) = (snapshot.x.floor() as i32, snapshot.z.floor() as i32);
+                        world.is_loaded(fx, fz).then(|| {
+                            crab_physics::step_player(
+                                &world,
+                                [snapshot.x, snapshot.y, snapshot.z],
+                                snapshot.vel,
+                                tick_dt,
+                            )
+                        })
+                    };
+                    let (x, y, z, on_ground) = if let Some(r) = stepped {
+                        let mut ps = shared.player.lock().unwrap();
+                        ps.x = r.position[0];
+                        ps.y = r.position[1];
+                        ps.z = r.position[2];
+                        ps.vel = r.velocity;
+                        (ps.x, ps.y, ps.z, r.on_ground)
+                    } else {
+                        (snapshot.x, snapshot.y, snapshot.z, true)
+                    };
+                    conn.send(&SetPlayerPosition { x, y, z, on_ground }).await?;
                 }
             }
         }

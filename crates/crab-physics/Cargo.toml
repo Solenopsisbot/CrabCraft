@@ -1,0 +1,12 @@
+[package]
+name = "crab-physics"
+description = "Player physics: AABB-vs-voxel collision and gravity against the world."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+crab-world.workspace = true
+crab-registry.workspace = true
+glam = "0.29"

@@ -447,6 +447,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "crab-physics"
+version = "0.0.1"
+dependencies = [
+ "crab-registry",
+ "crab-world",
+ "glam",
+]
+
+[[package]]
 name = "crab-protocol"
 version = "0.0.1"
 dependencies = [
@@ -489,6 +498,7 @@ dependencies = [
  "bytemuck",
  "crab-auth",
  "crab-net",
+ "crab-physics",
  "crab-protocol",
  "crab-render",
  "crab-world",

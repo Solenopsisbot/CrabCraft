@@ -3,14 +3,14 @@
 A Minecraft **Java Edition 1.20.1** client written from scratch in **pure Rust**.
 
 The long-term goal is a full, expandable, multi-version client that can join
-vanilla servers. Today Crabcraft is a complete *headless* client: it connects to
-1.20.1 servers, logs in, holds the connection like a real player, chats, and
-maintains an accurate in-memory world model — all verified against a real
-vanilla server. Rendering and authentication are the next milestones.
+vanilla servers. Crabcraft connects to 1.20.1 servers, logs in, holds the
+connection like a real player, simulates physics, renders the world, and
+(in online mode) authenticates with a Microsoft account over an encrypted
+connection.
 
 ## What works today
 
-Verified end-to-end against a vanilla 1.20.1 server (offline mode):
+Verified end-to-end against a vanilla 1.20.1 server (offline mode unless noted):
 
 - TCP connection, handshake, and **login** (with packet compression)
 - Staying connected: **KeepAlive**, spawn (teleport confirm), position reporting
@@ -20,8 +20,19 @@ Verified end-to-end against a vanilla 1.20.1 server (offline mode):
 - **Block registry**: resolves block-state IDs to names like
   `minecraft:grass_block` (1003 blocks)
 - **Dimension extents**: reads real `min_y`/`height` from the Join Game NBT codec
+- **Physics**: AABB-vs-voxel collision + gravity; the client is physically
+  simulated and the server accepts its movement
+- **Rendering**: a `wgpu` voxel renderer (face-culled meshing, depth, lighting)
+  with an offscreen mode and a live windowed free-fly viewer
+- **Online mode**: AES-128-CFB8 encryption + the Minecraft server hash + RSA
+  handshake, with Microsoft device-code login (see caveats below)
 
-Not yet: rendering, online-mode auth/encryption, physics/collision.
+### Verification caveats
+
+The crypto is unit-tested against known-answer vectors (NIST CFB8; the canonical
+Minecraft server-hash examples). The **windowed renderer** is compile-verified
+but needs a display to run, and the **Microsoft/Mojang online flows** are
+implemented to spec but require a real account, so they aren't exercised in CI.
 
 ## Architecture
 
@@ -32,9 +43,12 @@ side-by-side rather than by rewriting the core.
 | Crate | Responsibility |
 |-------|----------------|
 | `crab-protocol` | Wire codecs (VarInt/VarLong/String/UUID/Position), NBT, the `Packet` trait, and per-version packet definitions (`versions::v1_20_1`) |
-| `crab-net` | Async connection: length framing, the zlib compression sublayer, connection state |
+| `crab-net` | Async connection: length framing, zlib compression sublayer, AES-128-CFB8 encryption, connection state |
 | `crab-world` | Chunk/section decoding (paletted containers), the `World` block store, dimension extents |
 | `crab-registry` | Data-driven registries (generated block-state → name table) |
+| `crab-physics` | AABB-vs-voxel collision and gravity |
+| `crab-render` | `wgpu` renderer: chunk meshing + offscreen and windowed rasterization |
+| `crab-auth` | Session crypto (server hash, RSA) and Microsoft account login |
 | `crabcraft` | The client binary that wires it all together |
 
 ## Build & run
@@ -47,11 +61,20 @@ cargo test          # ~40 unit tests across the workspace
 cargo clippy --all-targets
 ```
 
-Run the client against an **offline-mode** 1.20.1 server:
+Run the client:
 
 ```sh
-cargo run -p crabcraft -- [ADDR] [USERNAME] [SECONDS]
-# defaults: 127.0.0.1:25565  Ferris  35
+cargo run -p crabcraft -- [ADDR] [USERNAME] [SECONDS]  # offline, headless
+cargo run -p crabcraft -- render [ADDR] [USERNAME]     # offline, windowed (fly around)
+cargo run -p crabcraft -- online [ADDR]                # online: Microsoft login, then join
+cargo run -p crabcraft -- render online [ADDR]         # online + windowed
+# offline defaults: 127.0.0.1:25565  Ferris  35
+```
+
+Render the bundled synthetic test world to a PNG (headless, no server needed):
+
+```sh
+cargo run -p crab-render --example offscreen -- out.png
 ```
 
 Set `RUST_LOG=crab_net=trace` (etc.) for verbose packet logging.
@@ -82,9 +105,13 @@ the official server jar:
 
 ## Roadmap
 
-- [ ] `wgpu` rendering: window, camera, chunk meshing — see the world
-- [ ] Microsoft auth + AES encryption — join online-mode servers
-- [ ] Block collision/solidity data — physics and render culling
+- [x] `wgpu` rendering: meshing, camera, offscreen + windowed
+- [x] Microsoft auth + AES encryption — join online-mode servers
+- [x] Block collision + gravity (physics)
+- [ ] Texture atlas + block models (replace flat colours)
+- [ ] Entity rendering + interpolation
+- [ ] Precise per-block collision shapes (slabs/stairs/fluids)
+- [ ] Manual player movement input (walk/jump on the live window)
 - [ ] More protocol versions (1.20.2+, 1.21, …) as sibling modules
 - [ ] (Far future, maybe) Forge mod support — see the note below
 
