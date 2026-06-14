@@ -25,6 +25,7 @@ crab-protocol = { path = "crates/crab-protocol" }
 crab-net = { path = "crates/crab-net" }
 crab-world = { path = "crates/crab-world" }
 crab-registry = { path = "crates/crab-registry" }
+crab-render = { path = "crates/crab-render" }
 
 [profile.release]
 lto = "thin"

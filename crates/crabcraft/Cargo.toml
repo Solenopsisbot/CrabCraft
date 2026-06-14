@@ -14,8 +14,13 @@ path = "src/main.rs"
 crab-protocol.workspace = true
 crab-net.workspace = true
 crab-world.workspace = true
-crab-registry.workspace = true
+crab-render.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+wgpu = "22"
+winit = "0.30"
+glam = "0.29"
+pollster = "0.3"
+bytemuck = { version = "1", features = ["derive"] }
