@@ -6,8 +6,10 @@
 //! not click-tested in the headless build environment.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::Ordering;
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crab_assets::Atlas;
 use crab_render::{
@@ -396,7 +398,9 @@ fn create_depth(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Texture
 
 struct App {
     shared: Arc<Shared>,
-    atlas: Atlas,
+    atlas: Arc<Atlas>,
+    /// Finished chunk meshes from the background mesher thread.
+    mesh_rx: Receiver<((i32, i32), Vec<Vertex>)>,
     gfx: Option<Graphics>,
     /// Look angles in degrees (Minecraft convention).
     yaw: f32,
@@ -407,10 +411,15 @@ struct App {
 }
 
 impl App {
-    fn new(shared: Arc<Shared>, atlas: Atlas) -> Self {
+    fn new(
+        shared: Arc<Shared>,
+        atlas: Arc<Atlas>,
+        mesh_rx: Receiver<((i32, i32), Vec<Vertex>)>,
+    ) -> Self {
         Self {
             shared,
             atlas,
+            mesh_rx,
             gfx: None,
             yaw: 0.0,
             pitch: 0.0,
@@ -446,34 +455,57 @@ impl App {
         controls.pitch = self.pitch;
     }
 
-    /// Rebuilds up to [`REMESH_BUDGET`] dirty chunk columns this frame.
-    fn process_dirty(&mut self) {
+    /// Uploads chunk meshes finished by the background mesher (GPU upload only;
+    /// the actual meshing happens off the render thread, so frames stay smooth).
+    fn process_meshes(&mut self) {
         let Some(gfx) = self.gfx.as_mut() else {
             return;
         };
-        // Drain a budget of dirty chunks (re-queue the rest for next frame).
+        for _ in 0..REMESH_BUDGET {
+            match self.mesh_rx.try_recv() {
+                Ok((coord, verts)) => gfx.upload_chunk(coord, &verts),
+                Err(_) => break,
+            }
+        }
+    }
+}
+
+/// Background thread: drains dirty chunks, meshes them (skipping air-only
+/// sections), and ships the vertices to the render thread. Keeps the heavy
+/// meshing work off the frame loop.
+fn mesher_loop(shared: Arc<Shared>, atlas: Arc<Atlas>, tx: Sender<((i32, i32), Vec<Vertex>)>) {
+    while shared.running.load(Ordering::SeqCst) {
         let batch: Vec<(i32, i32)> = {
-            let mut dirty = self.shared.dirty_chunks.lock().unwrap();
-            let take: Vec<_> = dirty.iter().take(REMESH_BUDGET).copied().collect();
+            let mut dirty = shared.dirty_chunks.lock().unwrap();
+            let take: Vec<_> = dirty.iter().take(8).copied().collect();
             for c in &take {
                 dirty.remove(c);
             }
             take
         };
         if batch.is_empty() {
-            return;
+            std::thread::sleep(Duration::from_millis(4));
+            continue;
         }
-
-        let world = self.shared.world.lock().unwrap();
-        let (min_y, max_y) = (world.min_y, world.min_y + world.height - 1);
         for (cx, cz) in batch {
-            let mesh = mesh_region(
-                &world,
-                &self.atlas,
-                [cx * 16, min_y, cz * 16],
-                [cx * 16 + 15, max_y, cz * 16 + 15],
-            );
-            gfx.upload_chunk((cx, cz), &mesh.vertices);
+            let verts = {
+                let world = shared.world.lock().unwrap();
+                match world.occupied_y_bounds(cx, cz) {
+                    Some((min_y, max_y)) => {
+                        mesh_region(
+                            &world,
+                            &atlas,
+                            [cx * 16, min_y, cz * 16],
+                            [cx * 16 + 15, max_y, cz * 16 + 15],
+                        )
+                        .vertices
+                    }
+                    None => Vec::new(),
+                }
+            };
+            if tx.send(((cx, cz), verts)).is_err() {
+                return;
+            }
         }
     }
 }
@@ -554,7 +586,7 @@ impl ApplicationHandler for App {
                 let dt = (now - self.last_frame).as_secs_f32().min(0.1);
                 self.last_frame = now;
                 self.update_input(dt);
-                self.process_dirty();
+                self.process_meshes();
 
                 let entity_verts = entity_vertices(&self.shared, self.atlas.white_uv());
                 if let Some(gfx) = self.gfx.as_mut() {
@@ -586,8 +618,17 @@ impl ApplicationHandler for App {
 
 /// Runs the windowed renderer (blocking; must be called on the main thread).
 pub fn run(shared: Arc<Shared>, atlas: Atlas) -> anyhow::Result<()> {
+    let atlas = Arc::new(atlas);
+    // Spawn the background mesher.
+    let (mesh_tx, mesh_rx) = std::sync::mpsc::channel();
+    {
+        let shared = Arc::clone(&shared);
+        let atlas = Arc::clone(&atlas);
+        std::thread::spawn(move || mesher_loop(shared, atlas, mesh_tx));
+    }
+
     let event_loop = EventLoop::new()?;
-    let mut app = App::new(shared, atlas);
+    let mut app = App::new(shared, atlas, mesh_rx);
     event_loop.run_app(&mut app)?;
     Ok(())
 }

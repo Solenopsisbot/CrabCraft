@@ -50,6 +50,11 @@ impl Section {
         (y << 8) | (z << 4) | x
     }
 
+    /// Whether this section is uniformly air (nothing to mesh).
+    pub fn is_air_only(&self) -> bool {
+        matches!(self.blocks, BlockStates::Uniform(0))
+    }
+
     /// Block state at in-section coordinates (each in `0..16`).
     pub fn block_state(&self, x: usize, y: usize, z: usize) -> u32 {
         match &self.blocks {

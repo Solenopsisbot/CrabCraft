@@ -92,6 +92,26 @@ impl World {
         self.chunks.contains_key(&(x >> 4, z >> 4))
     }
 
+    /// The inclusive world-Y range of a chunk column that actually contains
+    /// blocks (skipping air-only sections), or `None` if empty/unloaded. Lets
+    /// the mesher avoid scanning the whole 384-block height.
+    pub fn occupied_y_bounds(&self, cx: i32, cz: i32) -> Option<(i32, i32)> {
+        let chunk = self.chunks.get(&(cx, cz))?;
+        let mut min_i: Option<usize> = None;
+        let mut max_i = 0usize;
+        for (i, section) in chunk.sections.iter().enumerate() {
+            if !section.is_air_only() {
+                min_i.get_or_insert(i);
+                max_i = i;
+            }
+        }
+        let min_i = min_i?;
+        Some((
+            self.min_y + (min_i as i32) * 16,
+            self.min_y + (max_i as i32) * 16 + 15,
+        ))
+    }
+
     /// Block state at world coordinates, or `None` if out of range or the chunk
     /// isn't loaded.
     pub fn block_state(&self, x: i32, y: i32, z: i32) -> Option<u32> {
