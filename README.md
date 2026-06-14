@@ -50,8 +50,8 @@ side-by-side rather than by rewriting the core.
 | `crab-world` | Chunk/section decoding (paletted containers), the `World` block store, dimension extents |
 | `crab-registry` | Data-driven registries (generated block-state → name table) |
 | `crab-physics` | AABB-vs-voxel collision and gravity |
-| `crab-render` | `wgpu` renderer: chunk meshing + offscreen and windowed rasterization |
-| `crab-assets` | Loads block models/textures from a client jar; stitches the atlas |
+| `crab-render` | `wgpu` renderer: chunk meshing, entity models, offscreen + windowed |
+| `crab-assets` | Loads block + entity models/textures (jar + bedrock geometry); atlases |
 | `crab-auth` | Session crypto (server hash, RSA) and Microsoft account login |
 | `crabcraft` | The client binary that wires it all together |
 
@@ -76,11 +76,19 @@ cargo run -p crabcraft -- render online [ADDR]         # online + windowed
 ```
 
 For **textures** in windowed mode, point `CRABCRAFT_JAR` at your 1.20.1 client
-jar (assets are loaded from your own install, never bundled):
+jar, and (optionally) `CRABCRAFT_ENTITY_MODELS` at a local
+[`bedrock-samples`](https://github.com/Mojang/bedrock-samples)
+`resource_pack/models/entity` directory for **3D entity models** (assets are
+loaded from your own copies, never bundled — both are Mojang/EULA content):
 
 ```sh
-CRABCRAFT_JAR=/path/to/1.20.1.jar cargo run -p crabcraft -- render 127.0.0.1:25565
+CRABCRAFT_JAR=/path/to/1.20.1.jar \
+CRABCRAFT_ENTITY_MODELS=/path/to/bedrock-samples/resource_pack/models/entity \
+  cargo run --release -p crabcraft -- render 127.0.0.1:25565
 ```
+
+Entity geometry is parsed from Bedrock `.geo.json` and textured with the Java
+textures from your jar; entities without a loaded model render as coloured boxes.
 
 Windowed controls: **WASD** move · **Space** jump · **mouse** (or arrow keys)
 look · **left-click** break · **right-click** place · **Esc** quit. Movement is
@@ -128,11 +136,12 @@ the official server jar:
 - [x] First-person player movement (WASD/jump/mouse-look), sent to the server
 - [x] Block breaking + placing (raycast) with a crosshair
 - [x] Per-chunk mesh caching (only dirty chunks rebuild)
-- [x] Entity tracking + box rendering (other players/mobs)
+- [x] Entity tracking + 3D models (Bedrock geometry + jar textures)
+- [x] Background chunk meshing (smooth frames)
 - [ ] Block models beyond full cubes (stairs/slabs/fences/plants), biome tint
-- [ ] Entity models/textures + interpolation
+- [ ] Entity animation/interpolation + per-mob hitbox models
 - [ ] Precise per-block collision shapes (slabs/stairs/fluids)
-- [ ] HUD (hotbar/health bars), inventory GUI, crafting
+- [ ] HUD (hotbar/health bars), inventory GUI, crafting, combat, sounds
 - [ ] More protocol versions (1.20.2+, 1.21, …) as sibling modules
 - [ ] (Far future, maybe) Forge mod support — see the note below
 
