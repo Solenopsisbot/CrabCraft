@@ -1,0 +1,15 @@
+[package]
+name = "crab-net"
+description = "Async Minecraft connection: length framing, zlib compression sublayer, and the connection state machine."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+crab-protocol.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+flate2.workspace = true
+tokio.workspace = true
+tracing.workspace = true

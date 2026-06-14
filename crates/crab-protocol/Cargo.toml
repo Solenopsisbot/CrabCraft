@@ -1,0 +1,12 @@
+[package]
+name = "crab-protocol"
+description = "Version-abstracted Minecraft wire protocol: codecs, packet traits, and per-version packet definitions."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+bytes.workspace = true
+thiserror.workspace = true
+uuid.workspace = true

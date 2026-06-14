@@ -1,0 +1,12 @@
+[package]
+name = "crab-world"
+description = "In-memory Minecraft world model: chunk/section decoding (paletted containers) and block queries."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+crab-protocol.workspace = true
+bytes.workspace = true
+thiserror.workspace = true

@@ -1,0 +1,10 @@
+[package]
+name = "crab-registry"
+description = "Data-driven Minecraft registries (block-state tables, etc.) generated from minecraft-data."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# No dependencies: the tables are committed, generated Rust source.
+[dependencies]

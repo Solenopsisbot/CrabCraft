@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+authors = ["Crabcraft contributors"]
+repository = "https://github.com/anomalyco/Crabcraft"
+
+[workspace.dependencies]
+# shared third-party deps (pinned at the workspace level for consistency)
+bytes = "1"
+thiserror = "2"
+uuid = { version = "1", features = ["v4"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }
+flate2 = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# internal crates
+crab-protocol = { path = "crates/crab-protocol" }
+crab-net = { path = "crates/crab-net" }
+crab-world = { path = "crates/crab-world" }
+crab-registry = { path = "crates/crab-registry" }
+
+[profile.release]
+lto = "thin"

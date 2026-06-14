@@ -1,0 +1,485 @@
+//! Play state (protocol 763) — the subset Crabcraft needs to hold a connection
+//! and behave like a real player: keepalive, spawn/teleport, position, chat.
+//!
+//! Packet IDs below are confirmed against a live vanilla 1.20.1 server (the
+//! anchors `Login`=0x28 and `SynchronizePlayerPosition`=0x3c were observed on
+//! the wire, and the rest come from the same protocol table).
+//!
+//! > Chat note: 1.20.1 sends chat components as JSON **strings**; the move to
+//! > NBT network components only happened in 1.20.3 (protocol 765).
+
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use bytes::{Buf, BufMut};
+
+use crate::error::ProtoError;
+use crate::io::{BufExt, BufMutExt};
+use crate::packet::{Bound, Packet, State};
+
+// ===========================================================================
+// Clientbound
+// ===========================================================================
+
+/// `0x23` — server pings; we must echo the same id back promptly or get kicked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KeepAlive {
+    pub id: i64,
+}
+
+impl Packet for KeepAlive {
+    const ID: i32 = 0x23;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Clientbound;
+
+    fn encode<B: BufMut>(&self, dst: &mut B) -> Result<(), ProtoError> {
+        dst.put_i64(self.id);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(src: &mut B) -> Result<Self, ProtoError> {
+        Ok(Self {
+            id: src.read_i64()?,
+        })
+    }
+}
+
+/// `0x3c` — authoritative (re)position. Flags mark each axis as relative.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SynchronizePlayerPosition {
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+    pub yaw: f32,
+    pub pitch: f32,
+    /// Bit flags: 0x01 X, 0x02 Y, 0x04 Z, 0x08 yaw, 0x10 pitch (set => relative).
+    pub flags: u8,
+    pub teleport_id: i32,
+}
+
+impl Packet for SynchronizePlayerPosition {
+    const ID: i32 = 0x3c;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Clientbound;
+
+    fn encode<B: BufMut>(&self, dst: &mut B) -> Result<(), ProtoError> {
+        dst.put_f64(self.x);
+        dst.put_f64(self.y);
+        dst.put_f64(self.z);
+        dst.put_f32(self.yaw);
+        dst.put_f32(self.pitch);
+        dst.put_u8(self.flags);
+        dst.put_varint(self.teleport_id);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(src: &mut B) -> Result<Self, ProtoError> {
+        Ok(Self {
+            x: src.read_f64()?,
+            y: src.read_f64()?,
+            z: src.read_f64()?,
+            yaw: src.read_f32()?,
+            pitch: src.read_f32()?,
+            flags: src.read_u8()?,
+            teleport_id: src.read_varint()?,
+        })
+    }
+}
+
+/// `0x64` — a server/system chat line. `overlay` true means action-bar text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SystemChat {
+    /// JSON-encoded chat component.
+    pub content: String,
+    pub overlay: bool,
+}
+
+impl Packet for SystemChat {
+    const ID: i32 = 0x64;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Clientbound;
+
+    fn encode<B: BufMut>(&self, dst: &mut B) -> Result<(), ProtoError> {
+        dst.put_string(&self.content);
+        dst.put_bool(self.overlay);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(src: &mut B) -> Result<Self, ProtoError> {
+        Ok(Self {
+            content: src.read_string(262144)?,
+            overlay: src.read_bool()?,
+        })
+    }
+}
+
+/// `0x1a` — kicked while in-game; body is a JSON chat component.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlayDisconnect {
+    pub reason_json: String,
+}
+
+impl Packet for PlayDisconnect {
+    const ID: i32 = 0x1a;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Clientbound;
+
+    fn encode<B: BufMut>(&self, dst: &mut B) -> Result<(), ProtoError> {
+        dst.put_string(&self.reason_json);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(src: &mut B) -> Result<Self, ProtoError> {
+        Ok(Self {
+            reason_json: src.read_string(262144)?,
+        })
+    }
+}
+
+// ===========================================================================
+// Serverbound
+// ===========================================================================
+
+/// `0x12` — our reply to [`KeepAlive`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KeepAliveResponse {
+    pub id: i64,
+}
+
+impl Packet for KeepAliveResponse {
+    const ID: i32 = 0x12;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Serverbound;
+
+    fn encode<B: BufMut>(&self, dst: &mut B) -> Result<(), ProtoError> {
+        dst.put_i64(self.id);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(src: &mut B) -> Result<Self, ProtoError> {
+        Ok(Self {
+            id: src.read_i64()?,
+        })
+    }
+}
+
+/// `0x00` — acknowledge a [`SynchronizePlayerPosition`] by echoing its id.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConfirmTeleport {
+    pub teleport_id: i32,
+}
+
+impl Packet for ConfirmTeleport {
+    const ID: i32 = 0x00;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Serverbound;
+
+    fn encode<B: BufMut>(&self, dst: &mut B) -> Result<(), ProtoError> {
+        dst.put_varint(self.teleport_id);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(src: &mut B) -> Result<Self, ProtoError> {
+        Ok(Self {
+            teleport_id: src.read_varint()?,
+        })
+    }
+}
+
+/// `0x14` — report absolute position (we're standing still in this milestone).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SetPlayerPosition {
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+    pub on_ground: bool,
+}
+
+impl Packet for SetPlayerPosition {
+    const ID: i32 = 0x14;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Serverbound;
+
+    fn encode<B: BufMut>(&self, dst: &mut B) -> Result<(), ProtoError> {
+        dst.put_f64(self.x);
+        dst.put_f64(self.y);
+        dst.put_f64(self.z);
+        dst.put_bool(self.on_ground);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(src: &mut B) -> Result<Self, ProtoError> {
+        Ok(Self {
+            x: src.read_f64()?,
+            y: src.read_f64()?,
+            z: src.read_f64()?,
+            on_ground: src.read_bool()?,
+        })
+    }
+}
+
+/// `0x15` — report absolute position + look (used to confirm spawn).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SetPlayerPositionRotation {
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+    pub yaw: f32,
+    pub pitch: f32,
+    pub on_ground: bool,
+}
+
+impl Packet for SetPlayerPositionRotation {
+    const ID: i32 = 0x15;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Serverbound;
+
+    fn encode<B: BufMut>(&self, dst: &mut B) -> Result<(), ProtoError> {
+        dst.put_f64(self.x);
+        dst.put_f64(self.y);
+        dst.put_f64(self.z);
+        dst.put_f32(self.yaw);
+        dst.put_f32(self.pitch);
+        dst.put_bool(self.on_ground);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(src: &mut B) -> Result<Self, ProtoError> {
+        Ok(Self {
+            x: src.read_f64()?,
+            y: src.read_f64()?,
+            z: src.read_f64()?,
+            yaw: src.read_f32()?,
+            pitch: src.read_f32()?,
+            on_ground: src.read_bool()?,
+        })
+    }
+}
+
+/// `0x05` — send a chat message.
+///
+/// Since 1.19 this packet carries "secure chat" metadata (timestamp, salt, an
+/// optional 256-byte signature, and a last-seen-messages acknowledgement
+/// bitset). Offline-mode servers accept unsigned messages, so
+/// [`ClientChatMessage::unsigned`] fills in empty/zero values.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClientChatMessage {
+    pub message: String,
+    pub timestamp: i64,
+    pub salt: i64,
+    /// Fixed 256-byte signature, present only for signed (online-mode) chat.
+    pub signature: Option<[u8; 256]>,
+    pub message_count: i32,
+    /// Acknowledged "last seen" messages — a fixed BitSet(20) => 3 bytes.
+    pub acknowledged: [u8; 3],
+}
+
+impl ClientChatMessage {
+    /// Builds an unsigned message suitable for offline-mode servers.
+    pub fn unsigned(message: String) -> Self {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        Self {
+            message,
+            timestamp,
+            salt: 0,
+            signature: None,
+            message_count: 0,
+            acknowledged: [0; 3],
+        }
+    }
+}
+
+impl Packet for ClientChatMessage {
+    const ID: i32 = 0x05;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Serverbound;
+
+    fn encode<B: BufMut>(&self, dst: &mut B) -> Result<(), ProtoError> {
+        dst.put_string(&self.message);
+        dst.put_i64(self.timestamp);
+        dst.put_i64(self.salt);
+        dst.put_bool(self.signature.is_some());
+        if let Some(sig) = &self.signature {
+            dst.put_slice(sig); // fixed 256 bytes, not length-prefixed
+        }
+        dst.put_varint(self.message_count);
+        dst.put_slice(&self.acknowledged); // fixed 3 bytes
+        Ok(())
+    }
+
+    fn decode<B: Buf>(src: &mut B) -> Result<Self, ProtoError> {
+        let message = src.read_string(256)?;
+        let timestamp = src.read_i64()?;
+        let salt = src.read_i64()?;
+        let signature = if src.read_bool()? {
+            let bytes = src.read_bytes(256)?;
+            let arr: [u8; 256] = bytes
+                .try_into()
+                .map_err(|_| ProtoError::UnexpectedEof { needed: 0 })?;
+            Some(arr)
+        } else {
+            None
+        };
+        let message_count = src.read_varint()?;
+        let ack = src.read_bytes(3)?;
+        let acknowledged: [u8; 3] = ack
+            .try_into()
+            .map_err(|_| ProtoError::UnexpectedEof { needed: 0 })?;
+        Ok(Self {
+            message,
+            timestamp,
+            salt,
+            signature,
+            message_count,
+            acknowledged,
+        })
+    }
+}
+
+/// `0x08` — tell the server our client settings. Some servers expect this
+/// before they treat us as fully joined.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClientInformation {
+    pub locale: String,
+    pub view_distance: u8,
+    pub chat_mode: i32,
+    pub chat_colors: bool,
+    pub displayed_skin_parts: u8,
+    pub main_hand: i32,
+    pub enable_text_filtering: bool,
+    pub allow_server_listings: bool,
+}
+
+impl ClientInformation {
+    /// Reasonable defaults for a headless client.
+    pub fn sensible_defaults() -> Self {
+        Self {
+            locale: "en_us".to_string(),
+            view_distance: 8,
+            chat_mode: 0, // enabled
+            chat_colors: true,
+            displayed_skin_parts: 0x7f, // all parts
+            main_hand: 1,               // right
+            enable_text_filtering: false,
+            allow_server_listings: true,
+        }
+    }
+}
+
+impl Packet for ClientInformation {
+    const ID: i32 = 0x08;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Serverbound;
+
+    fn encode<B: BufMut>(&self, dst: &mut B) -> Result<(), ProtoError> {
+        dst.put_string(&self.locale);
+        dst.put_u8(self.view_distance);
+        dst.put_varint(self.chat_mode);
+        dst.put_bool(self.chat_colors);
+        dst.put_u8(self.displayed_skin_parts);
+        dst.put_varint(self.main_hand);
+        dst.put_bool(self.enable_text_filtering);
+        dst.put_bool(self.allow_server_listings);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(src: &mut B) -> Result<Self, ProtoError> {
+        Ok(Self {
+            locale: src.read_string(16)?,
+            view_distance: src.read_u8()?,
+            chat_mode: src.read_varint()?,
+            chat_colors: src.read_bool()?,
+            displayed_skin_parts: src.read_u8()?,
+            main_hand: src.read_varint()?,
+            enable_text_filtering: src.read_bool()?,
+            allow_server_listings: src.read_bool()?,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn roundtrip<P: Packet + PartialEq + std::fmt::Debug>(pkt: &P) {
+        let mut buf = Vec::new();
+        pkt.encode(&mut buf).unwrap();
+        let mut slice: &[u8] = &buf;
+        let decoded = P::decode(&mut slice).unwrap();
+        assert_eq!(&decoded, pkt);
+        assert_eq!(slice.remaining(), 0, "decoder must consume the whole body");
+    }
+
+    #[test]
+    fn keepalive_roundtrips() {
+        roundtrip(&KeepAlive { id: -42 });
+        roundtrip(&KeepAliveResponse { id: 9_000_000_000 });
+    }
+
+    #[test]
+    fn sync_position_roundtrips() {
+        roundtrip(&SynchronizePlayerPosition {
+            x: 1.5,
+            y: -60.0,
+            z: 2048.25,
+            yaw: 90.0,
+            pitch: -12.5,
+            flags: 0b0001_1010,
+            teleport_id: 7,
+        });
+    }
+
+    #[test]
+    fn movement_packets_roundtrip() {
+        roundtrip(&ConfirmTeleport { teleport_id: 7 });
+        roundtrip(&SetPlayerPosition {
+            x: 1.0,
+            y: 2.0,
+            z: 3.0,
+            on_ground: true,
+        });
+        roundtrip(&SetPlayerPositionRotation {
+            x: 1.0,
+            y: 2.0,
+            z: 3.0,
+            yaw: 45.0,
+            pitch: 0.0,
+            on_ground: false,
+        });
+    }
+
+    #[test]
+    fn system_chat_roundtrips() {
+        roundtrip(&SystemChat {
+            content: r#"{"text":"Ferris joined the game","color":"yellow"}"#.into(),
+            overlay: false,
+        });
+    }
+
+    #[test]
+    fn unsigned_chat_roundtrips() {
+        let pkt = ClientChatMessage::unsigned("hello world".into());
+        assert!(pkt.signature.is_none());
+        roundtrip(&pkt);
+    }
+
+    #[test]
+    fn signed_chat_roundtrips() {
+        let pkt = ClientChatMessage {
+            message: "signed".into(),
+            timestamp: 123,
+            salt: 456,
+            signature: Some([0xab; 256]),
+            message_count: 3,
+            acknowledged: [0xff, 0x0f, 0x00],
+        };
+        roundtrip(&pkt);
+    }
+
+    #[test]
+    fn client_information_roundtrips() {
+        roundtrip(&ClientInformation::sensible_defaults());
+    }
+}
