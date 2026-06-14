@@ -1,15 +1,13 @@
 //! Live windowed renderer: a winit window + wgpu surface that draws the world
-//! from [`Shared`] with a free-fly camera (WASD + QE up/down, arrow keys look).
-//!
-//! The world is re-meshed on a short timer (not every frame) around the camera,
-//! and the cached mesh is drawn each frame.
+//! from [`Shared`] as a first-person player, with cached per-chunk meshes that
+//! rebuild only when a chunk changes (drained from `Shared::dirty_chunks`).
 //!
 //! NOTE: this needs a display to actually run; it is compile-verified here but
 //! not click-tested in the headless build environment.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crab_assets::Atlas;
 use crab_render::{
@@ -18,15 +16,15 @@ use crab_render::{
 use glam::Vec3;
 use wgpu::util::DeviceExt;
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, KeyEvent, WindowEvent};
+use winit::event::{DeviceEvent, DeviceId, ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
-use winit::window::{Window, WindowId};
+use winit::window::{CursorGrabMode, Window, WindowId};
 
 use crate::client::Shared;
 
-const REMESH_INTERVAL: Duration = Duration::from_millis(300);
-const MESH_RADIUS: i32 = 48;
+/// Max chunk columns re-meshed per frame (bounds per-frame CPU during loads).
+const REMESH_BUDGET: usize = 4;
 const LOOK_SPEED: f32 = 110.0; // degrees/sec (arrow-key look)
 const EYE_HEIGHT: f32 = 1.62;
 
@@ -69,8 +67,8 @@ struct Graphics {
     camera_bind_group: wgpu::BindGroup,
     atlas_bind_group: wgpu::BindGroup,
     depth_view: wgpu::TextureView,
-    vertex_buffer: Option<wgpu::Buffer>,
-    vertex_count: u32,
+    /// Cached vertex buffer per chunk column.
+    chunk_meshes: HashMap<(i32, i32), (wgpu::Buffer, u32)>,
 }
 
 impl Graphics {
@@ -153,8 +151,7 @@ impl Graphics {
             camera_bind_group,
             atlas_bind_group,
             depth_view,
-            vertex_buffer: None,
-            vertex_count: 0,
+            chunk_meshes: HashMap::new(),
         }
     }
 
@@ -172,15 +169,20 @@ impl Graphics {
         self.config.width as f32 / self.config.height as f32
     }
 
-    fn upload_mesh(&mut self, vertices: &[Vertex]) {
-        self.vertex_count = vertices.len() as u32;
-        self.vertex_buffer = Some(self.device.create_buffer_init(
-            &wgpu::util::BufferInitDescriptor {
-                label: Some("world vertices"),
+    fn upload_chunk(&mut self, coord: (i32, i32), vertices: &[Vertex]) {
+        if vertices.is_empty() {
+            self.chunk_meshes.remove(&coord);
+            return;
+        }
+        let buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("chunk vertices"),
                 contents: bytemuck::cast_slice(vertices),
                 usage: wgpu::BufferUsages::VERTEX,
-            },
-        ));
+            });
+        self.chunk_meshes
+            .insert(coord, (buffer, vertices.len() as u32));
     }
 
     fn render(&mut self, camera: &crab_render::Camera) {
@@ -230,12 +232,12 @@ impl Graphics {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            if let Some(vb) = &self.vertex_buffer {
-                pass.set_pipeline(&self.pipeline);
-                pass.set_bind_group(0, &self.camera_bind_group, &[]);
-                pass.set_bind_group(1, &self.atlas_bind_group, &[]);
-                pass.set_vertex_buffer(0, vb.slice(..));
-                pass.draw(0..self.vertex_count, 0..1);
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &self.camera_bind_group, &[]);
+            pass.set_bind_group(1, &self.atlas_bind_group, &[]);
+            for (buffer, count) in self.chunk_meshes.values() {
+                pass.set_vertex_buffer(0, buffer.slice(..));
+                pass.draw(0..*count, 0..1);
             }
         }
         self.queue.submit(Some(encoder.finish()));
@@ -271,7 +273,6 @@ struct App {
     look_init: bool,
     keys: HashSet<KeyCode>,
     last_frame: Instant,
-    last_remesh: Instant,
 }
 
 impl App {
@@ -285,7 +286,6 @@ impl App {
             look_init: false,
             keys: HashSet::new(),
             last_frame: Instant::now(),
-            last_remesh: Instant::now() - REMESH_INTERVAL,
         }
     }
 
@@ -315,30 +315,35 @@ impl App {
         controls.pitch = self.pitch;
     }
 
-    fn maybe_remesh(&mut self) {
+    /// Rebuilds up to [`REMESH_BUDGET`] dirty chunk columns this frame.
+    fn process_dirty(&mut self) {
         let Some(gfx) = self.gfx.as_mut() else {
             return;
         };
-        if self.last_remesh.elapsed() < REMESH_INTERVAL {
+        // Drain a budget of dirty chunks (re-queue the rest for next frame).
+        let batch: Vec<(i32, i32)> = {
+            let mut dirty = self.shared.dirty_chunks.lock().unwrap();
+            let take: Vec<_> = dirty.iter().take(REMESH_BUDGET).copied().collect();
+            for c in &take {
+                dirty.remove(c);
+            }
+            take
+        };
+        if batch.is_empty() {
             return;
         }
-        self.last_remesh = Instant::now();
 
         let world = self.shared.world.lock().unwrap();
-        let player = *self.shared.player.lock().unwrap();
-        let cx = player.x.floor() as i32;
-        let cy = player.y.floor() as i32;
-        let cz = player.z.floor() as i32;
-        let min_y = world.min_y.max(cy - MESH_RADIUS);
-        let max_y = (world.min_y + world.height - 1).min(cy + MESH_RADIUS);
-        let mesh = mesh_region(
-            &world,
-            &self.atlas,
-            [cx - MESH_RADIUS, min_y, cz - MESH_RADIUS],
-            [cx + MESH_RADIUS, max_y, cz + MESH_RADIUS],
-        );
-        drop(world);
-        gfx.upload_mesh(&mesh.vertices);
+        let (min_y, max_y) = (world.min_y, world.min_y + world.height - 1);
+        for (cx, cz) in batch {
+            let mesh = mesh_region(
+                &world,
+                &self.atlas,
+                [cx * 16, min_y, cz * 16],
+                [cx * 16 + 15, max_y, cz * 16 + 15],
+            );
+            gfx.upload_chunk((cx, cz), &mesh.vertices);
+        }
     }
 }
 
@@ -351,8 +356,21 @@ impl ApplicationHandler for App {
             .with_title("Crabcraft")
             .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 720.0));
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
+        // Capture the cursor for mouse-look (Locked on macOS; Confined elsewhere).
+        let _ = window
+            .set_cursor_grab(CursorGrabMode::Locked)
+            .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined));
+        window.set_cursor_visible(false);
         self.gfx = Some(Graphics::new(window, &self.atlas));
         self.last_frame = Instant::now();
+    }
+
+    fn device_event(&mut self, _event_loop: &ActiveEventLoop, _id: DeviceId, event: DeviceEvent) {
+        if let DeviceEvent::MouseMotion { delta } = event {
+            const SENSITIVITY: f32 = 0.12; // degrees per pixel
+            self.yaw += delta.0 as f32 * SENSITIVITY;
+            self.pitch = (self.pitch + delta.1 as f32 * SENSITIVITY).clamp(-89.0, 89.0);
+        }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -393,7 +411,7 @@ impl ApplicationHandler for App {
                 let dt = (now - self.last_frame).as_secs_f32().min(0.1);
                 self.last_frame = now;
                 self.update_input(dt);
-                self.maybe_remesh();
+                self.process_dirty();
 
                 if let Some(gfx) = self.gfx.as_mut() {
                     let aspect = gfx.aspect();

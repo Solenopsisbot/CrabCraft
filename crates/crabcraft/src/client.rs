@@ -1,6 +1,7 @@
 //! The networking client: connects, logs in, and runs the play loop, updating
 //! shared state ([`Shared`]) that other threads (e.g. the renderer) can read.
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -96,6 +97,8 @@ pub struct Shared {
     pub player: Mutex<PlayerState>,
     /// Player input intent (written by the renderer).
     pub controls: Mutex<Controls>,
+    /// Chunk columns whose mesh needs (re)building, drained by the renderer.
+    pub dirty_chunks: Mutex<HashSet<(i32, i32)>>,
     /// Cleared to `false` when the session ends, so readers can stop.
     pub running: AtomicBool,
 }
@@ -106,8 +109,24 @@ impl Shared {
             world: Mutex::new(World::overworld()),
             player: Mutex::new(PlayerState::default()),
             controls: Mutex::new(Controls::default()),
+            dirty_chunks: Mutex::new(HashSet::new()),
             running: AtomicBool::new(true),
         }
+    }
+}
+
+/// Marks a chunk and its 4 neighbours dirty (neighbours so border face-culling
+/// updates when an adjacent chunk's blocks change).
+fn mark_dirty(shared: &Arc<Shared>, cx: i32, cz: i32) {
+    let mut dirty = shared.dirty_chunks.lock().unwrap();
+    for c in [
+        (cx, cz),
+        (cx + 1, cz),
+        (cx - 1, cz),
+        (cx, cz + 1),
+        (cx, cz - 1),
+    ] {
+        dirty.insert(c);
     }
 }
 
@@ -296,23 +315,37 @@ where
                     }
                     id if id == ID_MAP_CHUNK => {
                         let mut body = raw.body.clone();
-                        let mut world = shared.world.lock().unwrap();
-                        let sc = world.section_count();
-                        match Chunk::parse(&mut body, sc) {
-                            Ok(chunk) => world.load_chunk(chunk),
-                            Err(e) => tracing::warn!("chunk parse failed: {e}"),
+                        let parsed = {
+                            let mut world = shared.world.lock().unwrap();
+                            let sc = world.section_count();
+                            match Chunk::parse(&mut body, sc) {
+                                Ok(chunk) => {
+                                    let coord = (chunk.x, chunk.z);
+                                    world.load_chunk(chunk);
+                                    Some(coord)
+                                }
+                                Err(e) => {
+                                    tracing::warn!("chunk parse failed: {e}");
+                                    None
+                                }
+                            }
+                        };
+                        if let Some((cx, cz)) = parsed {
+                            mark_dirty(shared, cx, cz);
                         }
                     }
                     id if id == ID_UNLOAD_CHUNK => {
                         let mut body = raw.body.clone();
                         if let (Ok(cx), Ok(cz)) = (body.read_i32(), body.read_i32()) {
                             shared.world.lock().unwrap().unload_chunk(cx, cz);
+                            mark_dirty(shared, cx, cz);
                         }
                     }
                     id if id == ID_BLOCK_CHANGE => {
                         let mut body = raw.body.clone();
                         if let (Ok((bx, by, bz)), Ok(s)) = (body.read_position(), body.read_varint()) {
                             shared.world.lock().unwrap().set_block_state(bx, by, bz, s as u32);
+                            mark_dirty(shared, bx >> 4, bz >> 4);
                         }
                     }
                     id if id == PlayDisconnect::ID => {
