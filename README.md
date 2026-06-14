@@ -23,7 +23,10 @@ Verified end-to-end against a vanilla 1.20.1 server (offline mode unless noted):
 - **Physics**: AABB-vs-voxel collision + gravity; the client is physically
   simulated and the server accepts its movement
 - **Rendering**: a `wgpu` voxel renderer (face-culled meshing, depth, lighting)
-  with an offscreen mode and a live windowed free-fly viewer
+  with **textures loaded from your client jar** (atlas-stitched full-cube
+  models + grass/foliage tint); offscreen mode + a live windowed viewer
+- **Player control**: first-person WASD/jump/look in the window, driven through
+  the physics sim and sent to the server
 - **Online mode**: AES-128-CFB8 encryption + the Minecraft server hash + RSA
   handshake, with Microsoft device-code login (see caveats below)
 
@@ -48,6 +51,7 @@ side-by-side rather than by rewriting the core.
 | `crab-registry` | Data-driven registries (generated block-state → name table) |
 | `crab-physics` | AABB-vs-voxel collision and gravity |
 | `crab-render` | `wgpu` renderer: chunk meshing + offscreen and windowed rasterization |
+| `crab-assets` | Loads block models/textures from a client jar; stitches the atlas |
 | `crab-auth` | Session crypto (server hash, RSA) and Microsoft account login |
 | `crabcraft` | The client binary that wires it all together |
 
@@ -65,11 +69,21 @@ Run the client:
 
 ```sh
 cargo run -p crabcraft -- [ADDR] [USERNAME] [SECONDS]  # offline, headless
-cargo run -p crabcraft -- render [ADDR] [USERNAME]     # offline, windowed (fly around)
+cargo run -p crabcraft -- render [ADDR] [USERNAME]     # offline, windowed (walk around)
 cargo run -p crabcraft -- online [ADDR]                # online: Microsoft login, then join
 cargo run -p crabcraft -- render online [ADDR]         # online + windowed
 # offline defaults: 127.0.0.1:25565  Ferris  35
 ```
+
+For **textures** in windowed mode, point `CRABCRAFT_JAR` at your 1.20.1 client
+jar (assets are loaded from your own install, never bundled):
+
+```sh
+CRABCRAFT_JAR=/path/to/1.20.1.jar cargo run -p crabcraft -- render 127.0.0.1:25565
+```
+
+Windowed controls: **WASD** move, **Space** jump, **arrow keys** look, **Esc**
+quit. Movement is client-physics-simulated and sent to the server.
 
 Render the bundled synthetic test world to a PNG (headless, no server needed):
 
@@ -108,10 +122,12 @@ the official server jar:
 - [x] `wgpu` rendering: meshing, camera, offscreen + windowed
 - [x] Microsoft auth + AES encryption — join online-mode servers
 - [x] Block collision + gravity (physics)
-- [ ] Texture atlas + block models (replace flat colours)
+- [x] Texture atlas from the client jar (full-cube blocks)
+- [x] First-person player movement (WASD/jump/look), sent to the server
+- [ ] Block models beyond full cubes (stairs/slabs/fences/plants), biome tint
 - [ ] Entity rendering + interpolation
 - [ ] Precise per-block collision shapes (slabs/stairs/fluids)
-- [ ] Manual player movement input (walk/jump on the live window)
+- [ ] HUD (hotbar/health), inventory, block break/place
 - [ ] More protocol versions (1.20.2+, 1.21, …) as sibling modules
 - [ ] (Far future, maybe) Forge mod support — see the note below
 

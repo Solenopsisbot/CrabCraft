@@ -38,8 +38,24 @@ pub struct PlayerState {
     pub yaw: f32,
     pub pitch: f32,
     pub spawned: bool,
+    pub on_ground: bool,
     /// Velocity `[x, y, z]` for client-side physics.
     pub vel: [f64; 3],
+}
+
+/// Player input intent, written by the renderer and consumed by the net thread.
+#[derive(Default, Clone, Copy, Debug)]
+pub struct Controls {
+    /// Forward/back, -1..=1 (W/S).
+    pub forward: f32,
+    /// Strafe right/left, -1..=1 (D/A).
+    pub strafe: f32,
+    /// Jump held (space).
+    pub jump: bool,
+    /// Look yaw in degrees (Minecraft convention).
+    pub yaw: f32,
+    /// Look pitch in degrees (positive = down).
+    pub pitch: f32,
 }
 
 impl PlayerState {
@@ -78,6 +94,8 @@ impl PlayerState {
 pub struct Shared {
     pub world: Mutex<World>,
     pub player: Mutex<PlayerState>,
+    /// Player input intent (written by the renderer).
+    pub controls: Mutex<Controls>,
     /// Cleared to `false` when the session ends, so readers can stop.
     pub running: AtomicBool,
 }
@@ -87,6 +105,7 @@ impl Shared {
         Self {
             world: Mutex::new(World::overworld()),
             player: Mutex::new(PlayerState::default()),
+            controls: Mutex::new(Controls::default()),
             running: AtomicBool::new(true),
         }
     }
@@ -305,33 +324,76 @@ where
                 }
             }
             _ = pos_tick.tick() => {
+                let controls = *shared.controls.lock().unwrap();
                 let snapshot = { *shared.player.lock().unwrap() };
                 if snapshot.spawned {
-                    // Step client physics (gravity + collision) if our chunk is
-                    // loaded; otherwise just hold position until it arrives.
+                    // Step client physics (input-driven horizontal velocity +
+                    // gravity + collision) if our chunk is loaded.
                     let stepped = {
                         let world = shared.world.lock().unwrap();
                         let (fx, fz) = (snapshot.x.floor() as i32, snapshot.z.floor() as i32);
                         world.is_loaded(fx, fz).then(|| {
+                            // Horizontal move relative to look yaw.
+                            let yaw = f64::from(controls.yaw).to_radians();
+                            let (sin, cos) = (yaw.sin(), yaw.cos());
+                            // forward = (-sin, cos); right = (-cos, -sin)
+                            let mut vx =
+                                -sin * f64::from(controls.forward) - cos * f64::from(controls.strafe);
+                            let mut vz =
+                                cos * f64::from(controls.forward) - sin * f64::from(controls.strafe);
+                            let len = (vx * vx + vz * vz).sqrt();
+                            const WALK: f64 = 4.317;
+                            if len > 1e-6 {
+                                vx = vx / len * WALK;
+                                vz = vz / len * WALK;
+                            } else {
+                                vx = 0.0;
+                                vz = 0.0;
+                            }
+                            let mut vel = snapshot.vel;
+                            vel[0] = vx;
+                            vel[2] = vz;
+                            if controls.jump && snapshot.on_ground {
+                                vel[1] = 8.5;
+                            }
                             crab_physics::step_player(
                                 &world,
                                 [snapshot.x, snapshot.y, snapshot.z],
-                                snapshot.vel,
+                                vel,
                                 tick_dt,
                             )
                         })
                     };
-                    let (x, y, z, on_ground) = if let Some(r) = stepped {
-                        let mut ps = shared.player.lock().unwrap();
-                        ps.x = r.position[0];
-                        ps.y = r.position[1];
-                        ps.z = r.position[2];
-                        ps.vel = r.velocity;
-                        (ps.x, ps.y, ps.z, r.on_ground)
+                    if let Some(r) = stepped {
+                        let (x, y, z) = (r.position[0], r.position[1], r.position[2]);
+                        {
+                            let mut ps = shared.player.lock().unwrap();
+                            ps.x = x;
+                            ps.y = y;
+                            ps.z = z;
+                            ps.vel = r.velocity;
+                            ps.on_ground = r.on_ground;
+                            ps.yaw = controls.yaw;
+                            ps.pitch = controls.pitch;
+                        }
+                        conn.send(&SetPlayerPositionRotation {
+                            x,
+                            y,
+                            z,
+                            yaw: controls.yaw,
+                            pitch: controls.pitch,
+                            on_ground: r.on_ground,
+                        })
+                        .await?;
                     } else {
-                        (snapshot.x, snapshot.y, snapshot.z, true)
-                    };
-                    conn.send(&SetPlayerPosition { x, y, z, on_ground }).await?;
+                        conn.send(&SetPlayerPosition {
+                            x: snapshot.x,
+                            y: snapshot.y,
+                            z: snapshot.z,
+                            on_ground: snapshot.on_ground,
+                        })
+                        .await?;
+                    }
                 }
             }
         }

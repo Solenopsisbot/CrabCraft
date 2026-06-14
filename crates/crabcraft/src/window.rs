@@ -11,7 +11,10 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crab_render::{build_block_pipeline, mesh_region, CameraUniform, Vertex, DEPTH_FORMAT};
+use crab_assets::Atlas;
+use crab_render::{
+    build_block_pipeline, mesh_region, upload_atlas, CameraUniform, Vertex, DEPTH_FORMAT,
+};
 use glam::Vec3;
 use wgpu::util::DeviceExt;
 use winit::application::ApplicationHandler;
@@ -24,36 +27,33 @@ use crate::client::Shared;
 
 const REMESH_INTERVAL: Duration = Duration::from_millis(300);
 const MESH_RADIUS: i32 = 48;
-const MOVE_SPEED: f32 = 24.0; // blocks/sec
-const LOOK_SPEED: f32 = 1.6; // rad/sec
+const LOOK_SPEED: f32 = 110.0; // degrees/sec (arrow-key look)
+const EYE_HEIGHT: f32 = 1.62;
 
-/// A free-fly camera (decoupled from the player; moves the viewpoint only).
-struct FlyCam {
-    pos: Vec3,
-    yaw: f32,
-    pitch: f32,
-}
-
-impl FlyCam {
-    fn forward(&self) -> Vec3 {
-        Vec3::new(
-            self.yaw.cos() * self.pitch.cos(),
-            self.pitch.sin(),
-            self.yaw.sin() * self.pitch.cos(),
-        )
-        .normalize()
-    }
-
-    fn render_camera(&self, aspect: f32) -> crab_render::Camera {
-        crab_render::Camera {
-            eye: self.pos,
-            target: self.pos + self.forward(),
-            up: Vec3::Y,
-            aspect,
-            fovy_radians: 70f32.to_radians(),
-            znear: 0.1,
-            zfar: 1000.0,
-        }
+/// First-person camera: eye at the player's head, looking along yaw/pitch
+/// (Minecraft convention, degrees). Position comes from the player; this just
+/// holds the look angles.
+fn first_person_camera(
+    player_pos: Vec3,
+    yaw_deg: f32,
+    pitch_deg: f32,
+    aspect: f32,
+) -> crab_render::Camera {
+    let eye = player_pos + Vec3::new(0.0, EYE_HEIGHT, 0.0);
+    let (yaw, pitch) = (yaw_deg.to_radians(), pitch_deg.to_radians());
+    let dir = Vec3::new(
+        -yaw.sin() * pitch.cos(),
+        -pitch.sin(),
+        yaw.cos() * pitch.cos(),
+    );
+    crab_render::Camera {
+        eye,
+        target: eye + dir,
+        up: Vec3::Y,
+        aspect,
+        fovy_radians: 70f32.to_radians(),
+        znear: 0.1,
+        zfar: 1000.0,
     }
 }
 
@@ -67,13 +67,14 @@ struct Graphics {
     pipeline: wgpu::RenderPipeline,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
+    atlas_bind_group: wgpu::BindGroup,
     depth_view: wgpu::TextureView,
     vertex_buffer: Option<wgpu::Buffer>,
     vertex_count: u32,
 }
 
 impl Graphics {
-    fn new(window: Arc<Window>) -> Self {
+    fn new(window: Arc<Window>, atlas: &Atlas) -> Self {
         let size = window.inner_size();
         let width = size.width.max(1);
         let height = size.height.max(1);
@@ -121,7 +122,7 @@ impl Graphics {
         };
         surface.configure(&device, &config);
 
-        let (pipeline, bind_group_layout) = build_block_pipeline(&device, config.format);
+        let (pipeline, camera_bgl, texture_bgl) = build_block_pipeline(&device, config.format);
         let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("camera"),
             contents: bytemuck::cast_slice(&[CameraUniform {
@@ -131,12 +132,13 @@ impl Graphics {
         });
         let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("camera bg"),
-            layout: &bind_group_layout,
+            layout: &camera_bgl,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
                 resource: camera_buffer.as_entire_binding(),
             }],
         });
+        let atlas_bind_group = upload_atlas(&device, &queue, &texture_bgl, atlas);
 
         let depth_view = create_depth(&device, width, height);
 
@@ -149,6 +151,7 @@ impl Graphics {
             pipeline,
             camera_buffer,
             camera_bind_group,
+            atlas_bind_group,
             depth_view,
             vertex_buffer: None,
             vertex_count: 0,
@@ -180,8 +183,8 @@ impl Graphics {
         ));
     }
 
-    fn render(&mut self, cam: &FlyCam) {
-        let uniform = CameraUniform::new(&cam.render_camera(self.aspect()));
+    fn render(&mut self, camera: &crab_render::Camera) {
+        let uniform = CameraUniform::new(camera);
         self.queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[uniform]));
 
@@ -230,6 +233,7 @@ impl Graphics {
             if let Some(vb) = &self.vertex_buffer {
                 pass.set_pipeline(&self.pipeline);
                 pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                pass.set_bind_group(1, &self.atlas_bind_group, &[]);
                 pass.set_vertex_buffer(0, vb.slice(..));
                 pass.draw(0..self.vertex_count, 0..1);
             }
@@ -259,69 +263,56 @@ fn create_depth(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Texture
 
 struct App {
     shared: Arc<Shared>,
+    atlas: Atlas,
     gfx: Option<Graphics>,
-    cam: FlyCam,
-    cam_initialized: bool,
+    /// Look angles in degrees (Minecraft convention).
+    yaw: f32,
+    pitch: f32,
+    look_init: bool,
     keys: HashSet<KeyCode>,
     last_frame: Instant,
     last_remesh: Instant,
 }
 
 impl App {
-    fn new(shared: Arc<Shared>) -> Self {
+    fn new(shared: Arc<Shared>, atlas: Atlas) -> Self {
         Self {
             shared,
+            atlas,
             gfx: None,
-            cam: FlyCam {
-                pos: Vec3::new(0.0, 0.0, 0.0),
-                yaw: 0.0,
-                pitch: -0.3,
-            },
-            cam_initialized: false,
+            yaw: 0.0,
+            pitch: 0.0,
+            look_init: false,
             keys: HashSet::new(),
             last_frame: Instant::now(),
             last_remesh: Instant::now() - REMESH_INTERVAL,
         }
     }
 
-    fn update_camera(&mut self, dt: f32) {
-        let forward = self.cam.forward();
-        let right = forward.cross(Vec3::Y).normalize_or_zero();
-        let mut delta = Vec3::ZERO;
+    /// Updates look from arrow keys and publishes movement intent to the shared
+    /// `Controls` for the network thread to apply via physics.
+    fn update_input(&mut self, dt: f32) {
         let pressed = |c: KeyCode| self.keys.contains(&c);
-        if pressed(KeyCode::KeyW) {
-            delta += forward;
-        }
-        if pressed(KeyCode::KeyS) {
-            delta -= forward;
-        }
-        if pressed(KeyCode::KeyD) {
-            delta += right;
-        }
-        if pressed(KeyCode::KeyA) {
-            delta -= right;
-        }
-        if pressed(KeyCode::KeyE) || pressed(KeyCode::Space) {
-            delta += Vec3::Y;
-        }
-        if pressed(KeyCode::KeyQ) || pressed(KeyCode::ShiftLeft) {
-            delta -= Vec3::Y;
-        }
-        if delta != Vec3::ZERO {
-            self.cam.pos += delta.normalize() * MOVE_SPEED * dt;
-        }
         if pressed(KeyCode::ArrowLeft) {
-            self.cam.yaw -= LOOK_SPEED * dt;
+            self.yaw -= LOOK_SPEED * dt;
         }
         if pressed(KeyCode::ArrowRight) {
-            self.cam.yaw += LOOK_SPEED * dt;
+            self.yaw += LOOK_SPEED * dt;
         }
         if pressed(KeyCode::ArrowUp) {
-            self.cam.pitch = (self.cam.pitch + LOOK_SPEED * dt).clamp(-1.5, 1.5);
+            self.pitch = (self.pitch - LOOK_SPEED * dt).clamp(-89.0, 89.0);
         }
         if pressed(KeyCode::ArrowDown) {
-            self.cam.pitch = (self.cam.pitch - LOOK_SPEED * dt).clamp(-1.5, 1.5);
+            self.pitch = (self.pitch + LOOK_SPEED * dt).clamp(-89.0, 89.0);
         }
+
+        let axis = |pos: KeyCode, neg: KeyCode| (pressed(pos) as i32 - pressed(neg) as i32) as f32;
+        let mut controls = self.shared.controls.lock().unwrap();
+        controls.forward = axis(KeyCode::KeyW, KeyCode::KeyS);
+        controls.strafe = axis(KeyCode::KeyD, KeyCode::KeyA);
+        controls.jump = pressed(KeyCode::Space);
+        controls.yaw = self.yaw;
+        controls.pitch = self.pitch;
     }
 
     fn maybe_remesh(&mut self) {
@@ -334,13 +325,15 @@ impl App {
         self.last_remesh = Instant::now();
 
         let world = self.shared.world.lock().unwrap();
-        let cx = self.cam.pos.x.floor() as i32;
-        let cy = self.cam.pos.y.floor() as i32;
-        let cz = self.cam.pos.z.floor() as i32;
+        let player = *self.shared.player.lock().unwrap();
+        let cx = player.x.floor() as i32;
+        let cy = player.y.floor() as i32;
+        let cz = player.z.floor() as i32;
         let min_y = world.min_y.max(cy - MESH_RADIUS);
         let max_y = (world.min_y + world.height - 1).min(cy + MESH_RADIUS);
         let mesh = mesh_region(
             &world,
+            &self.atlas,
             [cx - MESH_RADIUS, min_y, cz - MESH_RADIUS],
             [cx + MESH_RADIUS, max_y, cz + MESH_RADIUS],
         );
@@ -358,7 +351,7 @@ impl ApplicationHandler for App {
             .with_title("Crabcraft")
             .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 720.0));
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
-        self.gfx = Some(Graphics::new(window));
+        self.gfx = Some(Graphics::new(window, &self.atlas));
         self.last_frame = Instant::now();
     }
 
@@ -388,28 +381,25 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::RedrawRequested => {
-                // Initialise the camera at the player's spawn the first time.
-                if !self.cam_initialized {
-                    let p = *self.shared.player.lock().unwrap();
-                    if p.spawned {
-                        self.cam.pos = Vec3::new(p.x as f32, p.y as f32 + 1.6, p.z as f32);
-                        self.cam_initialized = true;
-                    }
+                // Adopt the server's spawn look the first time we're placed.
+                let player = *self.shared.player.lock().unwrap();
+                if !self.look_init && player.spawned {
+                    self.yaw = player.yaw;
+                    self.pitch = player.pitch;
+                    self.look_init = true;
                 }
 
                 let now = Instant::now();
                 let dt = (now - self.last_frame).as_secs_f32().min(0.1);
                 self.last_frame = now;
-                self.update_camera(dt);
+                self.update_input(dt);
                 self.maybe_remesh();
 
-                let cam = FlyCam {
-                    pos: self.cam.pos,
-                    yaw: self.cam.yaw,
-                    pitch: self.cam.pitch,
-                };
                 if let Some(gfx) = self.gfx.as_mut() {
-                    gfx.render(&cam);
+                    let aspect = gfx.aspect();
+                    let eye = Vec3::new(player.x as f32, player.y as f32, player.z as f32);
+                    let camera = first_person_camera(eye, self.yaw, self.pitch, aspect);
+                    gfx.render(&camera);
                 }
 
                 if !self
@@ -432,9 +422,9 @@ impl ApplicationHandler for App {
 }
 
 /// Runs the windowed renderer (blocking; must be called on the main thread).
-pub fn run(shared: Arc<Shared>) -> anyhow::Result<()> {
+pub fn run(shared: Arc<Shared>, atlas: Atlas) -> anyhow::Result<()> {
     let event_loop = EventLoop::new()?;
-    let mut app = App::new(shared);
+    let mut app = App::new(shared, atlas);
     event_loop.run_app(&mut app)?;
     Ok(())
 }

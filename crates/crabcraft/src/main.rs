@@ -93,16 +93,47 @@ fn run_headless(addr: String, login: LoginMode, deadline: Option<Duration>) -> R
     rt.block_on(connect_and_play(&addr, login, shared, deadline))
 }
 
+/// Loads the block texture atlas from the client jar named by `CRABCRAFT_JAR`,
+/// or falls back to flat colours if unset/unreadable.
+fn load_atlas() -> crab_assets::Atlas {
+    match std::env::var("CRABCRAFT_JAR") {
+        Ok(jar) => {
+            let names: Vec<String> = crab_registry::BLOCKS_1_20_1
+                .iter()
+                .map(|b| b.name.to_string())
+                .collect();
+            match crab_assets::load_block_atlas(std::path::Path::new(&jar), &names) {
+                Ok(atlas) => {
+                    tracing::info!(width = atlas.width, "loaded textures from {jar}");
+                    atlas
+                }
+                Err(e) => {
+                    tracing::warn!("texture load failed ({e}); using flat colours");
+                    crab_assets::Atlas::debug_uniform()
+                }
+            }
+        }
+        Err(_) => {
+            tracing::info!(
+                "set CRABCRAFT_JAR=<path to 1.20.1.jar> for textures; using flat colours"
+            );
+            crab_assets::Atlas::debug_uniform()
+        }
+    }
+}
+
 /// Windowed: networking on a background thread, rendering on the main thread.
 fn run_windowed(addr: String, login: LoginMode, deadline: Option<Duration>) -> Result<()> {
     let shared = Arc::new(Shared::new());
+    let atlas = load_atlas();
     spawn_net_thread(addr, login, Arc::clone(&shared), deadline);
-    window::run(shared)
+    window::run(shared, atlas)
 }
 
 /// Windowed online: authenticate on the network thread, then connect.
 fn run_windowed_online(addr: String) -> Result<()> {
     let shared = Arc::new(Shared::new());
+    let atlas = load_atlas();
     let net_shared = Arc::clone(&shared);
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_multi_thread()
@@ -128,7 +159,7 @@ fn run_windowed_online(addr: String) -> Result<()> {
             }
         });
     });
-    window::run(shared)
+    window::run(shared, atlas)
 }
 
 fn spawn_net_thread(

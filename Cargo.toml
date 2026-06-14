@@ -28,6 +28,7 @@ crab-registry = { path = "crates/crab-registry" }
 crab-render = { path = "crates/crab-render" }
 crab-auth = { path = "crates/crab-auth" }
 crab-physics = { path = "crates/crab-physics" }
+crab-assets = { path = "crates/crab-assets" }
 
 [profile.release]
 lto = "thin"

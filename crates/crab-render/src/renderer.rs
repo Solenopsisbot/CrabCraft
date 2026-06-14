@@ -1,12 +1,12 @@
-//! Offscreen renderer: rasterizes a [`Mesh`] from a [`Camera`] into an image.
-//!
-//! Headless on purpose — no window/surface — so it runs anywhere (CI included)
-//! and produces a PNG we can inspect. The pipeline itself is window-agnostic, so
-//! a live windowed mode reuses the same shader/vertex format.
+//! Offscreen renderer: rasterizes a textured [`Mesh`] from a [`Camera`] into an
+//! image. Headless (no window/surface) so it runs anywhere and produces a PNG
+//! we can inspect; the pipeline is window-agnostic so the windowed mode reuses
+//! it.
 
 use std::error::Error;
 use std::path::Path;
 
+use crab_assets::Atlas;
 use wgpu::util::DeviceExt;
 
 use crate::camera::Camera;
@@ -30,15 +30,21 @@ impl CameraUniform {
 const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 /// Depth format used by both the offscreen and windowed pipelines.
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+/// The atlas is sampled as sRGB so PNG colours come out right.
+pub const ATLAS_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 
-/// Builds the block render pipeline and its (camera) bind-group layout for a
-/// given color target format. Shared by the offscreen and windowed renderers so
-/// the shader/vertex format/depth state live in exactly one place.
+/// Builds the block pipeline plus its camera (group 0) and texture (group 1)
+/// bind-group layouts, for a given color target format. Shared by the offscreen
+/// and windowed renderers.
 pub fn build_block_pipeline(
     device: &wgpu::Device,
     color_format: wgpu::TextureFormat,
-) -> (wgpu::RenderPipeline, wgpu::BindGroupLayout) {
-    let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+) -> (
+    wgpu::RenderPipeline,
+    wgpu::BindGroupLayout,
+    wgpu::BindGroupLayout,
+) {
+    let camera_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("camera bgl"),
         entries: &[wgpu::BindGroupLayoutEntry {
             binding: 0,
@@ -52,6 +58,28 @@ pub fn build_block_pipeline(
         }],
     });
 
+    let texture_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("atlas bgl"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    });
+
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("block shader"),
         source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
@@ -59,7 +87,7 @@ pub fn build_block_pipeline(
 
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("pipeline layout"),
-        bind_group_layouts: &[&bind_group_layout],
+        bind_group_layouts: &[&camera_bgl, &texture_bgl],
         push_constant_ranges: &[],
     });
 
@@ -99,18 +127,80 @@ pub fn build_block_pipeline(
         cache: None,
     });
 
-    (pipeline, bind_group_layout)
+    (pipeline, camera_bgl, texture_bgl)
 }
 
-/// Renders `mesh` from `camera` at `width`x`height` and writes a PNG to `path`.
+/// Uploads `atlas` as a GPU texture and builds its bind group for `layout`.
+pub fn upload_atlas(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    layout: &wgpu::BindGroupLayout,
+    atlas: &Atlas,
+) -> wgpu::BindGroup {
+    let size = wgpu::Extent3d {
+        width: atlas.width,
+        height: atlas.height,
+        depth_or_array_layers: 1,
+    };
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("atlas"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: ATLAS_FORMAT,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::ImageCopyTexture {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &atlas.rgba,
+        wgpu::ImageDataLayout {
+            offset: 0,
+            bytes_per_row: Some(atlas.width * 4),
+            rows_per_image: Some(atlas.height),
+        },
+        size,
+    );
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("atlas sampler"),
+        mag_filter: wgpu::FilterMode::Nearest,
+        min_filter: wgpu::FilterMode::Nearest,
+        mipmap_filter: wgpu::FilterMode::Nearest,
+        ..Default::default()
+    });
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("atlas bg"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(&sampler),
+            },
+        ],
+    })
+}
+
+/// Renders `mesh` (textured by `atlas`) from `camera` and writes a PNG.
 pub fn render_to_png(
     mesh: &Mesh,
+    atlas: &Atlas,
     camera: &Camera,
     width: u32,
     height: u32,
     path: &Path,
 ) -> Result<(), Box<dyn Error>> {
-    let (pixels, w, h) = pollster::block_on(render_to_rgba(mesh, camera, width, height))?;
+    let (pixels, w, h) = pollster::block_on(render_to_rgba(mesh, atlas, camera, width, height))?;
     let img = image::RgbaImage::from_raw(w, h, pixels).ok_or("render buffer wrong size")?;
     img.save(path)?;
     Ok(())
@@ -119,6 +209,7 @@ pub fn render_to_png(
 /// Core render: returns tightly-packed RGBA8 pixels (row-major, top-left origin).
 pub async fn render_to_rgba(
     mesh: &Mesh,
+    atlas: &Atlas,
     camera: &Camera,
     width: u32,
     height: u32,
@@ -127,7 +218,6 @@ pub async fn render_to_rgba(
         backends: wgpu::Backends::all(),
         ..Default::default()
     });
-
     let adapter = instance
         .request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
@@ -136,7 +226,6 @@ pub async fn render_to_rgba(
         })
         .await
         .ok_or("no suitable GPU adapter found")?;
-
     let (device, queue) = adapter
         .request_device(
             &wgpu::DeviceDescriptor {
@@ -161,16 +250,16 @@ pub async fn render_to_rgba(
         usage: wgpu::BufferUsages::UNIFORM,
     });
 
-    let (pipeline, bind_group_layout) = build_block_pipeline(&device, COLOR_FORMAT);
-
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+    let (pipeline, camera_bgl, texture_bgl) = build_block_pipeline(&device, COLOR_FORMAT);
+    let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("camera bg"),
-        layout: &bind_group_layout,
+        layout: &camera_bgl,
         entries: &[wgpu::BindGroupEntry {
             binding: 0,
             resource: camera_buffer.as_entire_binding(),
         }],
     });
+    let atlas_bind_group = upload_atlas(&device, &queue, &texture_bgl, atlas);
 
     let size = wgpu::Extent3d {
         width,
@@ -201,7 +290,6 @@ pub async fn render_to_rgba(
     });
     let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
 
-    // Output buffer: bytes-per-row must be 256-aligned.
     let bytes_per_pixel = 4u32;
     let unpadded_bpr = width * bytes_per_pixel;
     let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
@@ -244,7 +332,8 @@ pub async fn render_to_rgba(
             occlusion_query_set: None,
         });
         pass.set_pipeline(&pipeline);
-        pass.set_bind_group(0, &bind_group, &[]);
+        pass.set_bind_group(0, &camera_bind_group, &[]);
+        pass.set_bind_group(1, &atlas_bind_group, &[]);
         pass.set_vertex_buffer(0, vertex_buffer.slice(..));
         pass.draw(0..mesh.vertex_count(), 0..1);
     }
@@ -268,7 +357,6 @@ pub async fn render_to_rgba(
     );
     queue.submit(Some(encoder.finish()));
 
-    // Map and read back.
     let slice = output_buffer.slice(..);
     let (tx, rx) = std::sync::mpsc::channel();
     slice.map_async(wgpu::MapMode::Read, move |res| {

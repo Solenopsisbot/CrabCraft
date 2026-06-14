@@ -16,7 +16,8 @@ pub mod mesh;
 pub mod renderer;
 
 pub use camera::Camera;
-pub use mesh::{block_color, mesh_region, Mesh, Vertex};
+pub use mesh::{mesh_region, Mesh, Vertex};
 pub use renderer::{
-    build_block_pipeline, render_to_png, render_to_rgba, CameraUniform, DEPTH_FORMAT,
+    build_block_pipeline, render_to_png, render_to_rgba, upload_atlas, CameraUniform, ATLAS_FORMAT,
+    DEPTH_FORMAT,
 };
