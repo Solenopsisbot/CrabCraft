@@ -13,3 +13,4 @@ thiserror.workspace = true
 flate2.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+aes = "0.8"

@@ -5,6 +5,7 @@ use bytes::Bytes;
 use crab_protocol::{Bound, BufExt, BufMutExt, Packet, State};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+use crate::crypt::Aes128Cfb8;
 use crate::error::NetError;
 use crate::frame::{self, RawPacket, MAX_FRAME_LEN};
 
@@ -16,23 +17,42 @@ const NO_COMPRESSION: i32 = -1;
 /// Generic over `S` so we can drive it with a real [`tokio::net::TcpStream`] in
 /// production and an in-memory [`tokio::io::duplex`] pipe in tests (and, later,
 /// an encrypting wrapper).
-#[derive(Debug)]
 pub struct Connection<S> {
     stream: S,
     state: State,
     /// Compression threshold in bytes, or [`NO_COMPRESSION`] when disabled.
     threshold: i32,
+    /// Outbound AES-128-CFB8 stream (online mode only).
+    encryptor: Option<Aes128Cfb8>,
+    /// Inbound AES-128-CFB8 stream (online mode only).
+    decryptor: Option<Aes128Cfb8>,
 }
 
 impl<S> Connection<S> {
     /// Wraps an existing stream. Starts in [`State::Handshaking`] with
-    /// compression disabled.
+    /// compression and encryption disabled.
     pub fn new(stream: S) -> Self {
         Self {
             stream,
             state: State::Handshaking,
             threshold: NO_COMPRESSION,
+            encryptor: None,
+            decryptor: None,
         }
+    }
+
+    /// Enables AES-128-CFB8 encryption (both directions) using the shared
+    /// secret negotiated during the login encryption handshake. Call this
+    /// immediately after sending the (plaintext) Encryption Response; every
+    /// byte after that is encrypted.
+    pub fn enable_encryption(&mut self, secret: [u8; 16]) {
+        self.encryptor = Some(Aes128Cfb8::new(&secret));
+        self.decryptor = Some(Aes128Cfb8::new(&secret));
+    }
+
+    /// Whether the connection is currently encrypted.
+    pub fn encryption_enabled(&self) -> bool {
+        self.encryptor.is_some()
     }
 
     /// Current protocol state.
@@ -99,16 +119,45 @@ where
             body_len = body.len(),
             wire_len = out.len(),
             compressed = self.compression_enabled(),
+            encrypted = self.encryption_enabled(),
             "send"
         );
+
+        if let Some(enc) = &mut self.encryptor {
+            enc.encrypt(&mut out);
+        }
         self.stream.write_all(&out).await?;
         self.stream.flush().await?;
         Ok(())
     }
 
-    /// Reads exactly one packet, transparently undoing framing and compression.
+    /// Reads one VarInt off the stream, decrypting each byte if encryption is on.
+    /// Used for the length prefix, which we must decrypt before we know how many
+    /// frame bytes follow.
+    async fn read_varint_prefix(&mut self) -> Result<i32, NetError> {
+        let mut result: i32 = 0;
+        let mut shift: u32 = 0;
+        loop {
+            let mut byte = [0u8; 1];
+            self.stream.read_exact(&mut byte).await?;
+            if let Some(dec) = &mut self.decryptor {
+                dec.decrypt(&mut byte);
+            }
+            result |= i32::from(byte[0] & 0x7F) << shift;
+            if byte[0] & 0x80 == 0 {
+                return Ok(result);
+            }
+            shift += 7;
+            if shift >= 32 {
+                return Err(NetError::VarIntTooLong);
+            }
+        }
+    }
+
+    /// Reads exactly one packet, transparently undoing encryption, framing, and
+    /// compression (in that order).
     pub async fn read_packet(&mut self) -> Result<RawPacket, NetError> {
-        let frame_len = frame::read_varint_async(&mut self.stream).await?;
+        let frame_len = self.read_varint_prefix().await?;
         if frame_len < 0 || frame_len as usize > MAX_FRAME_LEN {
             return Err(NetError::FrameTooLarge {
                 len: frame_len.max(0) as usize,
@@ -118,6 +167,9 @@ where
 
         let mut frame_buf = vec![0u8; frame_len as usize];
         self.stream.read_exact(&mut frame_buf).await?;
+        if let Some(dec) = &mut self.decryptor {
+            dec.decrypt(&mut frame_buf);
+        }
 
         let payload = if self.threshold >= 0 {
             let mut slice: &[u8] = &frame_buf;
@@ -215,6 +267,40 @@ mod tests {
         let pkt = sample_handshake("tiny");
         client.send(&pkt).await.unwrap();
 
+        let raw = server.read_packet().await.unwrap();
+        assert_eq!(raw.decode::<Handshake>().unwrap(), pkt);
+    }
+
+    #[tokio::test]
+    async fn encrypted_frame_roundtrip() {
+        let (a, b) = tokio::io::duplex(4096);
+        let mut client = Connection::new(a);
+        let mut server = Connection::new(b);
+        let secret = [0x42u8; 16];
+        client.enable_encryption(secret);
+        server.enable_encryption(secret);
+        assert!(client.encryption_enabled());
+
+        let pkt = sample_handshake("encrypted.example.net");
+        client.send(&pkt).await.unwrap();
+
+        let raw = server.read_packet().await.unwrap();
+        assert_eq!(raw.decode::<Handshake>().unwrap(), pkt);
+    }
+
+    #[tokio::test]
+    async fn encrypted_and_compressed_roundtrip() {
+        let (a, b) = tokio::io::duplex(8192);
+        let mut client = Connection::new(a);
+        let mut server = Connection::new(b);
+        let secret = [0x99u8; 16];
+        client.enable_encryption(secret);
+        server.enable_encryption(secret);
+        client.set_compression(0);
+        server.set_compression(0);
+
+        let pkt = sample_handshake(&"z".repeat(200));
+        client.send(&pkt).await.unwrap();
         let raw = server.read_packet().await.unwrap();
         assert_eq!(raw.decode::<Handshake>().unwrap(), pkt);
     }

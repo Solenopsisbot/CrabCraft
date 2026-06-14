@@ -15,9 +15,11 @@
 //! this code.
 
 pub mod connection;
+pub mod crypt;
 pub mod error;
 pub mod frame;
 
 pub use connection::Connection;
+pub use crypt::Aes128Cfb8;
 pub use error::NetError;
 pub use frame::RawPacket;

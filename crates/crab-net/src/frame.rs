@@ -5,7 +5,6 @@ use std::io::{Read, Write};
 
 use bytes::Bytes;
 use crab_protocol::Packet;
-use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::error::NetError;
 
@@ -33,27 +32,6 @@ impl RawPacket {
     pub fn decode<P: Packet>(&self) -> Result<P, NetError> {
         let mut body = self.body.clone();
         Ok(P::decode(&mut body)?)
-    }
-}
-
-/// Reads a length-prefix VarInt directly off an async stream, one byte at a
-/// time (we can't know how many bytes the VarInt occupies up front).
-pub(crate) async fn read_varint_async<R>(reader: &mut R) -> Result<i32, NetError>
-where
-    R: AsyncRead + Unpin,
-{
-    let mut result: i32 = 0;
-    let mut shift: u32 = 0;
-    loop {
-        let byte = reader.read_u8().await?;
-        result |= i32::from(byte & 0x7F) << shift;
-        if byte & 0x80 == 0 {
-            return Ok(result);
-        }
-        shift += 7;
-        if shift >= 32 {
-            return Err(NetError::VarIntTooLong);
-        }
     }
 }
 

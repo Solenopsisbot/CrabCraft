@@ -113,6 +113,34 @@ impl Packet for EncryptionRequest {
     }
 }
 
+/// Serverbound `0x01`: reply to [`EncryptionRequest`] with the RSA-encrypted
+/// shared secret and verify token. Sent in plaintext; everything after it is
+/// AES-encrypted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EncryptionResponse {
+    pub shared_secret: Vec<u8>,
+    pub verify_token: Vec<u8>,
+}
+
+impl Packet for EncryptionResponse {
+    const ID: i32 = 0x01;
+    const STATE: State = State::Login;
+    const BOUND: Bound = Bound::Serverbound;
+
+    fn encode<B: BufMut>(&self, dst: &mut B) -> Result<(), ProtoError> {
+        dst.put_byte_array(&self.shared_secret);
+        dst.put_byte_array(&self.verify_token);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(src: &mut B) -> Result<Self, ProtoError> {
+        Ok(Self {
+            shared_secret: src.read_byte_array()?,
+            verify_token: src.read_byte_array()?,
+        })
+    }
+}
+
 /// Clientbound `0x02`: login accepted. After this the connection is in Play.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LoginSuccess {
@@ -244,6 +272,19 @@ mod tests {
         pkt.encode(&mut buf).unwrap();
         let mut slice: &[u8] = &buf;
         assert_eq!(LoginSuccess::decode(&mut slice).unwrap(), pkt);
+        assert_eq!(slice.remaining(), 0);
+    }
+
+    #[test]
+    fn encryption_response_roundtrips() {
+        let pkt = EncryptionResponse {
+            shared_secret: vec![1, 2, 3, 4, 5, 6, 7, 8],
+            verify_token: vec![9, 8, 7],
+        };
+        let mut buf = Vec::new();
+        pkt.encode(&mut buf).unwrap();
+        let mut slice: &[u8] = &buf;
+        assert_eq!(EncryptionResponse::decode(&mut slice).unwrap(), pkt);
         assert_eq!(slice.remaining(), 0);
     }
 

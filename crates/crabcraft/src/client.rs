@@ -10,7 +10,8 @@ use crab_net::Connection;
 use crab_protocol::packet::{Packet, State};
 use crab_protocol::versions::v1_20_1::handshake::{Handshake, NextState};
 use crab_protocol::versions::v1_20_1::login::{
-    EncryptionRequest, LoginDisconnect, LoginStart, LoginSuccess, SetCompression,
+    EncryptionRequest, EncryptionResponse, LoginDisconnect, LoginStart, LoginSuccess,
+    SetCompression,
 };
 use crab_protocol::versions::v1_20_1::play::{
     ClientChatMessage, ClientInformation, ConfirmTeleport, KeepAlive, KeepAliveResponse,
@@ -94,28 +95,44 @@ impl Default for Shared {
     }
 }
 
-/// Connects to `addr`, logs in as `username` (offline mode), and runs the play
-/// loop, updating `shared`. Runs until `deadline` elapses (if given) or the
-/// server disconnects us. Always clears `shared.running` on exit.
+/// How to authenticate: offline (just a name) or online (a real account
+/// session, enabling the encryption handshake).
+pub enum LoginMode {
+    Offline { username: String },
+    Online(crab_auth::Session),
+}
+
+/// Connects to `addr`, logs in per `login`, and runs the play loop, updating
+/// `shared`. Runs until `deadline` elapses (if given) or the server
+/// disconnects us. Always clears `shared.running` on exit.
 pub async fn connect_and_play(
     addr: &str,
-    username: &str,
+    login: LoginMode,
     shared: Arc<Shared>,
     deadline: Option<Duration>,
 ) -> Result<()> {
-    let result = run_inner(addr, username, &shared, deadline).await;
+    let result = run_inner(addr, &login, &shared, deadline).await;
     shared.running.store(false, Ordering::SeqCst);
     result
 }
 
 async fn run_inner(
     addr: &str,
-    username: &str,
+    login: &LoginMode,
     shared: &Arc<Shared>,
     deadline: Option<Duration>,
 ) -> Result<()> {
     let (host, port) = split_host_port(addr);
-    tracing::info!(server = %addr, %username, "connecting");
+    let (name, uuid) = match login {
+        LoginMode::Offline { username } => (username.clone(), None),
+        LoginMode::Online(session) => (session.username.clone(), Some(session.uuid)),
+    };
+    let session = match login {
+        LoginMode::Online(session) => Some(session),
+        LoginMode::Offline { .. } => None,
+    };
+    tracing::info!(server = %addr, username = %name, online = session.is_some(), "connecting");
+
     let mut conn = Connection::connect(addr)
         .await
         .with_context(|| format!("failed to connect to {addr}"))?;
@@ -129,8 +146,8 @@ async fn run_inner(
     .await?;
     conn.set_state(State::Login);
     conn.send(&LoginStart {
-        name: username.to_string(),
-        uuid: None,
+        name: name.clone(),
+        uuid,
     })
     .await?;
 
@@ -143,7 +160,26 @@ async fn run_inner(
                 conn.set_compression(pkt.threshold);
             }
             id if id == EncryptionRequest::ID => {
-                bail!("server is online-mode (EncryptionRequest); auth not implemented yet");
+                let req: EncryptionRequest = raw.decode()?;
+                let Some(session) = session else {
+                    bail!("server is online-mode but no account session; run in online mode");
+                };
+                // Negotiate the shared secret, prove session ownership to Mojang,
+                // then send the RSA-encrypted response and switch on AES.
+                let secret = crab_auth::random_shared_secret();
+                let hash = crab_auth::server_hash(&req.server_id, &secret, &req.public_key);
+                crab_auth::join_server(&session.access_token, session.uuid, &hash)
+                    .await
+                    .context("sessionserver join")?;
+                let enc_secret = crab_auth::encrypt_to_server(&req.public_key, &secret)?;
+                let enc_token = crab_auth::encrypt_to_server(&req.public_key, &req.verify_token)?;
+                conn.send(&EncryptionResponse {
+                    shared_secret: enc_secret,
+                    verify_token: enc_token,
+                })
+                .await?;
+                conn.enable_encryption(secret);
+                tracing::info!("encryption enabled (online mode)");
             }
             id if id == LoginDisconnect::ID => {
                 let pkt: LoginDisconnect = raw.decode()?;
@@ -159,7 +195,7 @@ async fn run_inner(
         }
     }
 
-    play_loop(&mut conn, username, shared, deadline).await
+    play_loop(&mut conn, &name, shared, deadline).await
 }
 
 async fn play_loop<S>(
