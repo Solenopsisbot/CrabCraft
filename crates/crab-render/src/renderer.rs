@@ -137,13 +137,32 @@ pub fn upload_atlas(
     layout: &wgpu::BindGroupLayout,
     atlas: &Atlas,
 ) -> wgpu::BindGroup {
+    upload_texture(
+        device,
+        queue,
+        layout,
+        &atlas.rgba,
+        atlas.width,
+        atlas.height,
+    )
+}
+
+/// Uploads raw RGBA8 pixels as a GPU texture and builds its bind group.
+pub fn upload_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    layout: &wgpu::BindGroupLayout,
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+) -> wgpu::BindGroup {
     let size = wgpu::Extent3d {
-        width: atlas.width,
-        height: atlas.height,
+        width,
+        height,
         depth_or_array_layers: 1,
     };
     let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("atlas"),
+        label: Some("texture"),
         size,
         mip_level_count: 1,
         sample_count: 1,
@@ -159,11 +178,11 @@ pub fn upload_atlas(
             origin: wgpu::Origin3d::ZERO,
             aspect: wgpu::TextureAspect::All,
         },
-        &atlas.rgba,
+        rgba,
         wgpu::ImageDataLayout {
             offset: 0,
-            bytes_per_row: Some(atlas.width * 4),
-            rows_per_image: Some(atlas.height),
+            bytes_per_row: Some(width * 4),
+            rows_per_image: Some(height),
         },
         size,
     );
@@ -191,16 +210,21 @@ pub fn upload_atlas(
     })
 }
 
-/// Renders `mesh` (textured by `atlas`) from `camera` and writes a PNG.
+/// Renders `mesh` (textured by the given RGBA texture) from `camera` to a PNG.
+#[allow(clippy::too_many_arguments)]
 pub fn render_to_png(
     mesh: &Mesh,
-    atlas: &Atlas,
+    tex_rgba: &[u8],
+    tex_w: u32,
+    tex_h: u32,
     camera: &Camera,
     width: u32,
     height: u32,
     path: &Path,
 ) -> Result<(), Box<dyn Error>> {
-    let (pixels, w, h) = pollster::block_on(render_to_rgba(mesh, atlas, camera, width, height))?;
+    let (pixels, w, h) = pollster::block_on(render_to_rgba(
+        mesh, tex_rgba, tex_w, tex_h, camera, width, height,
+    ))?;
     let img = image::RgbaImage::from_raw(w, h, pixels).ok_or("render buffer wrong size")?;
     img.save(path)?;
     Ok(())
@@ -209,7 +233,9 @@ pub fn render_to_png(
 /// Core render: returns tightly-packed RGBA8 pixels (row-major, top-left origin).
 pub async fn render_to_rgba(
     mesh: &Mesh,
-    atlas: &Atlas,
+    tex_rgba: &[u8],
+    tex_w: u32,
+    tex_h: u32,
     camera: &Camera,
     width: u32,
     height: u32,
@@ -259,7 +285,7 @@ pub async fn render_to_rgba(
             resource: camera_buffer.as_entire_binding(),
         }],
     });
-    let atlas_bind_group = upload_atlas(&device, &queue, &texture_bgl, atlas);
+    let atlas_bind_group = upload_texture(&device, &queue, &texture_bgl, tex_rgba, tex_w, tex_h);
 
     let size = wgpu::Extent3d {
         width,

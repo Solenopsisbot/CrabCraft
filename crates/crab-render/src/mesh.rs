@@ -155,6 +155,130 @@ pub fn box_mesh(min: [f32; 3], max: [f32; 3], uv: [f32; 4], tint: [f32; 3]) -> V
     verts
 }
 
+fn push_quad(verts: &mut Vec<Vertex>, c: [[f32; 3]; 4], normal: [f32; 3], uv: [[f32; 2]; 4]) {
+    for &i in &[0usize, 1, 2, 0, 2, 3] {
+        verts.push(Vertex {
+            position: c[i],
+            normal,
+            uv: uv[i],
+            tint: [1.0, 1.0, 1.0],
+        });
+    }
+}
+
+/// Builds a 3D mesh for a Bedrock entity geometry (rest pose), positioned with
+/// feet at `offset`. Cubes are in texture-pixel/16 = block units; each face is
+/// box-UV-mapped into the entity texture.
+pub fn entity_mesh(geo: &crab_assets::EntityGeometry, offset: [f32; 3]) -> Vec<Vertex> {
+    let (tw, th) = (geo.texture_width.max(1.0), geo.texture_height.max(1.0));
+    // pixel rect (x0,y0,x1,y1) -> normalized UV corners [TL, TR, BR, BL]
+    let uvr = |x0: f32, y0: f32, x1: f32, y1: f32| {
+        [
+            [x0 / tw, y0 / th],
+            [x1 / tw, y0 / th],
+            [x1 / tw, y1 / th],
+            [x0 / tw, y1 / th],
+        ]
+    };
+    let mut verts = Vec::new();
+    for cube in &geo.cubes {
+        let o = cube.origin;
+        let s = cube.size;
+        // Bedrock model space -> world: /16, X negated (Bedrock/Java mirror), + feet offset.
+        let to_world = |px: f32, py: f32, pz: f32| {
+            [
+                -px / 16.0 + offset[0],
+                py / 16.0 + offset[1],
+                pz / 16.0 + offset[2],
+            ]
+        };
+        let (x0, y0, z0) = (o[0], o[1], o[2]);
+        let (x1, y1, z1) = (o[0] + s[0], o[1] + s[1], o[2] + s[2]);
+        // After X negation, the -X corner is x1 and +X is x0; corners labelled by world axis.
+        let (u, v) = (cube.uv[0], cube.uv[1]);
+        let (sx, sy, sz) = (s[0], s[1], s[2]);
+
+        // +Z (front/south)
+        push_quad(
+            &mut verts,
+            [
+                to_world(x0, y1, z1),
+                to_world(x1, y1, z1),
+                to_world(x1, y0, z1),
+                to_world(x0, y0, z1),
+            ],
+            [0.0, 0.0, 1.0],
+            uvr(u + sz, v + sz, u + sz + sx, v + sz + sy),
+        );
+        // -Z (back/north)
+        push_quad(
+            &mut verts,
+            [
+                to_world(x1, y1, z0),
+                to_world(x0, y1, z0),
+                to_world(x0, y0, z0),
+                to_world(x1, y0, z0),
+            ],
+            [0.0, 0.0, -1.0],
+            uvr(
+                u + 2.0 * sz + sx,
+                v + sz,
+                u + 2.0 * sz + 2.0 * sx,
+                v + sz + sy,
+            ),
+        );
+        // +X (east) — world +X is model -X (negated), so it uses model x0 plane
+        push_quad(
+            &mut verts,
+            [
+                to_world(x0, y1, z0),
+                to_world(x0, y1, z1),
+                to_world(x0, y0, z1),
+                to_world(x0, y0, z0),
+            ],
+            [1.0, 0.0, 0.0],
+            uvr(u, v + sz, u + sz, v + sz + sy),
+        );
+        // -X (west)
+        push_quad(
+            &mut verts,
+            [
+                to_world(x1, y1, z1),
+                to_world(x1, y1, z0),
+                to_world(x1, y0, z0),
+                to_world(x1, y0, z1),
+            ],
+            [-1.0, 0.0, 0.0],
+            uvr(u + sz + sx, v + sz, u + 2.0 * sz + sx, v + sz + sy),
+        );
+        // +Y (top)
+        push_quad(
+            &mut verts,
+            [
+                to_world(x1, y1, z0),
+                to_world(x0, y1, z0),
+                to_world(x0, y1, z1),
+                to_world(x1, y1, z1),
+            ],
+            [0.0, 1.0, 0.0],
+            uvr(u + sz, v, u + sz + sx, v + sz),
+        );
+        // -Y (bottom)
+        push_quad(
+            &mut verts,
+            [
+                to_world(x1, y0, z1),
+                to_world(x0, y0, z1),
+                to_world(x0, y0, z0),
+                to_world(x1, y0, z0),
+            ],
+            [0.0, -1.0, 0.0],
+            uvr(u + sz + sx, v, u + sz + 2.0 * sx, v + sz),
+        );
+    }
+    verts
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

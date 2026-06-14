@@ -113,7 +113,9 @@ fn main() {
 
     render_to_png(
         &mesh,
-        &atlas,
+        &atlas.rgba,
+        atlas.width,
+        atlas.height,
         &camera,
         width,
         height,
