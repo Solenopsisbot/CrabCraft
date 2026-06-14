@@ -11,9 +11,10 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crab_assets::Atlas;
+use crab_assets::{Atlas, EntityAtlas};
 use crab_render::{
-    build_block_pipeline, mesh_region, upload_atlas, CameraUniform, Vertex, DEPTH_FORMAT,
+    box_mesh, build_block_pipeline, entity_mesh, mesh_region, upload_atlas, upload_texture,
+    CameraUniform, Vertex, DEPTH_FORMAT,
 };
 use glam::Vec3;
 use wgpu::util::DeviceExt;
@@ -57,21 +58,47 @@ fn first_person_camera(
     }
 }
 
-/// Builds box vertices for every tracked entity, tinted by entity colour.
-fn entity_vertices(shared: &Shared, white_uv: [f32; 4]) -> Vec<Vertex> {
+/// Builds vertices for tracked entities, split into (box, model): entities with
+/// a loaded 3D model go in `model` (entity atlas), the rest in `box` (block
+/// atlas white tile + colour).
+fn build_entity_meshes(
+    shared: &Shared,
+    atlas: &Atlas,
+    entity_atlas: &EntityAtlas,
+) -> (Vec<Vertex>, Vec<Vertex>) {
     let entities = shared.entities.lock().unwrap();
-    let mut verts = Vec::new();
+    let white = atlas.white_uv();
+    let dims = [entity_atlas.width as f32, entity_atlas.height as f32];
+    let (mut box_v, mut model_v) = (Vec::new(), Vec::new());
     for e in entities.values() {
-        let hw = f64::from(e.half_width);
-        let min = [(e.x - hw) as f32, e.y as f32, (e.z - hw) as f32];
-        let max = [
-            (e.x + hw) as f32,
-            (e.y + f64::from(e.height)) as f32,
-            (e.z + hw) as f32,
-        ];
-        verts.extend(crab_render::box_mesh(min, max, white_uv, e.color));
+        if let Some(m) = entity_atlas.models.get(&e.type_id) {
+            model_v.extend(entity_mesh(
+                &m.geo,
+                [e.x as f32, e.y as f32, e.z as f32],
+                [m.atlas_x, m.atlas_y],
+                dims,
+            ));
+        } else {
+            let hw = f64::from(e.half_width);
+            let min = [(e.x - hw) as f32, e.y as f32, (e.z - hw) as f32];
+            let max = [
+                (e.x + hw) as f32,
+                (e.y + f64::from(e.height)) as f32,
+                (e.z + hw) as f32,
+            ];
+            box_v.extend(box_mesh(min, max, white, box_color(e.type_id)));
+        }
     }
-    verts
+    (box_v, model_v)
+}
+
+fn box_color(type_id: i32) -> [f32; 3] {
+    let h = (type_id as u32).wrapping_mul(2_654_435_761);
+    [
+        0.4 + ((h >> 16) & 0xff) as f32 / 255.0 * 0.5,
+        0.4 + ((h >> 8) & 0xff) as f32 / 255.0 * 0.5,
+        0.4 + (h & 0xff) as f32 / 255.0 * 0.5,
+    ]
 }
 
 /// A tiny white "+" drawn in screen-centre NDC, depth-test disabled.
@@ -163,12 +190,16 @@ struct Graphics {
     crosshair_pipeline: wgpu::RenderPipeline,
     crosshair_buffer: wgpu::Buffer,
     crosshair_count: u32,
-    /// Per-frame entity box mesh (drawn with the block pipeline).
-    entity_buffer: Option<(wgpu::Buffer, u32)>,
+    /// Entity texture atlas (for 3D entity models).
+    entity_atlas_bind_group: wgpu::BindGroup,
+    /// Per-frame box mesh for entities lacking a model (block atlas texture).
+    box_entity_buffer: Option<(wgpu::Buffer, u32)>,
+    /// Per-frame 3D model mesh for entities with a model (entity atlas texture).
+    model_entity_buffer: Option<(wgpu::Buffer, u32)>,
 }
 
 impl Graphics {
-    fn new(window: Arc<Window>, atlas: &Atlas) -> Self {
+    fn new(window: Arc<Window>, atlas: &Atlas, entity_atlas: &EntityAtlas) -> Self {
         let size = window.inner_size();
         let width = size.width.max(1);
         let height = size.height.max(1);
@@ -233,6 +264,14 @@ impl Graphics {
             }],
         });
         let atlas_bind_group = upload_atlas(&device, &queue, &texture_bgl, atlas);
+        let entity_atlas_bind_group = upload_texture(
+            &device,
+            &queue,
+            &texture_bgl,
+            &entity_atlas.rgba,
+            entity_atlas.width,
+            entity_atlas.height,
+        );
 
         let crosshair_pipeline = build_crosshair_pipeline(&device, config.format);
         let crosshair_verts = crosshair_vertices(width as f32 / height as f32);
@@ -260,23 +299,24 @@ impl Graphics {
             crosshair_pipeline,
             crosshair_buffer,
             crosshair_count,
-            entity_buffer: None,
+            entity_atlas_bind_group,
+            box_entity_buffer: None,
+            model_entity_buffer: None,
         }
     }
 
-    fn upload_entities(&mut self, vertices: &[Vertex]) {
+    fn make_vertex_buffer(&self, vertices: &[Vertex]) -> Option<(wgpu::Buffer, u32)> {
         if vertices.is_empty() {
-            self.entity_buffer = None;
-            return;
+            return None;
         }
         let buffer = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("entities"),
+                label: Some("entity vertices"),
                 contents: bytemuck::cast_slice(vertices),
                 usage: wgpu::BufferUsages::VERTEX,
             });
-        self.entity_buffer = Some((buffer, vertices.len() as u32));
+        Some((buffer, vertices.len() as u32))
     }
 
     fn resize(&mut self, width: u32, height: u32) {
@@ -363,8 +403,14 @@ impl Graphics {
                 pass.set_vertex_buffer(0, buffer.slice(..));
                 pass.draw(0..*count, 0..1);
             }
-            // Entities (same block pipeline + camera/atlas bind groups).
-            if let Some((buffer, count)) = &self.entity_buffer {
+            // Box entities (no model) — block atlas still bound at group 1.
+            if let Some((buffer, count)) = &self.box_entity_buffer {
+                pass.set_vertex_buffer(0, buffer.slice(..));
+                pass.draw(0..*count, 0..1);
+            }
+            // 3D model entities — rebind group 1 to the entity texture atlas.
+            if let Some((buffer, count)) = &self.model_entity_buffer {
+                pass.set_bind_group(1, &self.entity_atlas_bind_group, &[]);
                 pass.set_vertex_buffer(0, buffer.slice(..));
                 pass.draw(0..*count, 0..1);
             }
@@ -399,6 +445,7 @@ fn create_depth(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Texture
 struct App {
     shared: Arc<Shared>,
     atlas: Arc<Atlas>,
+    entity_atlas: Arc<EntityAtlas>,
     /// Finished chunk meshes from the background mesher thread.
     mesh_rx: Receiver<((i32, i32), Vec<Vertex>)>,
     gfx: Option<Graphics>,
@@ -414,11 +461,13 @@ impl App {
     fn new(
         shared: Arc<Shared>,
         atlas: Arc<Atlas>,
+        entity_atlas: Arc<EntityAtlas>,
         mesh_rx: Receiver<((i32, i32), Vec<Vertex>)>,
     ) -> Self {
         Self {
             shared,
             atlas,
+            entity_atlas,
             mesh_rx,
             gfx: None,
             yaw: 0.0,
@@ -524,7 +573,7 @@ impl ApplicationHandler for App {
             .set_cursor_grab(CursorGrabMode::Locked)
             .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined));
         window.set_cursor_visible(false);
-        self.gfx = Some(Graphics::new(window, &self.atlas));
+        self.gfx = Some(Graphics::new(window, &self.atlas, &self.entity_atlas));
         self.last_frame = Instant::now();
     }
 
@@ -588,12 +637,14 @@ impl ApplicationHandler for App {
                 self.update_input(dt);
                 self.process_meshes();
 
-                let entity_verts = entity_vertices(&self.shared, self.atlas.white_uv());
+                let (box_v, model_v) =
+                    build_entity_meshes(&self.shared, &self.atlas, &self.entity_atlas);
                 if let Some(gfx) = self.gfx.as_mut() {
                     let aspect = gfx.aspect();
                     let eye = Vec3::new(player.x as f32, player.y as f32, player.z as f32);
                     let camera = first_person_camera(eye, self.yaw, self.pitch, aspect);
-                    gfx.upload_entities(&entity_verts);
+                    gfx.box_entity_buffer = gfx.make_vertex_buffer(&box_v);
+                    gfx.model_entity_buffer = gfx.make_vertex_buffer(&model_v);
                     gfx.render(&camera);
                 }
 
@@ -617,8 +668,9 @@ impl ApplicationHandler for App {
 }
 
 /// Runs the windowed renderer (blocking; must be called on the main thread).
-pub fn run(shared: Arc<Shared>, atlas: Atlas) -> anyhow::Result<()> {
+pub fn run(shared: Arc<Shared>, atlas: Atlas, entity_atlas: EntityAtlas) -> anyhow::Result<()> {
     let atlas = Arc::new(atlas);
+    let entity_atlas = Arc::new(entity_atlas);
     // Spawn the background mesher.
     let (mesh_tx, mesh_rx) = std::sync::mpsc::channel();
     {
@@ -628,7 +680,7 @@ pub fn run(shared: Arc<Shared>, atlas: Atlas) -> anyhow::Result<()> {
     }
 
     let event_loop = EventLoop::new()?;
-    let mut app = App::new(shared, atlas, mesh_rx);
+    let mut app = App::new(shared, atlas, entity_atlas, mesh_rx);
     event_loop.run_app(&mut app)?;
     Ok(())
 }

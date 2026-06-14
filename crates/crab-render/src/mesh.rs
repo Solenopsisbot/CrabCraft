@@ -166,18 +166,26 @@ fn push_quad(verts: &mut Vec<Vertex>, c: [[f32; 3]; 4], normal: [f32; 3], uv: [[
     }
 }
 
-/// Builds a 3D mesh for a Bedrock entity geometry (rest pose), positioned with
-/// feet at `offset`. Cubes are in texture-pixel/16 = block units; each face is
-/// box-UV-mapped into the entity texture.
-pub fn entity_mesh(geo: &crab_assets::EntityGeometry, offset: [f32; 3]) -> Vec<Vertex> {
-    let (tw, th) = (geo.texture_width.max(1.0), geo.texture_height.max(1.0));
-    // pixel rect (x0,y0,x1,y1) -> normalized UV corners [TL, TR, BR, BL]
+/// Builds a 3D mesh for a Bedrock entity geometry (rest pose), feet at `offset`.
+///
+/// The entity's texture occupies the rectangle at `uv_origin` (pixels) within a
+/// texture of size `uv_size` (pixels) — pass `([0,0], [tex_w, tex_h])` for a
+/// dedicated texture, or the atlas placement for a shared entity atlas.
+pub fn entity_mesh(
+    geo: &crab_assets::EntityGeometry,
+    offset: [f32; 3],
+    uv_origin: [f32; 2],
+    uv_size: [f32; 2],
+) -> Vec<Vertex> {
+    let (sw, sh) = (uv_size[0].max(1.0), uv_size[1].max(1.0));
+    let (ox, oy) = (uv_origin[0], uv_origin[1]);
+    // pixel rect (x0,y0,x1,y1) within the entity texture -> normalized atlas UV
     let uvr = |x0: f32, y0: f32, x1: f32, y1: f32| {
         [
-            [x0 / tw, y0 / th],
-            [x1 / tw, y0 / th],
-            [x1 / tw, y1 / th],
-            [x0 / tw, y1 / th],
+            [(ox + x0) / sw, (oy + y0) / sh],
+            [(ox + x1) / sw, (oy + y0) / sh],
+            [(ox + x1) / sw, (oy + y1) / sh],
+            [(ox + x0) / sw, (oy + y1) / sh],
         ]
     };
     let mut verts = Vec::new();

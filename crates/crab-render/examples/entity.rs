@@ -27,7 +27,12 @@ fn main() {
         crab_assets::load_entity_texture(std::path::Path::new(&jar), &name).expect("texture");
 
     let mesh = Mesh {
-        vertices: entity_mesh(&geo, [0.0, 0.0, 0.0]),
+        vertices: entity_mesh(
+            &geo,
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0],
+            [geo.texture_width, geo.texture_height],
+        ),
     };
 
     let (w, h) = (800u32, 800u32);

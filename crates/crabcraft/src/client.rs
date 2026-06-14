@@ -44,7 +44,8 @@ pub struct Entity {
     pub z: f64,
     pub half_width: f32,
     pub height: f32,
-    pub color: [f32; 3],
+    /// Entity-type registry id (122 = player); used to pick a model/colour.
+    pub type_id: i32,
 }
 
 /// Our current position/orientation as last told by the server.
@@ -150,15 +151,6 @@ impl Shared {
             running: AtomicBool::new(true),
         }
     }
-}
-
-fn kind_color(kind: i32) -> [f32; 3] {
-    let h = (kind as u32).wrapping_mul(2_654_435_761);
-    [
-        0.4 + ((h >> 16) & 0xff) as f32 / 255.0 * 0.5,
-        0.4 + ((h >> 8) & 0xff) as f32 / 255.0 * 0.5,
-        0.4 + (h & 0xff) as f32 / 255.0 * 0.5,
-    ]
 }
 
 /// Marks a chunk and its 4 neighbours dirty (neighbours so border face-culling
@@ -593,15 +585,18 @@ fn handle_spawn_object(raw: &crab_net::RawPacket, shared: &Arc<Shared>) -> Resul
     let _uuid = b.read_uuid()?;
     let kind = b.read_varint()?;
     let (x, y, z) = (b.read_f64()?, b.read_f64()?, b.read_f64()?);
+    let (half_width, height) = crab_registry::entity_def(kind as u32)
+        .map(|d| (d.width / 2.0, d.height))
+        .unwrap_or((0.45, 1.3));
     shared.entities.lock().unwrap().insert(
         id,
         Entity {
             x,
             y,
             z,
-            half_width: 0.45,
-            height: 1.3,
-            color: kind_color(kind),
+            half_width,
+            height,
+            type_id: kind,
         },
     );
     Ok(())
@@ -620,7 +615,7 @@ fn handle_spawn_player(raw: &crab_net::RawPacket, shared: &Arc<Shared>) -> Resul
             z,
             half_width: 0.3,
             height: 1.8,
-            color: [0.9, 0.35, 0.35],
+            type_id: 122, // "player"
         },
     );
     Ok(())

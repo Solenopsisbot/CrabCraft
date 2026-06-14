@@ -122,18 +122,51 @@ fn load_atlas() -> crab_assets::Atlas {
     }
 }
 
+/// Loads 3D entity models + textures: geometry from `CRABCRAFT_ENTITY_MODELS`
+/// (a bedrock-samples `models/entity` dir) and textures from `CRABCRAFT_JAR`.
+/// Returns an empty atlas (entities render as boxes) if either is unset.
+fn load_entity_atlas() -> crab_assets::EntityAtlas {
+    let (Ok(jar), Ok(dir)) = (
+        std::env::var("CRABCRAFT_JAR"),
+        std::env::var("CRABCRAFT_ENTITY_MODELS"),
+    ) else {
+        tracing::info!(
+            "set CRABCRAFT_ENTITY_MODELS=<bedrock-samples .../resource_pack/models/entity> \
+             for 3D entity models; using boxes"
+        );
+        return crab_assets::load_entity_atlas(
+            std::path::Path::new(""),
+            std::path::Path::new(""),
+            &[],
+        );
+    };
+    let types: Vec<(i32, String)> = crab_registry::ENTITIES_1_20_1
+        .iter()
+        .map(|e| (e.id as i32, e.name.to_string()))
+        .collect();
+    let atlas = crab_assets::load_entity_atlas(
+        std::path::Path::new(&jar),
+        std::path::Path::new(&dir),
+        &types,
+    );
+    tracing::info!(models = atlas.models.len(), "loaded entity models");
+    atlas
+}
+
 /// Windowed: networking on a background thread, rendering on the main thread.
 fn run_windowed(addr: String, login: LoginMode, deadline: Option<Duration>) -> Result<()> {
     let shared = Arc::new(Shared::new());
     let atlas = load_atlas();
+    let entity_atlas = load_entity_atlas();
     spawn_net_thread(addr, login, Arc::clone(&shared), deadline);
-    window::run(shared, atlas)
+    window::run(shared, atlas, entity_atlas)
 }
 
 /// Windowed online: authenticate on the network thread, then connect.
 fn run_windowed_online(addr: String) -> Result<()> {
     let shared = Arc::new(Shared::new());
     let atlas = load_atlas();
+    let entity_atlas = load_entity_atlas();
     let net_shared = Arc::clone(&shared);
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_multi_thread()
@@ -159,7 +192,7 @@ fn run_windowed_online(addr: String) -> Result<()> {
             }
         });
     });
-    window::run(shared, atlas)
+    window::run(shared, atlas, entity_atlas)
 }
 
 fn spawn_net_thread(

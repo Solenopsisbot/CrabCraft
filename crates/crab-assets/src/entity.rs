@@ -12,6 +12,7 @@
 //! These geometry files are Mojang assets (EULA) and are **not** bundled; they
 //! are loaded from a user-provided directory at runtime.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
 use std::path::Path;
@@ -131,6 +132,86 @@ pub fn load_entity_texture(jar_path: &Path, name: &str) -> Option<(Vec<u8>, u32,
         }
     }
     None
+}
+
+/// One entity model placed in the shared entity atlas.
+#[derive(Clone, Debug)]
+pub struct EntityModelEntry {
+    pub geo: EntityGeometry,
+    /// Top-left of this entity's texture within the atlas (pixels).
+    pub atlas_x: f32,
+    pub atlas_y: f32,
+}
+
+/// A stitched atlas of entity textures plus the geometry + placement per type.
+pub struct EntityAtlas {
+    pub rgba: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub models: HashMap<i32, EntityModelEntry>,
+}
+
+/// Loads geometry (from `models_dir`) + textures (from the jar) for the given
+/// `(type_id, name)` list, stitching the textures into one atlas. Types whose
+/// geometry or texture is missing are simply skipped (rendered as boxes).
+pub fn load_entity_atlas(
+    jar_path: &Path,
+    models_dir: &Path,
+    types: &[(i32, String)],
+) -> EntityAtlas {
+    let mut loaded: Vec<(i32, EntityGeometry, Vec<u8>, u32, u32)> = Vec::new();
+    let (mut max_w, mut max_h) = (1u32, 1u32);
+    for (id, name) in types {
+        if let (Some(geo), Some((rgba, w, h))) = (
+            load_geometry(models_dir, name),
+            load_entity_texture(jar_path, name),
+        ) {
+            max_w = max_w.max(w);
+            max_h = max_h.max(h);
+            loaded.push((*id, geo, rgba, w, h));
+        }
+    }
+    if loaded.is_empty() {
+        return EntityAtlas {
+            rgba: vec![0; 4],
+            width: 1,
+            height: 1,
+            models: HashMap::new(),
+        };
+    }
+
+    let cols = (loaded.len() as f64).sqrt().ceil() as u32;
+    let rows = (loaded.len() as u32).div_ceil(cols);
+    let (aw, ah) = (cols * max_w, rows * max_h);
+    let mut rgba = vec![0u8; (aw * ah * 4) as usize];
+    let mut models = HashMap::new();
+
+    for (i, (id, geo, tex, w, h)) in loaded.into_iter().enumerate() {
+        let (col, row) = (i as u32 % cols, i as u32 / cols);
+        let (ox, oy) = (col * max_w, row * max_h);
+        for y in 0..h {
+            for x in 0..w {
+                let src = ((y * w + x) * 4) as usize;
+                let dst = (((oy + y) * aw + (ox + x)) * 4) as usize;
+                rgba[dst..dst + 4].copy_from_slice(&tex[src..src + 4]);
+            }
+        }
+        models.insert(
+            id,
+            EntityModelEntry {
+                geo,
+                atlas_x: ox as f32,
+                atlas_y: oy as f32,
+            },
+        );
+    }
+
+    EntityAtlas {
+        rgba,
+        width: aw,
+        height: ah,
+        models,
+    }
 }
 
 fn arr3(v: Option<&Value>) -> Option<[f32; 3]> {

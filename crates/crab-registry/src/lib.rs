@@ -12,8 +12,34 @@
 //! versions become sibling generated modules selected by protocol number.
 
 mod blocks_1_20_1;
+mod entities_1_20_1;
 
 pub use blocks_1_20_1::BLOCKS_1_20_1;
+pub use entities_1_20_1::ENTITIES_1_20_1;
+
+/// An entity type and its default hitbox size.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EntityDef {
+    pub id: u32,
+    pub name: &'static str,
+    pub width: f32,
+    pub height: f32,
+}
+
+/// Looks up an entity type by its registry id.
+#[must_use]
+pub fn entity_def(id: u32) -> Option<&'static EntityDef> {
+    ENTITIES_1_20_1
+        .binary_search_by_key(&id, |e| e.id)
+        .ok()
+        .map(|i| &ENTITIES_1_20_1[i])
+}
+
+/// Entity name (e.g. `"cow"`) for a type id.
+#[must_use]
+pub fn entity_name(id: u32) -> Option<&'static str> {
+    entity_def(id).map(|e| e.name)
+}
 
 /// A block and the contiguous, disjoint range of global block-state IDs it owns.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

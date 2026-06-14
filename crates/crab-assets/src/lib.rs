@@ -25,7 +25,10 @@ mod model;
 use model::{resolve, ElementJson, Resolved};
 
 pub mod entity;
-pub use entity::{load_entity_texture, load_geometry, parse_geometry, Cube, EntityGeometry};
+pub use entity::{
+    load_entity_atlas, load_entity_texture, load_geometry, parse_geometry, Cube, EntityAtlas,
+    EntityGeometry, EntityModelEntry,
+};
 
 /// Error type for asset loading.
 #[derive(Debug, thiserror::Error)]
