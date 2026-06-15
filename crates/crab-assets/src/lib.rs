@@ -4,11 +4,11 @@
 //! (your own install — assets are never bundled with Crabcraft) and stitches a
 //! texture atlas for the renderer.
 //!
-//! Scope: the common **full-cube** blocks (stone, dirt, grass, logs, planks,
-//! ores, wool, …) are resolved to per-face atlas textures. Non-cube models
-//! (stairs, slabs, fences, plants, glass panes, fluids) fall back to a flat
-//! per-block colour. This covers the vast majority of what terrain looks like;
-//! full arbitrary-model support is a later refinement.
+//! Scope: **full-cube** blocks resolve to per-face atlas textures. Blocks with
+//! `elements` (slabs, stairs, plants, lanterns, …) resolve to element geometry
+//! ([`ElementData`]) — their default model only, since blockstate variant /
+//! multipart selection (fences, walls, rotated stairs) isn't parsed yet, so
+//! those still fall back to a flat cube.
 //!
 //! Model resolution follows vanilla: walk the `parent` chain, merge `textures`
 //! maps (child wins), take the deepest `elements`, then resolve each face's
@@ -62,6 +62,37 @@ pub struct BlockModel {
     pub textured: bool,
 }
 
+/// One face of a model element, prepared for the mesher.
+#[derive(Clone, Copy, Debug)]
+pub struct ElementFace {
+    /// Atlas sub-rect `[u0, v0, u1, v1]` this face samples.
+    pub uv: [f32; 4],
+    pub tint: [f32; 3],
+    /// Neighbour face index (0..6, `crab-render` order) that hides this face
+    /// when occupied by a full cube, or `None` to always draw.
+    pub cull: Option<u8>,
+}
+
+/// An element rotation about one axis, in 0..16 model space.
+#[derive(Clone, Copy, Debug)]
+pub struct ElementRotation {
+    pub origin: [f32; 3],
+    /// 0 = X, 1 = Y, 2 = Z.
+    pub axis: u8,
+    pub angle: f32,
+    pub rescale: bool,
+}
+
+/// One cuboid of a non-full-cube block model, in 0..16 model space. Faces are
+/// in `crab-render` order (+X, -X, +Y, -Y, +Z, -Z); `None` = absent.
+#[derive(Clone, Debug)]
+pub struct ElementData {
+    pub from: [f32; 3],
+    pub to: [f32; 3],
+    pub rotation: Option<ElementRotation>,
+    pub faces: [Option<ElementFace>; 6],
+}
+
 /// A stitched texture atlas plus per-block face lookups.
 pub struct Atlas {
     /// RGBA8 atlas pixels, row-major.
@@ -69,8 +100,11 @@ pub struct Atlas {
     pub width: u32,
     pub height: u32,
     blocks: HashMap<String, BlockModel>,
+    non_cube: HashMap<String, Vec<ElementData>>,
     fallback: BlockModel,
     white_uv: [f32; 4],
+    /// When true (the debug atlas), every block is treated as a full cube.
+    assume_cube: bool,
 }
 
 impl Atlas {
@@ -78,6 +112,22 @@ impl Atlas {
     pub fn model(&self, block_name: &str) -> &BlockModel {
         let bare = block_name.strip_prefix("minecraft:").unwrap_or(block_name);
         self.blocks.get(bare).unwrap_or(&self.fallback)
+    }
+
+    /// Element geometry for a non-full-cube block (slabs, stairs, plants, …),
+    /// or `None` if the block is a full cube / flat fallback.
+    pub fn block_elements(&self, block_name: &str) -> Option<&[ElementData]> {
+        let bare = block_name.strip_prefix("minecraft:").unwrap_or(block_name);
+        self.non_cube.get(bare).map(Vec::as_slice)
+    }
+
+    /// Whether the block renders as a full cube (so it occludes neighbour faces).
+    pub fn is_cube(&self, block_name: &str) -> bool {
+        if self.assume_cube {
+            return true;
+        }
+        let bare = block_name.strip_prefix("minecraft:").unwrap_or(block_name);
+        self.blocks.contains_key(bare)
     }
 
     /// UV of the solid-white tile (for tinting flat-coloured geometry like
@@ -98,11 +148,13 @@ impl Atlas {
             width: TILE,
             height: TILE,
             blocks: HashMap::new(),
+            non_cube: HashMap::new(),
             fallback: BlockModel {
                 faces: [white; 6],
                 textured: false,
             },
             white_uv: [0.0, 0.0, 1.0, 1.0],
+            assume_cube: true,
         }
     }
 }
@@ -178,21 +230,33 @@ pub fn load_block_atlas(jar_path: &Path, block_names: &[String]) -> Result<Atlas
     let file = File::open(jar_path)?;
     let mut archive = zip::ZipArchive::new(BufReader::new(file))?;
 
-    // Resolve each block's six faces to (texture path, tinted?).
+    // Resolve each block to either full-cube faces or element geometry.
     let mut cache: HashMap<String, Option<Resolved>> = HashMap::new();
     let mut block_faces: HashMap<String, [(Option<String>, bool); 6]> = HashMap::new();
+    let mut block_elems: HashMap<String, Vec<ParsedElem>> = HashMap::new();
     let mut tex_paths: BTreeSet<String> = BTreeSet::new();
 
     for name in block_names {
         let bare = name.strip_prefix("minecraft:").unwrap_or(name);
         let model_name = format!("block/{bare}");
-        if let Some(faces) = resolve_block_faces(&mut archive, &model_name, &mut cache) {
+        let Some(resolved) = resolve(&mut archive, &model_name, &mut cache) else {
+            continue;
+        };
+        if let Some(faces) = cube_faces(&resolved) {
             for (path, _tinted) in &faces {
                 if let Some(path) = path {
                     tex_paths.insert(path.clone());
                 }
             }
             block_faces.insert(bare.to_string(), faces);
+        } else if !resolved.elements.is_empty() {
+            let elems = parse_elements(&resolved);
+            for e in &elems {
+                for f in e.faces.iter().flatten() {
+                    tex_paths.insert(f.path.clone());
+                }
+            }
+            block_elems.insert(bare.to_string(), elems);
         }
     }
 
@@ -247,6 +311,35 @@ pub fn load_block_atlas(jar_path: &Path, block_names: &[String]) -> Result<Atlas
         );
     }
 
+    // Build non-cube element geometry, mapping each face's 0..16 uv into its
+    // atlas tile.
+    let mut non_cube: HashMap<String, Vec<ElementData>> = HashMap::new();
+    for (name, elems) in block_elems {
+        let data: Vec<ElementData> = elems
+            .into_iter()
+            .map(|e| ElementData {
+                from: e.from,
+                to: e.to,
+                rotation: e.rotation,
+                faces: e.faces.map(|of| {
+                    of.map(|pf| {
+                        let tile = tex_uv.get(&pf.path).copied().unwrap_or(white_uv);
+                        ElementFace {
+                            uv: sub_rect(tile, pf.uv16),
+                            tint: if pf.tinted {
+                                FOLIAGE_TINT
+                            } else {
+                                [1.0, 1.0, 1.0]
+                            },
+                            cull: pf.cull,
+                        }
+                    })
+                }),
+            })
+            .collect();
+        non_cube.insert(name, data);
+    }
+
     let fallback = BlockModel {
         faces: [FaceTex {
             uv: white_uv,
@@ -260,8 +353,10 @@ pub fn load_block_atlas(jar_path: &Path, block_names: &[String]) -> Result<Atlas
         width: dim,
         height: dim,
         blocks,
+        non_cube,
         fallback,
         white_uv,
+        assume_cube: false,
     })
 }
 
@@ -344,12 +439,9 @@ pub fn load_item_atlas(jar_path: &Path, item_names: &[String]) -> Result<ItemAtl
 /// Generic green for tinted faces (grass top, leaves). Real biome tint later.
 const FOLIAGE_TINT: [f32; 3] = [0.45, 0.70, 0.33];
 
-fn resolve_block_faces<R: Read + std::io::Seek>(
-    archive: &mut zip::ZipArchive<R>,
-    model_name: &str,
-    cache: &mut HashMap<String, Option<Resolved>>,
-) -> Option<[(Option<String>, bool); 6]> {
-    let resolved = resolve(archive, model_name, cache)?;
+/// Per-face texture path + tinted flag for a full-cube model, or `None` if the
+/// model has no full-cube element.
+fn cube_faces(resolved: &Resolved) -> Option<[(Option<String>, bool); 6]> {
     let cube = resolved.elements.iter().find(|e| is_full_cube(e))?;
     let mut faces: [(Option<String>, bool); 6] = Default::default();
     for (i, fname) in FACE_NAMES.iter().enumerate() {
@@ -368,6 +460,83 @@ fn resolve_block_faces<R: Read + std::io::Seek>(
 
 fn is_full_cube(e: &ElementJson) -> bool {
     e.from == [0.0, 0.0, 0.0] && e.to == [16.0, 16.0, 16.0]
+}
+
+/// Maps a model face name to a `crab-render` face index (+X,-X,+Y,-Y,+Z,-Z).
+fn face_index(name: &str) -> Option<usize> {
+    Some(match name {
+        "east" => 0,
+        "west" => 1,
+        "up" => 2,
+        "down" => 3,
+        "south" => 4,
+        "north" => 5,
+        _ => return None,
+    })
+}
+
+/// A parsed (pre-atlas) element face: texture path + 0..16 uv + tint + cull.
+struct ParsedFace {
+    path: String,
+    uv16: [f32; 4],
+    tinted: bool,
+    cull: Option<u8>,
+}
+
+/// A parsed (pre-atlas) element.
+struct ParsedElem {
+    from: [f32; 3],
+    to: [f32; 3],
+    rotation: Option<ElementRotation>,
+    faces: [Option<ParsedFace>; 6],
+}
+
+/// Parses a resolved model's elements into pre-atlas geometry.
+fn parse_elements(resolved: &Resolved) -> Vec<ParsedElem> {
+    resolved
+        .elements
+        .iter()
+        .map(|e| {
+            let mut faces: [Option<ParsedFace>; 6] = [None, None, None, None, None, None];
+            for (fname, fj) in &e.faces {
+                let Some(idx) = face_index(fname) else {
+                    continue;
+                };
+                if let Some(path) = model::resolve_texture(&resolved.textures, &fj.texture) {
+                    faces[idx] = Some(ParsedFace {
+                        path,
+                        uv16: fj.uv.unwrap_or([0.0, 0.0, 16.0, 16.0]),
+                        tinted: fj.tintindex.is_some(),
+                        cull: fj.cullface.as_deref().and_then(face_index).map(|i| i as u8),
+                    });
+                }
+            }
+            let rotation = e.rotation.as_ref().map(|r| ElementRotation {
+                origin: r.origin,
+                axis: match r.axis.as_str() {
+                    "x" => 0,
+                    "z" => 2,
+                    _ => 1,
+                },
+                angle: r.angle,
+                rescale: r.rescale,
+            });
+            ParsedElem {
+                from: e.from,
+                to: e.to,
+                rotation,
+                faces,
+            }
+        })
+        .collect()
+}
+
+/// Maps a face's 0..16 model uv into its atlas tile sub-rect.
+fn sub_rect(tile: [f32; 4], uv16: [f32; 4]) -> [f32; 4] {
+    let [au0, av0, au1, av1] = tile;
+    let lx = |t: f32| au0 + (au1 - au0) * (t / 16.0);
+    let ly = |t: f32| av0 + (av1 - av0) * (t / 16.0);
+    [lx(uv16[0]), ly(uv16[1]), lx(uv16[2]), ly(uv16[3])]
 }
 
 /// Reads a 16x16 RGBA tile (top-left / first animation frame) for a texture ref.

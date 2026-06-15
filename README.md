@@ -23,8 +23,9 @@ Verified end-to-end against a vanilla 1.20.1 server (offline mode unless noted):
 - **Physics**: AABB-vs-voxel collision + gravity; the client is physically
   simulated and the server accepts its movement
 - **Rendering**: a `wgpu` voxel renderer (face-culled meshing, depth, lighting)
-  with **textures loaded from your client jar** (atlas-stitched full-cube
-  models + grass/foliage tint); offscreen mode + a live windowed viewer
+  with **textures loaded from your client jar** (atlas-stitched cube models +
+  **element models** so slabs/stairs/plants/lanterns render as real shapes +
+  grass/foliage tint); offscreen mode + a live windowed viewer
 - **Player control**: first-person WASD/jump/look in the window, driven through
   the physics sim and sent to the server
 - **Block editing**: raycast-targeted **breaking** and **placing**, reconciled
@@ -151,7 +152,8 @@ the official server jar:
 - [x] Background chunk meshing (smooth frames)
 - [x] Melee combat (attack mobs), health/food tracking + death-respawn
 - [x] Minimal HUD (crosshair, hotbar outline, health/food bars)
-- [ ] Block models beyond full cubes (stairs/slabs/fences/plants), biome tint
+- [x] Element block models (slabs/stairs/plants/lanterns render as real shapes)
+- [ ] Blockstate variants & multipart (fence/wall connections, rotated stairs), biome tint
 - [ ] Entity animation/interpolation + per-mob hitbox models
 - [ ] Precise per-block collision shapes (slabs/stairs/fluids)
 - [ ] Inventory GUI, item rendering in the hotbar, crafting, sounds

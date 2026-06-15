@@ -90,6 +90,12 @@ const FACES: [Face; 6] = [
         uvs: [[0.0,1.0],[0.0,0.0],[1.0,0.0],[1.0,1.0]] },
 ];
 
+/// Whether `state` is a full opaque cube, so it hides neighbouring faces.
+fn occludes(atlas: &Atlas, state: u32) -> bool {
+    !crab_registry::is_air(state)
+        && crab_registry::block_name(state).is_some_and(|n| atlas.is_cube(n))
+}
+
 /// Builds a textured mesh for the inclusive world-coordinate box `[min, max]`.
 pub fn mesh_region(world: &World, atlas: &Atlas, min: [i32; 3], max: [i32; 3]) -> Mesh {
     let mut vertices = Vec::new();
@@ -102,13 +108,22 @@ pub fn mesh_region(world: &World, atlas: &Atlas, min: [i32; 3], max: [i32; 3]) -
                 if crab_registry::is_air(state) {
                     continue;
                 }
-                let model = atlas.model(crab_registry::block_name(state).unwrap_or(""));
+                let name = crab_registry::block_name(state).unwrap_or("");
                 let base = [x as f32, y as f32, z as f32];
 
+                // Non-cube blocks (slabs, stairs, fences, plants, …) emit their
+                // model's element geometry.
+                if let Some(elements) = atlas.block_elements(name) {
+                    emit_elements(&mut vertices, world, atlas, base, [x, y, z], elements);
+                    continue;
+                }
+
+                // Full cube (or flat fallback): one quad per non-occluded face.
+                let model = atlas.model(name);
                 for (fi, face) in FACES.iter().enumerate() {
                     let neighbor =
                         world.block_state(x + face.dir[0], y + face.dir[1], z + face.dir[2]);
-                    if neighbor.is_some_and(|s| !crab_registry::is_air(s)) {
+                    if neighbor.is_some_and(|s| occludes(atlas, s)) {
                         continue;
                     }
                     let tex = model.faces[fi];
@@ -129,6 +144,84 @@ pub fn mesh_region(world: &World, atlas: &Atlas, min: [i32; 3], max: [i32; 3]) -
         }
     }
     Mesh { vertices }
+}
+
+/// Rotates a normalized (0..1) point about an [`crab_assets::ElementRotation`].
+fn rotate_point(p: [f32; 3], rot: &crab_assets::ElementRotation) -> [f32; 3] {
+    let o = [
+        rot.origin[0] / 16.0,
+        rot.origin[1] / 16.0,
+        rot.origin[2] / 16.0,
+    ];
+    let a = rot.angle.to_radians();
+    let (s, c) = (a.sin(), a.cos());
+    let mut d = [p[0] - o[0], p[1] - o[1], p[2] - o[2]];
+    let rescale = if rot.rescale { 1.0 / c.abs() } else { 1.0 };
+    match rot.axis {
+        0 => {
+            let (yy, zz) = (d[1], d[2]);
+            d[1] = (yy * c - zz * s) * rescale;
+            d[2] = (yy * s + zz * c) * rescale;
+        }
+        2 => {
+            let (xx, yy) = (d[0], d[1]);
+            d[0] = (xx * c - yy * s) * rescale;
+            d[1] = (xx * s + yy * c) * rescale;
+        }
+        _ => {
+            let (xx, zz) = (d[0], d[2]);
+            d[0] = (xx * c + zz * s) * rescale;
+            d[2] = (-xx * s + zz * c) * rescale;
+        }
+    }
+    [o[0] + d[0], o[1] + d[1], o[2] + d[2]]
+}
+
+/// Emits one block's element geometry (used for non-full-cube models).
+fn emit_elements(
+    verts: &mut Vec<Vertex>,
+    world: &World,
+    atlas: &Atlas,
+    base: [f32; 3],
+    cell: [i32; 3],
+    elements: &[crab_assets::ElementData],
+) {
+    for el in elements {
+        let from_n = [el.from[0] / 16.0, el.from[1] / 16.0, el.from[2] / 16.0];
+        let to_n = [el.to[0] / 16.0, el.to[1] / 16.0, el.to[2] / 16.0];
+        for (fi, face) in FACES.iter().enumerate() {
+            let Some(ef) = el.faces[fi] else {
+                continue;
+            };
+            // Cull this face only when a cullface neighbour is a full cube.
+            if let Some(cd) = ef.cull {
+                let d = FACES[cd as usize].dir;
+                let n = world.block_state(cell[0] + d[0], cell[1] + d[1], cell[2] + d[2]);
+                if n.is_some_and(|s| occludes(atlas, s)) {
+                    continue;
+                }
+            }
+            let [su0, sv0, su1, sv1] = ef.uv;
+            for &ci in &[0usize, 1, 2, 0, 2, 3] {
+                let uc = face.corners[ci];
+                let mut p = [
+                    if uc[0] == 0.0 { from_n[0] } else { to_n[0] },
+                    if uc[1] == 0.0 { from_n[1] } else { to_n[1] },
+                    if uc[2] == 0.0 { from_n[2] } else { to_n[2] },
+                ];
+                if let Some(rot) = &el.rotation {
+                    p = rotate_point(p, rot);
+                }
+                let [cu, cv] = face.uvs[ci];
+                verts.push(Vertex {
+                    position: [base[0] + p[0], base[1] + p[1], base[2] + p[2]],
+                    normal: face.normal,
+                    uv: [su0 + cu * (su1 - su0), sv0 + cv * (sv1 - sv0)],
+                    tint: ef.tint,
+                });
+            }
+        }
+    }
 }
 
 /// Builds a 36-vertex box spanning `[min, max]`, textured with `uv` (an atlas
