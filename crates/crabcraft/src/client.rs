@@ -584,7 +584,16 @@ where
                                 })
                                 .await?;
                                 attacked_entity = true;
+                                queue_sound(shared, "entity/player/attack/weak1".to_string());
                                 dig = cancel_dig(conn, dig, &mut block_sequence).await?;
+                            }
+                        }
+                        // Clicking toward a block always plays its hit sound, even
+                        // before it breaks (and we send a swing).
+                        if !attacked_entity {
+                            conn.send(&SwingArm { hand: 0 }).await?;
+                            if let Some(h) = &hit {
+                                play_break_sound(shared, h.block);
                             }
                         }
                     }
