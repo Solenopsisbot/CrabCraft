@@ -308,6 +308,41 @@ fn boundary_t(origin: f64, dir: f64, cell: i32) -> f64 {
     (next - origin) / dir
 }
 
+/// Ray vs axis-aligned box (slab method). Returns the entry distance along
+/// `dir` (in the same units as a normalised `dir`, i.e. blocks) if the ray
+/// starting at `origin` enters `[min, max]` within a forward direction, or
+/// `None` if it misses. A ray starting inside the box returns `0.0`.
+pub fn ray_aabb(origin: [f64; 3], dir: [f64; 3], min: [f64; 3], max: [f64; 3]) -> Option<f64> {
+    let len = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
+    if len < 1e-9 {
+        return None;
+    }
+    let d = [dir[0] / len, dir[1] / len, dir[2] / len];
+    let mut tmin = 0.0_f64;
+    let mut tmax = f64::INFINITY;
+    for i in 0..3 {
+        if d[i].abs() < 1e-9 {
+            // Parallel to this slab: must already be within its extent.
+            if origin[i] < min[i] || origin[i] > max[i] {
+                return None;
+            }
+        } else {
+            let inv = 1.0 / d[i];
+            let mut t1 = (min[i] - origin[i]) * inv;
+            let mut t2 = (max[i] - origin[i]) * inv;
+            if t1 > t2 {
+                std::mem::swap(&mut t1, &mut t2);
+            }
+            tmin = tmin.max(t1);
+            tmax = tmax.min(t2);
+            if tmin > tmax {
+                return None;
+            }
+        }
+    }
+    Some(tmin)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -403,5 +438,21 @@ mod tests {
         let dx = collide_x(&world, &aabb, 2.0);
         // max.x starts at 9.3; wall face at x=10; allowed = 10 - 9.3 = 0.7
         assert!((dx - 0.7).abs() < 1e-6, "dx was {dx}");
+    }
+
+    #[test]
+    fn ray_aabb_hits_and_misses() {
+        // Box from (2,0,-0.5) to (3,2,0.5); ray down +x from origin.
+        let min = [2.0, 0.0, -0.5];
+        let max = [3.0, 2.0, 0.5];
+        let t = ray_aabb([0.0, 1.0, 0.0], [1.0, 0.0, 0.0], min, max).unwrap();
+        assert!((t - 2.0).abs() < 1e-6, "entry distance was {t}");
+        // Aimed above the box → miss.
+        assert!(ray_aabb([0.0, 3.0, 0.0], [1.0, 0.0, 0.0], min, max).is_none());
+        // Origin inside the box → entry distance 0.
+        assert_eq!(
+            ray_aabb([2.5, 1.0, 0.0], [1.0, 0.0, 0.0], min, max),
+            Some(0.0)
+        );
     }
 }

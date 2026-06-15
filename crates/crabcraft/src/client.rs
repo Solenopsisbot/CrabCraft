@@ -15,10 +15,10 @@ use crab_protocol::versions::v1_20_1::login::{
     SetCompression,
 };
 use crab_protocol::versions::v1_20_1::play::{
-    ClientChatMessage, ClientCommand, ClientInformation, ConfirmTeleport, KeepAlive,
-    KeepAliveResponse, PlayDisconnect, PlayerDigging, SetCreativeSlot, SetHealth,
-    SetPlayerPosition, SetPlayerPositionRotation, SlotItem, SynchronizePlayerPosition, SystemChat,
-    UseItemOn,
+    ClientChatMessage, ClientCommand, ClientInformation, ConfirmTeleport, InteractEntity,
+    Interaction, KeepAlive, KeepAliveResponse, PlayDisconnect, PlayerDigging, SetCreativeSlot,
+    SetHealth, SetPlayerPosition, SetPlayerPositionRotation, SlotItem, SwingArm,
+    SynchronizePlayerPosition, SystemChat, UseItemOn,
 };
 use crab_protocol::versions::PROTOCOL_1_20_1;
 use crab_protocol::BufExt;
@@ -477,7 +477,7 @@ where
                 };
                 let snapshot = { *shared.player.lock().unwrap() };
 
-                // Break / place the targeted block.
+                // Attack an entity, or break / place the targeted block.
                 if snapshot.spawned && (do_break || do_place) {
                     let yaw = f64::from(controls.yaw).to_radians();
                     let pitch = f64::from(controls.pitch).to_radians();
@@ -488,9 +488,34 @@ where
                         yaw.cos() * pitch.cos(),
                     ];
                     let hit = crab_physics::raycast(&shared.world.lock().unwrap(), eye, dir, 5.0);
+
+                    // Left-click attacks an entity if one is within reach (3.0)
+                    // and nearer than whatever block we're aiming at.
+                    let mut attacked = false;
+                    if do_break {
+                        let block_dist = hit.as_ref().map(|h| {
+                            let dx = f64::from(h.block[0]) + 0.5 - eye[0];
+                            let dy = f64::from(h.block[1]) + 0.5 - eye[1];
+                            let dz = f64::from(h.block[2]) + 0.5 - eye[2];
+                            (dx * dx + dy * dy + dz * dz).sqrt()
+                        });
+                        if let Some((target, t)) = nearest_entity_hit(shared, eye, dir, 3.0) {
+                            if block_dist.is_none_or(|bd| t <= bd) {
+                                conn.send(&SwingArm { hand: 0 }).await?;
+                                conn.send(&InteractEntity {
+                                    target,
+                                    interaction: Interaction::Attack,
+                                    sneaking: false,
+                                })
+                                .await?;
+                                attacked = true;
+                            }
+                        }
+                    }
+
                     if let Some(hit) = hit {
                         let dir_enum = face_direction(hit.face);
-                        if do_break {
+                        if do_break && !attacked {
                             block_sequence += 1;
                             conn.send(&PlayerDigging {
                                 status: 0,
@@ -699,6 +724,29 @@ fn handle_entity_destroy(raw: &crab_net::RawPacket, shared: &Arc<Shared>) -> Res
         entities.remove(&b.read_varint()?);
     }
     Ok(())
+}
+
+/// The id and entry distance of the nearest entity whose bounding box the ray
+/// `eye`+`dir` enters within `reach` blocks (used for melee target selection).
+fn nearest_entity_hit(
+    shared: &Arc<Shared>,
+    eye: [f64; 3],
+    dir: [f64; 3],
+    reach: f64,
+) -> Option<(i32, f64)> {
+    let entities = shared.entities.lock().unwrap();
+    let mut best: Option<(i32, f64)> = None;
+    for (&id, e) in entities.iter() {
+        let hw = f64::from(e.half_width);
+        let min = [e.x - hw, e.y, e.z - hw];
+        let max = [e.x + hw, e.y + f64::from(e.height), e.z + hw];
+        if let Some(t) = crab_physics::ray_aabb(eye, dir, min, max) {
+            if t <= reach && best.is_none_or(|(_, bt)| t < bt) {
+                best = Some((id, t));
+            }
+        }
+    }
+    best
 }
 
 /// Very small chat-component flattener for readable logging.

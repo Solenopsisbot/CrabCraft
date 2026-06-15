@@ -585,6 +585,101 @@ impl Packet for ClientCommand {
     }
 }
 
+/// `0x2f` — swing an arm (cosmetic; sent alongside an attack). `hand`: 0 = main.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SwingArm {
+    pub hand: i32,
+}
+
+impl Packet for SwingArm {
+    const ID: i32 = 0x2f;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Serverbound;
+
+    fn encode<B: BufMut>(&self, dst: &mut B) -> Result<(), ProtoError> {
+        dst.put_varint(self.hand);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(src: &mut B) -> Result<Self, ProtoError> {
+        Ok(Self {
+            hand: src.read_varint()?,
+        })
+    }
+}
+
+/// How the player is interacting with an entity in [`InteractEntity`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Interaction {
+    /// Right-click interact (e.g. mount, trade). `hand`: 0 = main.
+    Interact { hand: i32 },
+    /// Left-click attack.
+    Attack,
+    /// Right-click at a precise point on the entity. `hand`: 0 = main.
+    InteractAt { x: f32, y: f32, z: f32, hand: i32 },
+}
+
+/// `0x10` — interact with (or attack) an entity by id.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct InteractEntity {
+    pub target: i32,
+    pub interaction: Interaction,
+    pub sneaking: bool,
+}
+
+impl Packet for InteractEntity {
+    const ID: i32 = 0x10;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Serverbound;
+
+    fn encode<B: BufMut>(&self, dst: &mut B) -> Result<(), ProtoError> {
+        dst.put_varint(self.target);
+        match self.interaction {
+            Interaction::Interact { hand } => {
+                dst.put_varint(0);
+                dst.put_varint(hand);
+            }
+            Interaction::Attack => dst.put_varint(1),
+            Interaction::InteractAt { x, y, z, hand } => {
+                dst.put_varint(2);
+                dst.put_f32(x);
+                dst.put_f32(y);
+                dst.put_f32(z);
+                dst.put_varint(hand);
+            }
+        }
+        dst.put_bool(self.sneaking);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(src: &mut B) -> Result<Self, ProtoError> {
+        let target = src.read_varint()?;
+        let interaction = match src.read_varint()? {
+            0 => Interaction::Interact {
+                hand: src.read_varint()?,
+            },
+            1 => Interaction::Attack,
+            2 => Interaction::InteractAt {
+                x: src.read_f32()?,
+                y: src.read_f32()?,
+                z: src.read_f32()?,
+                hand: src.read_varint()?,
+            },
+            other => {
+                return Err(ProtoError::InvalidEnum {
+                    type_name: "InteractEntity.type",
+                    value: i64::from(other),
+                })
+            }
+        };
+        Ok(Self {
+            target,
+            interaction,
+            sneaking: src.read_bool()?,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -703,6 +798,31 @@ mod tests {
             saturation: 4.0,
         });
         roundtrip(&ClientCommand { action: 0 });
+    }
+
+    #[test]
+    fn combat_packets_roundtrip() {
+        roundtrip(&SwingArm { hand: 0 });
+        roundtrip(&InteractEntity {
+            target: 42,
+            interaction: Interaction::Attack,
+            sneaking: false,
+        });
+        roundtrip(&InteractEntity {
+            target: 7,
+            interaction: Interaction::Interact { hand: 1 },
+            sneaking: true,
+        });
+        roundtrip(&InteractEntity {
+            target: 99,
+            interaction: Interaction::InteractAt {
+                x: 0.1,
+                y: 0.9,
+                z: -0.3,
+                hand: 0,
+            },
+            sneaking: false,
+        });
     }
 
     #[test]
