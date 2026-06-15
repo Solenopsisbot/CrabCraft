@@ -6,3 +6,6 @@
 # local dev server / assets we must never commit (not ours to redistribute)
 /run
 /assets-cache
+
+# user-provided Mojang assets (EULA) — not ours to commit
+/bedrock-samples

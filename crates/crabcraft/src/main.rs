@@ -126,6 +126,8 @@ fn load_atlas() -> crab_assets::Atlas {
 /// (a bedrock-samples `models/entity` dir) and textures from `CRABCRAFT_JAR`.
 /// Returns an empty atlas (entities render as boxes) if either is unset.
 fn load_entity_atlas() -> crab_assets::EntityAtlas {
+    let empty =
+        || crab_assets::load_entity_atlas(std::path::Path::new(""), std::path::Path::new(""), &[]);
     let (Ok(jar), Ok(dir)) = (
         std::env::var("CRABCRAFT_JAR"),
         std::env::var("CRABCRAFT_ENTITY_MODELS"),
@@ -134,22 +136,42 @@ fn load_entity_atlas() -> crab_assets::EntityAtlas {
             "set CRABCRAFT_ENTITY_MODELS=<bedrock-samples .../resource_pack/models/entity> \
              for 3D entity models; using boxes"
         );
-        return crab_assets::load_entity_atlas(
-            std::path::Path::new(""),
-            std::path::Path::new(""),
-            &[],
-        );
+        return empty();
     };
+
+    // Be forgiving: accept the entity dir, or a bedrock-samples root/resource_pack.
+    let mut dir = std::path::PathBuf::from(&dir);
+    if !dir.join("cow.geo.json").exists() {
+        for sub in ["resource_pack/models/entity", "models/entity", "entity"] {
+            if dir.join(sub).join("cow.geo.json").exists() {
+                dir = dir.join(sub);
+                break;
+            }
+        }
+    }
+    let geo_count = std::fs::read_dir(&dir)
+        .map(|rd| {
+            rd.filter_map(Result::ok)
+                .filter(|e| e.file_name().to_string_lossy().ends_with(".geo.json"))
+                .count()
+        })
+        .unwrap_or(0);
+
     let types: Vec<(i32, String)> = crab_registry::ENTITIES_1_20_1
         .iter()
         .map(|e| (e.id as i32, e.name.to_string()))
         .collect();
-    let atlas = crab_assets::load_entity_atlas(
-        std::path::Path::new(&jar),
-        std::path::Path::new(&dir),
-        &types,
-    );
-    tracing::info!(models = atlas.models.len(), "loaded entity models");
+    let atlas = crab_assets::load_entity_atlas(std::path::Path::new(&jar), &dir, &types);
+
+    if atlas.models.is_empty() {
+        tracing::warn!(
+            "no entity models loaded from {dir:?} ({geo_count} .geo.json files found) \u{2014} \
+             entities render as boxes. Point CRABCRAFT_ENTITY_MODELS at \
+             bedrock-samples/resource_pack/models/entity"
+        );
+    } else {
+        tracing::info!("loaded {} entity models from {dir:?}", atlas.models.len());
+    }
     atlas
 }
 

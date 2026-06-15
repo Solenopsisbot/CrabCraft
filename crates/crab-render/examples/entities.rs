@@ -14,18 +14,19 @@ fn main() {
         .next()
         .unwrap_or_else(|| "/tmp/crab_entities3.png".to_string());
 
-    let types = vec![
-        (1, "cow".to_string()),
-        (2, "pig".to_string()),
-        (3, "creeper".to_string()),
-    ];
+    // Build the atlas exactly like the live client: from the full entity
+    // registry (so models are keyed by real entity-type ids).
+    let types: Vec<(i32, String)> = crab_registry::ENTITIES_1_20_1
+        .iter()
+        .map(|e| (e.id as i32, e.name.to_string()))
+        .collect();
     let atlas = crab_assets::load_entity_atlas(
         std::path::Path::new(&jar),
         std::path::Path::new(&models_dir),
         &types,
     );
     eprintln!(
-        "entity atlas {}x{}, {} models",
+        "entity atlas {}x{}, {} models loaded",
         atlas.width,
         atlas.height,
         atlas.models.len()
@@ -33,15 +34,17 @@ fn main() {
 
     let dims = [atlas.width as f32, atlas.height as f32];
     let mut verts = Vec::new();
-    for (id, x) in [(1, -1.6f32), (2, 0.0), (3, 1.6)] {
-        if let Some(m) = atlas.models.get(&id) {
-            verts.extend(entity_mesh(
-                &m.geo,
-                [x, 0.0, 0.0],
-                [m.atlas_x, m.atlas_y],
-                dims,
-            ));
-        }
+    let mut ids: Vec<i32> = atlas.models.keys().copied().collect();
+    ids.sort_unstable();
+    for (i, id) in ids.iter().enumerate() {
+        let m = &atlas.models[id];
+        let x = (i as f32 - (ids.len() as f32 - 1.0) / 2.0) * 1.6;
+        verts.extend(entity_mesh(
+            &m.geo,
+            [x, 0.0, 0.0],
+            [m.atlas_x, m.atlas_y],
+            dims,
+        ));
     }
     let mesh = Mesh { vertices: verts };
 
