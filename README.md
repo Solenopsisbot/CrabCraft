@@ -27,6 +27,16 @@ Verified end-to-end against a vanilla 1.20.1 server (offline mode unless noted):
   models + grass/foliage tint); offscreen mode + a live windowed viewer
 - **Player control**: first-person WASD/jump/look in the window, driven through
   the physics sim and sent to the server
+- **Block editing**: raycast-targeted **breaking** and **placing**, reconciled
+  with the server
+- **Entities**: tracks other players/mobs (spawn, relative move, teleport,
+  destroy) and renders them as **3D models** (Bedrock geometry + jar textures,
+  falling back to boxes)
+- **Combat**: **left-click attacks** the mob you're aiming at (within reach) via
+  a swing + InteractEntity; verified to damage and kill a mob on a live server
+- **Survival vitals**: tracks **health/food**, and on death sends a respawn
+  request automatically
+- **HUD**: crosshair, a 9-slot hotbar outline, and health/food bars
 - **Online mode**: AES-128-CFB8 encryption + the Minecraft server hash + RSA
   handshake, with Microsoft device-code login (see caveats below)
 
@@ -91,7 +101,8 @@ Entity geometry is parsed from Bedrock `.geo.json` and textured with the Java
 textures from your jar; entities without a loaded model render as coloured boxes.
 
 Windowed controls: **WASD** move · **Space** jump · **mouse** (or arrow keys)
-look · **left-click** break · **right-click** place · **Esc** quit. Movement is
+look · **left-click** attack a mob in your sights, else break the targeted block
+· **right-click** place · **Esc** quit. Movement is
 client-physics-simulated and sent to the server. (Run with `--release` for
 smooth framerates — debug builds mesh chunks slowly.)
 
@@ -138,10 +149,12 @@ the official server jar:
 - [x] Per-chunk mesh caching (only dirty chunks rebuild)
 - [x] Entity tracking + 3D models (Bedrock geometry + jar textures)
 - [x] Background chunk meshing (smooth frames)
+- [x] Melee combat (attack mobs), health/food tracking + death-respawn
+- [x] Minimal HUD (crosshair, hotbar outline, health/food bars)
 - [ ] Block models beyond full cubes (stairs/slabs/fences/plants), biome tint
 - [ ] Entity animation/interpolation + per-mob hitbox models
 - [ ] Precise per-block collision shapes (slabs/stairs/fluids)
-- [ ] HUD (hotbar/health bars), inventory GUI, crafting, combat, sounds
+- [ ] Inventory GUI, item rendering in the hotbar, crafting, sounds
 - [ ] More protocol versions (1.20.2+, 1.21, …) as sibling modules
 - [ ] (Far future, maybe) Forge mod support — see the note below
 
