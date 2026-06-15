@@ -107,6 +107,36 @@ impl Atlas {
     }
 }
 
+/// A stitched atlas of flat item icons (one 16x16 tile per resolved item),
+/// keyed by bare item name (e.g. `"diamond"`).
+pub struct ItemAtlas {
+    /// RGBA8 atlas pixels, row-major.
+    pub rgba: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    icons: HashMap<String, [f32; 4]>,
+}
+
+impl ItemAtlas {
+    /// Atlas UV `[u0, v0, u1, v1]` for an item, if an icon was resolved.
+    #[must_use]
+    pub fn icon(&self, item_name: &str) -> Option<[f32; 4]> {
+        let bare = item_name.strip_prefix("minecraft:").unwrap_or(item_name);
+        self.icons.get(bare).copied()
+    }
+
+    /// Number of items with a resolved icon.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.icons.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.icons.is_empty()
+    }
+}
+
 /// JSON form of a block model file.
 #[derive(Deserialize)]
 pub(crate) struct ModelJson {
@@ -220,6 +250,82 @@ pub fn load_block_atlas(jar_path: &Path, block_names: &[String]) -> Result<Atlas
         blocks,
         fallback,
         white_uv,
+    })
+}
+
+/// Resolves the single icon texture path for an item: `layer0` for flat
+/// (generated) items, else a representative face texture for block items.
+fn resolve_item_icon<R: Read + std::io::Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    item_bare: &str,
+    cache: &mut HashMap<String, Option<Resolved>>,
+) -> Option<String> {
+    let resolved = resolve(archive, &format!("item/{item_bare}"), cache)?;
+    if resolved.textures.contains_key("layer0") {
+        return model::resolve_texture(&resolved.textures, "#layer0");
+    }
+    // Block items inherit a block model; pick a sensible representative face.
+    for key in [
+        "up", "side", "all", "north", "particle", "end", "cross", "texture",
+    ] {
+        if resolved.textures.contains_key(key) {
+            if let Some(p) = model::resolve_texture(&resolved.textures, &format!("#{key}")) {
+                return Some(p);
+            }
+        }
+    }
+    resolved
+        .textures
+        .values()
+        .find_map(|v| model::resolve_texture(&resolved.textures, v))
+}
+
+/// Loads flat **item icons** for `item_names` from `jar_path` and stitches them
+/// into a single atlas. Items whose model/texture can't be found are skipped.
+pub fn load_item_atlas(jar_path: &Path, item_names: &[String]) -> Result<ItemAtlas, AssetError> {
+    let file = File::open(jar_path)?;
+    let mut archive = zip::ZipArchive::new(BufReader::new(file))?;
+    let mut cache: HashMap<String, Option<Resolved>> = HashMap::new();
+
+    // Resolve each item to its icon texture path.
+    let mut item_tex: HashMap<String, String> = HashMap::new();
+    let mut tex_paths: BTreeSet<String> = BTreeSet::new();
+    for name in item_names {
+        let bare = name.strip_prefix("minecraft:").unwrap_or(name);
+        if bare == "air" {
+            continue;
+        }
+        if let Some(path) = resolve_item_icon(&mut archive, bare, &mut cache) {
+            tex_paths.insert(path.clone());
+            item_tex.insert(bare.to_string(), path);
+        }
+    }
+
+    // One tile per unique texture, laid out in a square grid.
+    let paths: Vec<String> = tex_paths.into_iter().collect();
+    let tile_count = paths.len().max(1) as u32;
+    let grid = (f64::from(tile_count)).sqrt().ceil() as u32;
+    let dim = grid * TILE;
+    let mut rgba = vec![0u8; (dim * dim * 4) as usize];
+    let mut tex_uv: HashMap<String, [f32; 4]> = HashMap::new();
+    for (i, path) in paths.iter().enumerate() {
+        let slot = i as u32;
+        let tile =
+            load_texture_tile(&mut archive, path).unwrap_or([200u8; (TILE * TILE * 4) as usize]);
+        blit_tile(&mut rgba, dim, slot, &tile);
+        tex_uv.insert(path.clone(), slot_uv(slot, grid));
+    }
+
+    let icons = item_tex
+        .into_iter()
+        .filter_map(|(item, path)| tex_uv.get(&path).map(|uv| (item, *uv)))
+        .collect();
+
+    Ok(ItemAtlas {
+        rgba,
+        width: dim,
+        height: dim,
+        icons,
     })
 }
 
