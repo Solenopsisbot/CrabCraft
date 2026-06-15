@@ -32,9 +32,12 @@ def main() -> None:
     ]
     for b in blocks:
         name = "minecraft:" + b["name"]
+        hardness = float(b.get("hardness") if b.get("hardness") is not None else -1.0)
+        needs_tool = "true" if b.get("harvestTools") else "false"
         lines.append(
             f'    BlockDef {{ name: "{name}", min_state: {b["minStateId"]}, '
-            f'max_state: {b["maxStateId"]}, default_state: {b["defaultState"]} }},'
+            f'max_state: {b["maxStateId"]}, default_state: {b["defaultState"]}, '
+            f"hardness: {hardness}, needs_tool: {needs_tool} }},"
         )
     lines.append("];")
     lines.append("")

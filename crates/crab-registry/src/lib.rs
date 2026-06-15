@@ -67,7 +67,7 @@ pub fn item_name(id: u32) -> Option<&'static str> {
 }
 
 /// A block and the contiguous, disjoint range of global block-state IDs it owns.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BlockDef {
     /// Namespaced id, e.g. `"minecraft:grass_block"`.
     pub name: &'static str,
@@ -77,6 +77,25 @@ pub struct BlockDef {
     pub max_state: u32,
     /// The block's default block-state ID.
     pub default_state: u32,
+    /// Mining hardness; negative means unbreakable (e.g. bedrock).
+    pub hardness: f32,
+    /// True if a proper tool is required to harvest (bare hands mine it ~3x
+    /// slower); affects break time.
+    pub needs_tool: bool,
+}
+
+/// Ticks (at 20 TPS) for a **bare hand** to break `state`, or `None` if it is
+/// unbreakable. `0` means instant (e.g. plants). This is the slowest case (no
+/// tool), so a server validating dig speed never rejects it as too fast.
+#[must_use]
+pub fn break_ticks(state: u32) -> Option<u32> {
+    let b = block_for_state(state)?;
+    if b.hardness < 0.0 {
+        return None;
+    }
+    // damage/tick = speed(1.0) / hardness / (canHarvest ? 30 : 100)
+    let denom = if b.needs_tool { 100.0 } else { 30.0 };
+    Some((b.hardness * denom).ceil() as u32)
 }
 
 /// Resolves the block owning `state` via binary search over the sorted table.
@@ -139,6 +158,17 @@ mod tests {
     fn out_of_range_is_none() {
         assert_eq!(block_name(u32::MAX), None);
         assert_eq!(item_name(u32::MAX), None);
+    }
+
+    #[test]
+    fn break_times_are_sane() {
+        // dirt 0.5 * 30 = 15; grass 0.6 * 30 = 18; oak_log 2.0 * 30 = 60.
+        assert_eq!(break_ticks(10), Some(15)); // dirt
+        assert_eq!(break_ticks(9), Some(18)); // grass_block
+                                              // stone needs a tool: 1.5 * 100 = 150.
+        assert_eq!(break_ticks(1), Some(150));
+        // bedrock is unbreakable.
+        assert_eq!(break_ticks(79), None);
     }
 
     #[test]

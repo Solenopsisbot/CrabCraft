@@ -46,6 +46,14 @@ const ID_SET_HELD_ITEM: i32 = 0x4d;
 /// hotbar + offhand).
 const PLAYER_INVENTORY_SLOTS: usize = 46;
 
+/// An in-progress survival dig: which block, the dug face, and ticks remaining.
+#[derive(Clone, Copy, Debug)]
+struct DigProgress {
+    block: [i32; 3],
+    face: i8,
+    ticks_left: u32,
+}
+
 /// A tracked non-self entity (other player, mob, item, …) for rendering.
 #[derive(Clone, Copy, Debug)]
 pub struct Entity {
@@ -75,6 +83,8 @@ pub struct PlayerState {
     pub food: i32,
     /// Selected hotbar slot (0..=8).
     pub selected_slot: u8,
+    /// Game mode: 0 = survival, 1 = creative, 2 = adventure, 3 = spectator.
+    pub gamemode: u8,
 }
 
 impl Default for PlayerState {
@@ -91,6 +101,7 @@ impl Default for PlayerState {
             health: 20.0,
             food: 20,
             selected_slot: 0,
+            gamemode: 0,
         }
     }
 }
@@ -325,6 +336,9 @@ where
     let mut greeted = false;
     let mut dead = false;
     let mut block_sequence: i32 = 0;
+    // Hold-to-dig state and the previous-tick attack-held flag (for click edges).
+    let mut dig: Option<DigProgress> = None;
+    let mut was_attacking = false;
     // ~20 Hz physics + position updates, like the vanilla client.
     let tick_dt = 0.05;
     let mut pos_tick = tokio::time::interval(Duration::from_secs_f64(tick_dt));
@@ -499,18 +513,19 @@ where
                 }
             }
             _ = pos_tick.tick() => {
-                // Read controls; consume edge-triggered click flags.
-                let (controls, do_break, do_place) = {
+                // Left-click ("attack") is held: hold-to-dig / continuous
+                // attack. Right-click ("use") is edge-triggered: place once.
+                let (controls, attack_held, do_place) = {
                     let mut c = shared.controls.lock().unwrap();
                     let snap = *c;
-                    c.attack = false;
                     c.use_item = false;
                     (snap, snap.attack, snap.use_item)
                 };
+                let attack_edge = attack_held && !was_attacking;
+                was_attacking = attack_held;
                 let snapshot = { *shared.player.lock().unwrap() };
 
-                // Attack an entity, or break / place the targeted block.
-                if snapshot.spawned && (do_break || do_place) {
+                if snapshot.spawned {
                     let yaw = f64::from(controls.yaw).to_radians();
                     let pitch = f64::from(controls.pitch).to_radians();
                     let eye = [snapshot.x, snapshot.y + 1.62, snapshot.z];
@@ -521,10 +536,9 @@ where
                     ];
                     let hit = crab_physics::raycast(&shared.world.lock().unwrap(), eye, dir, 5.0);
 
-                    // Left-click attacks an entity if one is within reach (3.0)
-                    // and nearer than whatever block we're aiming at.
-                    let mut attacked = false;
-                    if do_break {
+                    // Combat: on a fresh click, attack a nearer entity in reach.
+                    let mut attacked_entity = false;
+                    if attack_edge {
                         let block_dist = hit.as_ref().map(|h| {
                             let dx = f64::from(h.block[0]) + 0.5 - eye[0];
                             let dy = f64::from(h.block[1]) + 0.5 - eye[1];
@@ -540,33 +554,68 @@ where
                                     sneaking: false,
                                 })
                                 .await?;
-                                attacked = true;
+                                attacked_entity = true;
+                                dig = cancel_dig(conn, dig, &mut block_sequence).await?;
                             }
                         }
                     }
 
-                    if let Some(hit) = hit {
-                        let dir_enum = face_direction(hit.face);
-                        if do_break && !attacked {
-                            block_sequence += 1;
-                            conn.send(&PlayerDigging {
-                                status: 0,
-                                x: hit.block[0],
-                                y: hit.block[1],
-                                z: hit.block[2],
-                                face: dir_enum as i8,
-                                sequence: block_sequence,
-                            })
-                            .await?;
-                            shared.world.lock().unwrap().set_block_state(
-                                hit.block[0],
-                                hit.block[1],
-                                hit.block[2],
-                                0,
-                            );
-                            mark_dirty(shared, hit.block[0] >> 4, hit.block[2] >> 4);
+                    // Hold-to-dig (skipped on the tick we hit an entity).
+                    if !attacked_entity {
+                        if let (true, Some(hit)) = (attack_held, hit) {
+                            let target = hit.block;
+                            let face = face_direction(hit.face) as i8;
+                            let same = dig.is_some_and(|d| d.block == target);
+                            if same {
+                                if let Some(d) = dig.as_mut() {
+                                    d.ticks_left = d.ticks_left.saturating_sub(1);
+                                    if d.ticks_left == 0 {
+                                        let b = d.block;
+                                        block_sequence += 1;
+                                        conn.send(&dig_packet(2, b, face, block_sequence)).await?;
+                                        dig = None;
+                                        break_block_local(shared, b);
+                                    }
+                                }
+                            } else {
+                                // Aiming at a new block: cancel the old dig, then
+                                // start (and possibly instantly finish) the new one.
+                                dig = cancel_dig(conn, dig, &mut block_sequence).await?;
+                                let state = shared
+                                    .world
+                                    .lock()
+                                    .unwrap()
+                                    .block_state(target[0], target[1], target[2])
+                                    .unwrap_or(0);
+                                if let Some(ticks) = crab_registry::break_ticks(state) {
+                                    block_sequence += 1;
+                                    conn.send(&dig_packet(0, target, face, block_sequence)).await?;
+                                    if snapshot.gamemode == 1 || ticks == 0 {
+                                        // Creative / instant: server breaks now.
+                                        if snapshot.gamemode != 1 {
+                                            block_sequence += 1;
+                                            conn.send(&dig_packet(2, target, face, block_sequence))
+                                                .await?;
+                                        }
+                                        break_block_local(shared, target);
+                                    } else {
+                                        dig = Some(DigProgress {
+                                            block: target,
+                                            face,
+                                            ticks_left: ticks,
+                                        });
+                                    }
+                                }
+                            }
+                        } else {
+                            // Released, or not aiming at a block: cancel any dig.
+                            dig = cancel_dig(conn, dig, &mut block_sequence).await?;
                         }
-                        if do_place {
+                    }
+
+                    // Place on a fresh right-click against the targeted face.
+                    if do_place {
+                        if let Some(hit) = hit {
                             let p = hit.place_position();
                             block_sequence += 1;
                             conn.send(&UseItemOn {
@@ -574,7 +623,7 @@ where
                                 x: hit.block[0],
                                 y: hit.block[1],
                                 z: hit.block[2],
-                                direction: dir_enum,
+                                direction: face_direction(hit.face),
                                 cursor: [0.5, 0.5, 0.5],
                                 inside_block: false,
                                 sequence: block_sequence,
@@ -665,7 +714,8 @@ fn handle_join_game(raw: &crab_net::RawPacket, shared: &Arc<Shared>) -> Result<(
     let mut b = raw.body.clone();
     let _entity_id = b.read_i32()?;
     let _hardcore = b.read_bool()?;
-    let _game_mode = b.read_u8()?;
+    let game_mode = b.read_u8()?;
+    shared.player.lock().unwrap().gamemode = game_mode;
     let _prev_game_mode = b.read_i8()?;
     let world_count = b.read_varint()?.max(0);
     for _ in 0..world_count {
@@ -811,6 +861,44 @@ fn handle_container_slot(shared: &Arc<Shared>, pkt: &SetContainerSlot) {
             );
         }
     }
+}
+
+/// Builds a `PlayerDigging` packet (0 = start, 1 = cancel, 2 = finish).
+fn dig_packet(status: i32, block: [i32; 3], face: i8, sequence: i32) -> PlayerDigging {
+    PlayerDigging {
+        status,
+        x: block[0],
+        y: block[1],
+        z: block[2],
+        face,
+        sequence,
+    }
+}
+
+/// Removes a block locally (set to air) and marks its chunk dirty for re-mesh.
+fn break_block_local(shared: &Arc<Shared>, block: [i32; 3]) {
+    shared
+        .world
+        .lock()
+        .unwrap()
+        .set_block_state(block[0], block[1], block[2], 0);
+    mark_dirty(shared, block[0] >> 4, block[2] >> 4);
+}
+
+/// Sends a "cancel dig" (status 1) for any in-progress dig and returns `None`.
+async fn cancel_dig<S>(
+    conn: &mut Connection<S>,
+    dig: Option<DigProgress>,
+    seq: &mut i32,
+) -> Result<Option<DigProgress>>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    if let Some(d) = dig {
+        *seq += 1;
+        conn.send(&dig_packet(1, d.block, d.face, *seq)).await?;
+    }
+    Ok(None)
 }
 
 /// The id and entry distance of the nearest entity whose bounding box the ray

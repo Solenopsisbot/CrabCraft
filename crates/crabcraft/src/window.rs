@@ -602,15 +602,15 @@ impl ApplicationHandler for App {
                     self.keys.remove(&code);
                 }
             }
-            WindowEvent::MouseInput {
-                state: ElementState::Pressed,
-                button,
-                ..
-            } => {
+            WindowEvent::MouseInput { state, button, .. } => {
+                let pressed = state == ElementState::Pressed;
                 let mut controls = self.shared.controls.lock().unwrap();
                 match button {
-                    MouseButton::Left => controls.attack = true,
-                    MouseButton::Right => controls.use_item = true,
+                    // Left mouse is held: attack stays true until release so the
+                    // network thread can run hold-to-dig / continuous attack.
+                    MouseButton::Left => controls.attack = pressed,
+                    // Right mouse places on press (edge-triggered).
+                    MouseButton::Right if pressed => controls.use_item = true,
                     _ => {}
                 }
             }
