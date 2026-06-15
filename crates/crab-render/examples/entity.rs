@@ -14,12 +14,15 @@ fn main() {
     let out = args
         .next()
         .unwrap_or_else(|| "/tmp/crab_entity.png".to_string());
+    // Optional walk-cycle phase (radians) to exercise the limb-swing animation.
+    let swing: f32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(0.0);
 
     let geo = crab_assets::parse_geometry(&std::fs::read_to_string(&geo_path).unwrap())
         .expect("parse geometry");
     eprintln!(
-        "geo: {} cubes, texture {}x{}",
-        geo.cubes.len(),
+        "geo: {} cubes in {} bones, texture {}x{}",
+        geo.cube_count(),
+        geo.bones.len(),
         geo.texture_width,
         geo.texture_height
     );
@@ -32,6 +35,8 @@ fn main() {
             [0.0, 0.0, 0.0],
             [0.0, 0.0],
             [geo.texture_width, geo.texture_height],
+            swing,
+            1.0,
         ),
     };
 

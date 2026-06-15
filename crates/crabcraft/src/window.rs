@@ -77,6 +77,8 @@ fn build_entity_meshes(
                 [e.x as f32, e.y as f32, e.z as f32],
                 [m.atlas_x, m.atlas_y],
                 dims,
+                0.0,
+                0.0,
             ));
         } else {
             let hw = f64::from(e.half_width);

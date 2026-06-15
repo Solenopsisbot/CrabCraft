@@ -30,12 +30,34 @@ pub struct Cube {
     pub mirror: bool,
 }
 
-/// An entity model: its texture dimensions and flattened cube list.
+/// A model bone: its pivot, rest rotation (degrees), and cubes. Bedrock bones
+/// nominally form a hierarchy, but the classic mob models we target apply each
+/// bone's rest rotation to its own cubes only (e.g. the cow body's 90° tilt),
+/// which matches the hardcoded Java models.
+#[derive(Clone, Debug)]
+pub struct Bone {
+    pub name: String,
+    pub pivot: [f32; 3],
+    /// Rest rotation in degrees (`rotation` in 1.12.0, `bind_pose_rotation` in
+    /// 1.8.0).
+    pub rotation: [f32; 3],
+    pub cubes: Vec<Cube>,
+}
+
+/// An entity model: its texture dimensions and bones.
 #[derive(Clone, Debug)]
 pub struct EntityGeometry {
     pub texture_width: f32,
     pub texture_height: f32,
-    pub cubes: Vec<Cube>,
+    pub bones: Vec<Bone>,
+}
+
+impl EntityGeometry {
+    /// Total cube count across all bones.
+    #[must_use]
+    pub fn cube_count(&self) -> usize {
+        self.bones.iter().map(|b| b.cubes.len()).sum()
+    }
 }
 
 /// Parses a `.geo.json` document into a flat cube list (rest pose).
@@ -74,34 +96,51 @@ pub fn parse_geometry(json: &str) -> Option<EntityGeometry> {
         (g.clone(), tw, th)
     };
 
-    let bones = geo.get("bones")?.as_array()?;
-    let mut cubes = Vec::new();
-    for bone in bones {
+    let bone_values = geo.get("bones")?.as_array()?;
+    let mut bones = Vec::new();
+    for bone in bone_values {
         let bone_mirror = bone.get("mirror").and_then(Value::as_bool).unwrap_or(false);
-        let Some(bone_cubes) = bone.get("cubes").and_then(Value::as_array) else {
-            continue;
-        };
-        for c in bone_cubes {
-            let (Some(origin), Some(size)) = (arr3(c.get("origin")), arr3(c.get("size"))) else {
-                continue;
-            };
-            let uv = arr2(c.get("uv")).unwrap_or([0.0, 0.0]);
-            let mirror = c
-                .get("mirror")
-                .and_then(Value::as_bool)
-                .unwrap_or(bone_mirror);
-            cubes.push(Cube {
-                origin,
-                size,
-                uv,
-                mirror,
-            });
+        let name = bone
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let pivot = arr3(bone.get("pivot")).unwrap_or([0.0, 0.0, 0.0]);
+        // 1.12.0 uses `rotation`; 1.8.0 uses `bind_pose_rotation`.
+        let rotation = arr3(bone.get("rotation"))
+            .or_else(|| arr3(bone.get("bind_pose_rotation")))
+            .unwrap_or([0.0, 0.0, 0.0]);
+        let mut cubes = Vec::new();
+        if let Some(bone_cubes) = bone.get("cubes").and_then(Value::as_array) {
+            for c in bone_cubes {
+                let (Some(origin), Some(size)) = (arr3(c.get("origin")), arr3(c.get("size")))
+                else {
+                    continue;
+                };
+                let uv = arr2(c.get("uv")).unwrap_or([0.0, 0.0]);
+                let mirror = c
+                    .get("mirror")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(bone_mirror);
+                cubes.push(Cube {
+                    origin,
+                    size,
+                    uv,
+                    mirror,
+                });
+            }
         }
+        bones.push(Bone {
+            name,
+            pivot,
+            rotation,
+            cubes,
+        });
     }
     Some(EntityGeometry {
         texture_width: tw,
         texture_height: th,
-        cubes,
+        bones,
     })
 }
 

@@ -44,6 +44,8 @@ fn main() {
             [x, 0.0, 0.0],
             [m.atlas_x, m.atlas_y],
             dims,
+            0.0,
+            0.0,
         ));
     }
     let mesh = Mesh { vertices: verts };

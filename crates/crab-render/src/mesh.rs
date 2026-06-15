@@ -259,7 +259,65 @@ fn push_quad(verts: &mut Vec<Vertex>, c: [[f32; 3]; 4], normal: [f32; 3], uv: [[
     }
 }
 
-/// Builds a 3D mesh for a Bedrock entity geometry (rest pose), feet at `offset`.
+/// Rotates `p` about `pivot` by Euler `deg` (X, then Y, then Z).
+fn rotate_euler(p: [f32; 3], pivot: [f32; 3], deg: [f32; 3]) -> [f32; 3] {
+    let mut d = [p[0] - pivot[0], p[1] - pivot[1], p[2] - pivot[2]];
+    if deg[0] != 0.0 {
+        let a = deg[0].to_radians();
+        let (s, c) = (a.sin(), a.cos());
+        let (y, z) = (d[1], d[2]);
+        d[1] = y * c - z * s;
+        d[2] = y * s + z * c;
+    }
+    if deg[1] != 0.0 {
+        let a = deg[1].to_radians();
+        let (s, c) = (a.sin(), a.cos());
+        let (x, z) = (d[0], d[2]);
+        d[0] = x * c + z * s;
+        d[2] = -x * s + z * c;
+    }
+    if deg[2] != 0.0 {
+        let a = deg[2].to_radians();
+        let (s, c) = (a.sin(), a.cos());
+        let (x, y) = (d[0], d[1]);
+        d[0] = x * c - y * s;
+        d[1] = x * s + y * c;
+    }
+    [pivot[0] + d[0], pivot[1] + d[1], pivot[2] + d[2]]
+}
+
+/// Procedural walk swing (degrees about X) for a limb bone, or 0 for others.
+/// `swing` is the walk-cycle phase in radians; `amount` scales with speed.
+fn limb_swing_deg(name: &str, swing: f32, amount: f32) -> f32 {
+    let n = name.to_ascii_lowercase();
+    let is_leg = n.contains("leg");
+    let is_arm = n.contains("arm");
+    if !is_leg && !is_arm {
+        return 0.0;
+    }
+    // Side/phase: explicit left/right, else trailing-digit (quadruped diagonals).
+    let mut sign = if n.contains("left") {
+        -1.0
+    } else if n.contains("right") {
+        1.0
+    } else if let Some(d) = n.bytes().rev().find(u8::is_ascii_digit) {
+        if matches!(d, b'0' | b'3') {
+            1.0
+        } else {
+            -1.0
+        }
+    } else {
+        1.0
+    };
+    if is_arm {
+        sign = -sign; // arms swing opposite the legs
+    }
+    (swing.sin() * amount * sign).to_degrees() * 1.2
+}
+
+/// Builds a 3D mesh for a Bedrock entity geometry, feet at `offset`. Each bone's
+/// rest rotation (e.g. the cow body's 90° tilt) is applied about its pivot, plus
+/// a procedural limb swing (`limb_swing` radians; 0 = rest pose).
 ///
 /// The entity's texture occupies the rectangle at `uv_origin` (pixels) within a
 /// texture of size `uv_size` (pixels) — pass `([0,0], [tex_w, tex_h])` for a
@@ -269,10 +327,11 @@ pub fn entity_mesh(
     offset: [f32; 3],
     uv_origin: [f32; 2],
     uv_size: [f32; 2],
+    limb_swing: f32,
+    limb_amount: f32,
 ) -> Vec<Vertex> {
     let (sw, sh) = (uv_size[0].max(1.0), uv_size[1].max(1.0));
     let (ox, oy) = (uv_origin[0], uv_origin[1]);
-    // pixel rect (x0,y0,x1,y1) within the entity texture -> normalized atlas UV
     let uvr = |x0: f32, y0: f32, x1: f32, y1: f32| {
         [
             [(ox + x0) / sw, (oy + y0) / sh],
@@ -282,100 +341,107 @@ pub fn entity_mesh(
         ]
     };
     let mut verts = Vec::new();
-    for cube in &geo.cubes {
-        let o = cube.origin;
-        let s = cube.size;
-        // Bedrock model space -> world: /16, X negated (Bedrock/Java mirror), + feet offset.
-        let to_world = |px: f32, py: f32, pz: f32| {
+    for bone in &geo.bones {
+        let swing = limb_swing_deg(&bone.name, limb_swing, limb_amount);
+        let euler = [bone.rotation[0] + swing, bone.rotation[1], bone.rotation[2]];
+        // Bedrock model space -> world: rotate about the bone pivot, then /16,
+        // X negated (Bedrock/Java mirror), + feet offset.
+        let place = |px: f32, py: f32, pz: f32| {
+            let r = rotate_euler([px, py, pz], bone.pivot, euler);
             [
-                -px / 16.0 + offset[0],
-                py / 16.0 + offset[1],
-                pz / 16.0 + offset[2],
+                -r[0] / 16.0 + offset[0],
+                r[1] / 16.0 + offset[1],
+                r[2] / 16.0 + offset[2],
             ]
         };
-        let (x0, y0, z0) = (o[0], o[1], o[2]);
-        let (x1, y1, z1) = (o[0] + s[0], o[1] + s[1], o[2] + s[2]);
-        // After X negation, the -X corner is x1 and +X is x0; corners labelled by world axis.
-        let (u, v) = (cube.uv[0], cube.uv[1]);
-        let (sx, sy, sz) = (s[0], s[1], s[2]);
+        let nrm = |n: [f32; 3]| rotate_euler(n, [0.0, 0.0, 0.0], euler);
 
-        // +Z (front/south)
-        push_quad(
-            &mut verts,
-            [
-                to_world(x0, y1, z1),
-                to_world(x1, y1, z1),
-                to_world(x1, y0, z1),
-                to_world(x0, y0, z1),
-            ],
-            [0.0, 0.0, 1.0],
-            uvr(u + sz, v + sz, u + sz + sx, v + sz + sy),
-        );
-        // -Z (back/north)
-        push_quad(
-            &mut verts,
-            [
-                to_world(x1, y1, z0),
-                to_world(x0, y1, z0),
-                to_world(x0, y0, z0),
-                to_world(x1, y0, z0),
-            ],
-            [0.0, 0.0, -1.0],
-            uvr(
-                u + 2.0 * sz + sx,
-                v + sz,
-                u + 2.0 * sz + 2.0 * sx,
-                v + sz + sy,
-            ),
-        );
-        // +X (east) — world +X is model -X (negated), so it uses model x0 plane
-        push_quad(
-            &mut verts,
-            [
-                to_world(x0, y1, z0),
-                to_world(x0, y1, z1),
-                to_world(x0, y0, z1),
-                to_world(x0, y0, z0),
-            ],
-            [1.0, 0.0, 0.0],
-            uvr(u, v + sz, u + sz, v + sz + sy),
-        );
-        // -X (west)
-        push_quad(
-            &mut verts,
-            [
-                to_world(x1, y1, z1),
-                to_world(x1, y1, z0),
-                to_world(x1, y0, z0),
-                to_world(x1, y0, z1),
-            ],
-            [-1.0, 0.0, 0.0],
-            uvr(u + sz + sx, v + sz, u + 2.0 * sz + sx, v + sz + sy),
-        );
-        // +Y (top)
-        push_quad(
-            &mut verts,
-            [
-                to_world(x1, y1, z0),
-                to_world(x0, y1, z0),
-                to_world(x0, y1, z1),
-                to_world(x1, y1, z1),
-            ],
-            [0.0, 1.0, 0.0],
-            uvr(u + sz, v, u + sz + sx, v + sz),
-        );
-        // -Y (bottom)
-        push_quad(
-            &mut verts,
-            [
-                to_world(x1, y0, z1),
-                to_world(x0, y0, z1),
-                to_world(x0, y0, z0),
-                to_world(x1, y0, z0),
-            ],
-            [0.0, -1.0, 0.0],
-            uvr(u + sz + sx, v, u + sz + 2.0 * sx, v + sz),
-        );
+        for cube in &bone.cubes {
+            let o = cube.origin;
+            let s = cube.size;
+            let (x0, y0, z0) = (o[0], o[1], o[2]);
+            let (x1, y1, z1) = (o[0] + s[0], o[1] + s[1], o[2] + s[2]);
+            let (u, v) = (cube.uv[0], cube.uv[1]);
+            let (sx, sy, sz) = (s[0], s[1], s[2]);
+
+            // +Z (front/south)
+            push_quad(
+                &mut verts,
+                [
+                    place(x0, y1, z1),
+                    place(x1, y1, z1),
+                    place(x1, y0, z1),
+                    place(x0, y0, z1),
+                ],
+                nrm([0.0, 0.0, 1.0]),
+                uvr(u + sz, v + sz, u + sz + sx, v + sz + sy),
+            );
+            // -Z (back/north)
+            push_quad(
+                &mut verts,
+                [
+                    place(x1, y1, z0),
+                    place(x0, y1, z0),
+                    place(x0, y0, z0),
+                    place(x1, y0, z0),
+                ],
+                nrm([0.0, 0.0, -1.0]),
+                uvr(
+                    u + 2.0 * sz + sx,
+                    v + sz,
+                    u + 2.0 * sz + 2.0 * sx,
+                    v + sz + sy,
+                ),
+            );
+            // +X (east) — world +X is model -X (negated), so it uses model x0 plane
+            push_quad(
+                &mut verts,
+                [
+                    place(x0, y1, z0),
+                    place(x0, y1, z1),
+                    place(x0, y0, z1),
+                    place(x0, y0, z0),
+                ],
+                nrm([1.0, 0.0, 0.0]),
+                uvr(u, v + sz, u + sz, v + sz + sy),
+            );
+            // -X (west)
+            push_quad(
+                &mut verts,
+                [
+                    place(x1, y1, z1),
+                    place(x1, y1, z0),
+                    place(x1, y0, z0),
+                    place(x1, y0, z1),
+                ],
+                nrm([-1.0, 0.0, 0.0]),
+                uvr(u + sz + sx, v + sz, u + 2.0 * sz + sx, v + sz + sy),
+            );
+            // +Y (top)
+            push_quad(
+                &mut verts,
+                [
+                    place(x1, y1, z0),
+                    place(x0, y1, z0),
+                    place(x0, y1, z1),
+                    place(x1, y1, z1),
+                ],
+                nrm([0.0, 1.0, 0.0]),
+                uvr(u + sz, v, u + sz + sx, v + sz),
+            );
+            // -Y (bottom)
+            push_quad(
+                &mut verts,
+                [
+                    place(x1, y0, z1),
+                    place(x0, y0, z1),
+                    place(x0, y0, z0),
+                    place(x1, y0, z0),
+                ],
+                nrm([0.0, -1.0, 0.0]),
+                uvr(u + sz + sx, v, u + sz + 2.0 * sx, v + sz),
+            );
+        }
     }
     verts
 }
