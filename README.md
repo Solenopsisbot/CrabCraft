@@ -31,18 +31,23 @@ Verified end-to-end against a vanilla 1.20.1 server (offline mode unless noted):
 - **Block editing**: raycast-targeted **breaking** and **placing**, reconciled
   with the server
 - **Entities**: tracks other players/mobs (spawn, relative move, teleport,
-  destroy) and renders them as **3D models** (Bedrock geometry incl. bone rest
-  rotations + jar textures, falling back to boxes), **smoothly interpolated**
-  between updates with a **procedural walk animation** (limbs swing while moving)
+  metadata, destroy) and renders them as **3D models** (Bedrock geometry incl.
+  bone rest rotations + jar textures, falling back to boxes), **smoothly
+  interpolated** with a **procedural walk animation**; slimes/magma cubes scale
+  to their size and **dropped items show their item icon**
 - **Combat**: **left-click attacks** the mob you're aiming at (within reach) via
   a swing + InteractEntity; verified to damage and kill a mob on a live server
 - **Survival vitals**: tracks **health/food**, and on death sends a respawn
   request automatically
-- **HUD**: crosshair, a 9-slot hotbar (square cells, item icons, selectable with
-  number keys / scroll), and health/food bars
-- **Inventory**: open with **E** to view the full inventory grid + item icons
-- **Sounds**: break / place / footstep / mining / hurt sounds loaded from your
-  launcher's asset store and played via `rodio` (set `CRABCRAFT_ASSETS`)
+- **HUD**: rendered with the **real Minecraft GUI textures** + bitmap font —
+  hotbar widget (number-key/scroll selection), health/food bars, and **stack-size
+  numbers** on items
+- **Inventory**: open with **E** (real container texture); **click to move/swap
+  items** (Click Container), with the carried stack drawn at the cursor
+- **Chat & commands**: **T** to chat, **/** for a command; messages send (chat +
+  Chat Command packets) and incoming system chat shows in an on-screen log
+- **Sounds**: break / place / hit / footstep / mining / hurt / attack sounds
+  loaded from your launcher's asset store via `rodio` (set `CRABCRAFT_ASSETS`)
 - **Online mode**: AES-128-CFB8 encryption + the Minecraft server hash + RSA
   handshake, with Microsoft device-code login (see caveats below)
 
@@ -161,10 +166,13 @@ the official server jar:
 - [x] Minimal HUD (crosshair, hotbar outline, health/food bars)
 - [x] Element block models (slabs/stairs/plants/lanterns render as real shapes)
 - [x] Entity bone rest rotations + interpolation + procedural walk animation
-- [x] Hotbar item icons + slot switching; inventory grid (view) on E
-- [x] Sounds: break / place / footstep / mining / hurt (from your asset store)
+- [x] Entity metadata: slime/magma-cube size scaling, dropped-item icons
+- [x] Real GUI textures + bitmap font; stack-size numbers
+- [x] Inventory open + click-to-move/swap items; hotbar slot switching
+- [x] Chat + commands (send/receive, on-screen log)
+- [x] Sounds: break / place / hit / footstep / mining / hurt / attack
 - [ ] Blockstate variants & multipart (fence/wall connections, rotated stairs), biome tint
-- [ ] Inventory **interaction** (container clicks to move items), crafting
+- [ ] Crafting; right-click split / shift-click move; container (chest) GUIs
 - [ ] Entity yaw/head facing + per-mob hitbox models; ambient sounds
 - [ ] Precise per-block collision shapes (slabs/stairs/fluids)
 - [ ] More protocol versions (1.20.2+, 1.21, …) as sibling modules
