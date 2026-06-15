@@ -46,6 +46,7 @@ fn main() {
             dims,
             0.0,
             0.0,
+            1.0,
         ));
     }
     let mesh = Mesh { vertices: verts };

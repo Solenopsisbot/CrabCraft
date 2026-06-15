@@ -322,6 +322,7 @@ fn limb_swing_deg(name: &str, swing: f32, amount: f32) -> f32 {
 /// The entity's texture occupies the rectangle at `uv_origin` (pixels) within a
 /// texture of size `uv_size` (pixels) — pass `([0,0], [tex_w, tex_h])` for a
 /// dedicated texture, or the atlas placement for a shared entity atlas.
+#[allow(clippy::too_many_arguments)]
 pub fn entity_mesh(
     geo: &crab_assets::EntityGeometry,
     offset: [f32; 3],
@@ -329,6 +330,7 @@ pub fn entity_mesh(
     uv_size: [f32; 2],
     limb_swing: f32,
     limb_amount: f32,
+    scale: f32,
 ) -> Vec<Vertex> {
     let (sw, sh) = (uv_size[0].max(1.0), uv_size[1].max(1.0));
     let (ox, oy) = (uv_origin[0], uv_origin[1]);
@@ -349,9 +351,9 @@ pub fn entity_mesh(
         let place = |px: f32, py: f32, pz: f32| {
             let r = rotate_euler([px, py, pz], bone.pivot, euler);
             [
-                -r[0] / 16.0 + offset[0],
-                r[1] / 16.0 + offset[1],
-                r[2] / 16.0 + offset[2],
+                -r[0] / 16.0 * scale + offset[0],
+                r[1] / 16.0 * scale + offset[1],
+                r[2] / 16.0 * scale + offset[2],
             ]
         };
         let nrm = |n: [f32; 3]| rotate_euler(n, [0.0, 0.0, 0.0], euler);

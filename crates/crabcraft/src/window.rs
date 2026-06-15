@@ -59,6 +59,39 @@ fn first_person_camera(
     }
 }
 
+/// A camera-facing quad (billboard) of an item icon at `pos`, for dropped items.
+fn push_item_billboard(out: &mut Vec<Vertex>, pos: [f32; 3], uv: [f32; 4], yaw_deg: f32) {
+    let s = 0.2;
+    let yr = yaw_deg.to_radians();
+    let r = [yr.cos() * s, 0.0, yr.sin() * s];
+    let up = [0.0, s, 0.0];
+    let c = [pos[0], pos[1] + 0.25, pos[2]];
+    let n = [yr.sin(), 0.4, -yr.cos()];
+    let [u0, v0, u1, v1] = uv;
+    let corner = |sx: f32, sy: f32, u, v| {
+        (
+            [
+                c[0] + sx * r[0] + sy * up[0],
+                c[1] + sy * up[1],
+                c[2] + sx * r[2] + sy * up[2],
+            ],
+            [u, v],
+        )
+    };
+    let tl = corner(-1.0, 1.0, u0, v0);
+    let tr = corner(1.0, 1.0, u1, v0);
+    let br = corner(1.0, -1.0, u1, v1);
+    let bl = corner(-1.0, -1.0, u0, v1);
+    for (p, t) in [tl, tr, br, tl, br, bl] {
+        out.push(Vertex {
+            position: p,
+            normal: n,
+            uv: t,
+            tint: [1.0, 1.0, 1.0],
+        });
+    }
+}
+
 fn box_color(type_id: i32) -> [f32; 3] {
     let h = (type_id as u32).wrapping_mul(2_654_435_761);
     [
@@ -201,10 +234,14 @@ struct Graphics {
     gui_atlas_bind_group: wgpu::BindGroup,
     /// Entity texture atlas (for 3D entity models).
     entity_atlas_bind_group: wgpu::BindGroup,
+    /// Item atlas bound in the *world* pass for dropped-item billboards.
+    item_world_bind_group: wgpu::BindGroup,
     /// Per-frame box mesh for entities lacking a model (block atlas texture).
     box_entity_buffer: Option<(wgpu::Buffer, u32)>,
     /// Per-frame 3D model mesh for entities with a model (entity atlas texture).
     model_entity_buffer: Option<(wgpu::Buffer, u32)>,
+    /// Per-frame dropped-item billboards (item atlas texture).
+    item_entity_buffer: Option<(wgpu::Buffer, u32)>,
 }
 
 impl Graphics {
@@ -288,6 +325,17 @@ impl Graphics {
             entity_atlas.height,
         );
 
+        // Item atlas bound in the world pass (block-pipeline layout) for
+        // dropped-item billboards.
+        let item_world_bind_group = upload_texture(
+            &device,
+            &queue,
+            &texture_bgl,
+            &item_atlas.rgba,
+            item_atlas.width,
+            item_atlas.height,
+        );
+
         let hud = build_hud_pipelines(&device, config.format);
         let item_atlas_bind_group = upload_texture(
             &device,
@@ -328,8 +376,10 @@ impl Graphics {
             item_atlas_bind_group,
             gui_atlas_bind_group,
             entity_atlas_bind_group,
+            item_world_bind_group,
             box_entity_buffer: None,
             model_entity_buffer: None,
+            item_entity_buffer: None,
         }
     }
 
@@ -474,6 +524,12 @@ impl Graphics {
                 pass.set_vertex_buffer(0, buffer.slice(..));
                 pass.draw(0..*count, 0..1);
             }
+            // Dropped-item billboards — rebind group 1 to the item atlas.
+            if let Some((buffer, count)) = &self.item_entity_buffer {
+                pass.set_bind_group(1, &self.item_world_bind_group, &[]);
+                pass.set_vertex_buffer(0, buffer.slice(..));
+                pass.draw(0..*count, 0..1);
+            }
             // HUD overlay: coloured quads, then GUI sprites (gui atlas), item
             // icons (item atlas), and text (gui atlas) — in that order so text
             // sits on top of icons which sit on top of backgrounds.
@@ -588,8 +644,8 @@ impl App {
     }
 
     /// Advances per-entity interpolation + walk animation by `dt` and builds the
-    /// entity meshes (boxed entities first, 3D-model entities second).
-    fn step_entities(&mut self, dt: f32) -> (Vec<Vertex>, Vec<Vertex>) {
+    /// entity meshes: `(box, model, item-billboard)`.
+    fn step_entities(&mut self, dt: f32) -> (Vec<Vertex>, Vec<Vertex>, Vec<Vertex>) {
         let entities = self.shared.entities.lock().unwrap();
         let ease = 1.0 - (-dt * 12.0).exp();
         let mut alive = HashSet::new();
@@ -618,9 +674,20 @@ impl App {
             self.entity_atlas.width as f32,
             self.entity_atlas.height as f32,
         ];
-        let (mut box_v, mut model_v) = (Vec::new(), Vec::new());
+        let (mut box_v, mut model_v, mut item_v) = (Vec::new(), Vec::new(), Vec::new());
         for (&id, e) in entities.iter() {
             let a = self.entity_anim[&id];
+            // Dropped item: a camera-facing billboard of its icon.
+            if let Some(item_id) = e.item {
+                if let Some(uv) = u32::try_from(item_id)
+                    .ok()
+                    .and_then(crab_registry::item_name)
+                    .and_then(|n| self.item_atlas.icon(n))
+                {
+                    push_item_billboard(&mut item_v, a.pos, uv, self.yaw);
+                    continue;
+                }
+            }
             if let Some(m) = self.entity_atlas.models.get(&e.type_id) {
                 model_v.extend(entity_mesh(
                     &m.geo,
@@ -629,6 +696,7 @@ impl App {
                     dims,
                     a.phase,
                     a.amount,
+                    e.scale,
                 ));
             } else {
                 let hw = e.half_width;
@@ -637,7 +705,7 @@ impl App {
                 box_v.extend(box_mesh(min, max, white, box_color(e.type_id)));
             }
         }
-        (box_v, model_v)
+        (box_v, model_v, item_v)
     }
 
     /// Opens/closes the inventory, freeing or recapturing the cursor.
@@ -916,7 +984,7 @@ impl ApplicationHandler for App {
                 self.update_input(dt);
                 self.process_meshes();
 
-                let (box_v, model_v) = self.step_entities(dt);
+                let (box_v, model_v, item_v) = self.step_entities(dt);
                 let hotbar = hotbar_icons(&self.shared, &self.item_atlas);
                 let inv_icons = self
                     .inventory_open
@@ -936,6 +1004,7 @@ impl ApplicationHandler for App {
                     let camera = first_person_camera(eye, self.yaw, self.pitch, aspect);
                     gfx.box_entity_buffer = gfx.make_vertex_buffer(&box_v);
                     gfx.model_entity_buffer = gfx.make_vertex_buffer(&model_v);
+                    gfx.item_entity_buffer = gfx.make_vertex_buffer(&item_v);
                     let gui = &self.gui_atlas;
                     let (mut hud_c, mut hud_g, mut hud_i) =
                         hud_geometry(gui, player.health, player.food, selected, &hotbar, aspect);

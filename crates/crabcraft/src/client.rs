@@ -42,6 +42,7 @@ const ID_RESPAWN: i32 = 0x41;
 const ID_CONTAINER_CONTENT: i32 = 0x12;
 const ID_CONTAINER_SLOT: i32 = 0x14;
 const ID_SET_HELD_ITEM: i32 = 0x4d;
+const ID_ENTITY_METADATA: i32 = 0x52;
 
 /// Number of slots in the player inventory window (crafting + armour + main +
 /// hotbar + offhand).
@@ -65,6 +66,10 @@ pub struct Entity {
     pub height: f32,
     /// Entity-type registry id (122 = player); used to pick a model/colour.
     pub type_id: i32,
+    /// Render scale (slimes set this from their metadata size).
+    pub scale: f32,
+    /// For dropped-item entities: the contained item id (for icon rendering).
+    pub item: Option<i32>,
 }
 
 /// Our current position/orientation as last told by the server.
@@ -482,6 +487,9 @@ where
                     id if id == ID_ENTITY_DESTROY => {
                         let _ = handle_entity_destroy(&raw, shared);
                     }
+                    id if id == ID_ENTITY_METADATA => {
+                        let _ = handle_entity_metadata(&raw, shared);
+                    }
                     id if id == ID_UPDATE_HEALTH => {
                         if let Ok(pkt) = raw.decode::<SetHealth>() {
                             let prev = {
@@ -831,6 +839,8 @@ fn handle_spawn_object(raw: &crab_net::RawPacket, shared: &Arc<Shared>) -> Resul
             half_width,
             height,
             type_id: kind,
+            scale: 1.0,
+            item: None,
         },
     );
     Ok(())
@@ -850,9 +860,124 @@ fn handle_spawn_player(raw: &crab_net::RawPacket, shared: &Arc<Shared>) -> Resul
             half_width: 0.3,
             height: 1.8,
             type_id: 122, // "player"
+            scale: 1.0,
+            item: None,
         },
     );
     Ok(())
+}
+
+/// Parses Set Entity Metadata, extracting the fields we render: slime/magma
+/// cube `size` (index 16, VarInt) and the dropped-item stack (index 8, Slot).
+/// Other fields are skipped by type; parsing stops at an unsupported type.
+fn handle_entity_metadata(raw: &crab_net::RawPacket, shared: &Arc<Shared>) -> Result<()> {
+    let mut b = raw.body.clone();
+    let id = b.read_varint()?;
+    let is_sizable = {
+        let entities = shared.entities.lock().unwrap();
+        entities.get(&id).is_some_and(|e| {
+            matches!(
+                crab_registry::entity_name(e.type_id as u32),
+                Some("slime" | "magma_cube")
+            )
+        })
+    };
+    loop {
+        let index = b.read_u8()?;
+        if index == 0xff {
+            break;
+        }
+        let mtype = b.read_varint()?;
+        match mtype {
+            0 => {
+                b.read_i8()?;
+            }
+            1 => {
+                let v = b.read_varint()?;
+                if index == 16 && is_sizable && v > 0 {
+                    set_entity_size(shared, id, v as f32);
+                }
+            }
+            2 => {
+                b.read_varlong()?;
+            }
+            3 => {
+                b.read_f32()?;
+            }
+            4 | 5 => {
+                b.read_string(32767)?;
+            }
+            6 => {
+                if b.read_bool()? {
+                    b.read_string(32767)?;
+                }
+            }
+            7 => {
+                let item = read_slot_item(&mut b)?;
+                if index == 8 {
+                    if let Some(e) = shared.entities.lock().unwrap().get_mut(&id) {
+                        e.item = item;
+                    }
+                }
+            }
+            8 => {
+                b.read_bool()?;
+            }
+            9 => {
+                b.read_f32()?;
+                b.read_f32()?;
+                b.read_f32()?;
+            }
+            10 => {
+                b.read_position()?;
+            }
+            11 => {
+                if b.read_bool()? {
+                    b.read_position()?;
+                }
+            }
+            12 | 14 | 15 | 19 | 20 | 21 | 22 => {
+                b.read_varint()?;
+            }
+            13 => {
+                if b.read_bool()? {
+                    b.read_uuid()?;
+                }
+            }
+            16 => {
+                let _ = crab_protocol::nbt::read_nbt(&mut b)?;
+            }
+            18 => {
+                b.read_varint()?;
+                b.read_varint()?;
+                b.read_varint()?;
+            }
+            _ => break, // unsupported type; stop scanning this packet
+        }
+    }
+    Ok(())
+}
+
+/// Reads a metadata Slot, returning the contained item id (or None if empty).
+fn read_slot_item<B: crab_protocol::BufExt>(b: &mut B) -> Result<Option<i32>> {
+    if b.read_bool()? {
+        let item_id = b.read_varint()?;
+        let _count = b.read_i8()?;
+        let _nbt = crab_protocol::nbt::read_nbt(b)?;
+        Ok(Some(item_id))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Sets a slime/magma-cube entity's render scale + bounding box from its size.
+fn set_entity_size(shared: &Arc<Shared>, id: i32, size: f32) {
+    if let Some(e) = shared.entities.lock().unwrap().get_mut(&id) {
+        e.scale = size;
+        // Vanilla slime bbox edge = 0.51 * size.
+        e.half_width = 0.255 * size;
+        e.height = 0.51 * size;
+    }
 }
 
 /// Relative move (works for both `rel_entity_move` and `entity_move_look`;
