@@ -87,14 +87,14 @@ pub fn ogg_sample_count(ogg: &[u8]) -> Option<usize> {
     Some(decoder.count())
 }
 
-/// The block-break (`dig`) sound name for a block, e.g. `"dig/grass1"`. A small
-/// material heuristic over block names (vanilla picks via a sound-type table we
-/// don't carry yet).
+/// The sound-material group for a block (`"grass"`, `"wood"`, `"sand"`,
+/// `"gravel"`, or `"stone"`). A heuristic over names (vanilla uses a sound-type
+/// table we don't carry yet).
 #[must_use]
-pub fn break_sound(block_name: &str) -> String {
+pub fn material(block_name: &str) -> &'static str {
     let n = block_name.strip_prefix("minecraft:").unwrap_or(block_name);
     let has = |kws: &[&str]| kws.iter().any(|k| n.contains(k));
-    let mat = if has(&[
+    if has(&[
         "log",
         "planks",
         "wood",
@@ -112,7 +112,7 @@ pub fn break_sound(block_name: &str) -> String {
         "wood"
     } else if has(&[
         "grass", "leaves", "wool", "moss", "hay", "vine", "fern", "flower", "crop", "wheat",
-        "carpet", "sapling",
+        "carpet",
     ]) {
         "grass"
     } else if n.contains("sand") && !n.contains("sandstone") {
@@ -123,8 +123,25 @@ pub fn break_sound(block_name: &str) -> String {
         "gravel"
     } else {
         "stone"
-    };
-    format!("dig/{mat}1")
+    }
+}
+
+/// The block-break / place (`dig`) sound name, e.g. `"dig/grass1"`.
+#[must_use]
+pub fn break_sound(block_name: &str) -> String {
+    format!("dig/{}1", material(block_name))
+}
+
+/// The footstep (`step`) sound name for the block walked on, e.g. `"step/grass1"`.
+#[must_use]
+pub fn step_sound(block_name: &str) -> String {
+    format!("step/{}1", material(block_name))
+}
+
+/// The player-hurt sound name.
+#[must_use]
+pub fn hurt_sound() -> &'static str {
+    "damage/hit1"
 }
 
 /// Fire-and-forget OGG playback. A no-op (but still decode-checkable) when no

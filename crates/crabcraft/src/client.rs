@@ -346,6 +346,8 @@ where
     let mut dig: Option<DigProgress> = None;
     let mut was_attacking = false;
     let mut last_selected: u8 = 0;
+    // Accumulated walk distance, for spacing footstep sounds.
+    let mut step_dist = 0.0_f64;
     // ~20 Hz physics + position updates, like the vanilla client.
     let tick_dt = 0.05;
     let mut pos_tick = tokio::time::interval(Duration::from_secs_f64(tick_dt));
@@ -474,10 +476,16 @@ where
                     }
                     id if id == ID_UPDATE_HEALTH => {
                         if let Ok(pkt) = raw.decode::<SetHealth>() {
-                            {
+                            let prev = {
                                 let mut ps = shared.player.lock().unwrap();
+                                let prev = ps.health;
                                 ps.health = pkt.health;
                                 ps.food = pkt.food;
+                                prev
+                            };
+                            // Took damage (and not the initial 20->20 sync): hurt sound.
+                            if pkt.health < prev && pkt.health > 0.0 {
+                                queue_sound(shared, crab_audio::hurt_sound().to_string());
                             }
                             if pkt.health <= 0.0 && !dead {
                                 dead = true;
@@ -590,13 +598,16 @@ where
                             if same {
                                 if let Some(d) = dig.as_mut() {
                                     d.ticks_left = d.ticks_left.saturating_sub(1);
-                                    if d.ticks_left == 0 {
-                                        let b = d.block;
+                                    let (b, left) = (d.block, d.ticks_left);
+                                    if left == 0 {
                                         block_sequence += 1;
                                         conn.send(&dig_packet(2, b, face, block_sequence)).await?;
                                         dig = None;
                                         play_break_sound(shared, b);
                                         break_block_local(shared, b);
+                                    } else if left % 4 == 0 {
+                                        // Repeated mining "hit" sound while digging.
+                                        play_break_sound(shared, b);
                                     }
                                 }
                             } else {
@@ -654,6 +665,9 @@ where
                             .await?;
                             shared.world.lock().unwrap().set_block_state(p[0], p[1], p[2], 1);
                             mark_dirty(shared, p[0] >> 4, p[2] >> 4);
+                            if let Some(name) = block_name_at(shared, p) {
+                                queue_sound(shared, crab_audio::break_sound(name));
+                            }
                         }
                     }
                 }
@@ -698,6 +712,23 @@ where
                     };
                     if let Some(r) = stepped {
                         let (x, y, z) = (r.position[0], r.position[1], r.position[2]);
+                        // Footsteps: accumulate horizontal distance while grounded
+                        // and play a step sound for the block underfoot each ~2 m.
+                        if r.on_ground {
+                            let (dx, dz) = (x - snapshot.x, z - snapshot.z);
+                            step_dist += (dx * dx + dz * dz).sqrt();
+                            if step_dist >= 2.0 {
+                                step_dist = 0.0;
+                                let foot = [
+                                    x.floor() as i32,
+                                    (y - 0.2).floor() as i32,
+                                    z.floor() as i32,
+                                ];
+                                if let Some(name) = block_name_at(shared, foot) {
+                                    queue_sound(shared, crab_audio::step_sound(name));
+                                }
+                            }
+                        }
                         {
                             let mut ps = shared.player.lock().unwrap();
                             ps.x = x;
@@ -898,18 +929,27 @@ fn dig_packet(status: i32, block: [i32; 3], face: i8, sequence: i32) -> PlayerDi
     }
 }
 
-/// Queues the block-break sound for `block` (call before it is removed).
-fn play_break_sound(shared: &Arc<Shared>, block: [i32; 3]) {
-    let name = shared
+/// Queues a sound-effect name for the audio thread (no-op if audio is off).
+fn queue_sound(shared: &Arc<Shared>, name: String) {
+    if let Some(tx) = shared.sfx.lock().unwrap().as_ref() {
+        let _ = tx.send(name);
+    }
+}
+
+/// The block name at `block`, if any (for picking material sounds).
+fn block_name_at(shared: &Arc<Shared>, block: [i32; 3]) -> Option<&'static str> {
+    shared
         .world
         .lock()
         .unwrap()
         .block_state(block[0], block[1], block[2])
-        .and_then(crab_registry::block_name);
-    if let Some(name) = name {
-        if let Some(tx) = shared.sfx.lock().unwrap().as_ref() {
-            let _ = tx.send(crab_audio::break_sound(name));
-        }
+        .and_then(crab_registry::block_name)
+}
+
+/// Queues the block-break sound for `block` (call before it is removed).
+fn play_break_sound(shared: &Arc<Shared>, block: [i32; 3]) {
+    if let Some(name) = block_name_at(shared, block) {
+        queue_sound(shared, crab_audio::break_sound(name));
     }
 }
 

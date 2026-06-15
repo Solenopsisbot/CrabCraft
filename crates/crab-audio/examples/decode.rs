@@ -23,9 +23,10 @@ fn main() {
     for name in [
         "dig/grass1",
         "dig/stone1",
-        "dig/wood1",
-        "dig/sand1",
-        "dig/gravel1",
+        "step/grass1",
+        "step/stone1",
+        "step/wood1",
+        "damage/hit1",
     ] {
         match read_sound(assets, &index, name) {
             Some(bytes) => {
