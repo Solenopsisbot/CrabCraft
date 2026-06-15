@@ -81,6 +81,37 @@ fn hotbar_icons(shared: &Shared, item_atlas: &ItemAtlas) -> Vec<Option<[f32; 4]>
         .collect()
 }
 
+/// Builds the stack-size number text (font quads) for the hotbar, and for the
+/// inventory grid when it's open. Counts of 1 are not shown.
+fn count_text(shared: &Shared, gui: &GuiAtlas, aspect: f32, inv_open: bool) -> Vec<[f32; 4]> {
+    let inv = shared.inventory.lock().unwrap();
+    let mut out = Vec::new();
+    let mut push_count = |count: i8, rect: (f32, f32, f32, f32)| {
+        if count <= 1 {
+            return;
+        }
+        let s = count.to_string();
+        let (_x0, y0, x1, y1) = rect;
+        let h = (y1 - y0) * 0.5;
+        let w = gui.text_width(&s) * (h / 8.0) / aspect.max(0.01);
+        crab_render::push_text(&mut out, gui, &s, x1 - w, y0 + h, h, aspect);
+    };
+    for i in 0..9 {
+        if let Some(it) = inv.get(36 + i).and_then(|s| *s) {
+            push_count(it.count, crab_render::hotbar_slot_rect(aspect, i));
+        }
+    }
+    if inv_open {
+        let rect = crab_render::inventory_rect(aspect);
+        for idx in 9..45 {
+            if let Some(it) = inv.get(idx).and_then(|s| *s) {
+                push_count(it.count, crab_render::inventory_slot_rect(rect, idx - 9));
+            }
+        }
+    }
+    out
+}
+
 /// Builds the 36 inventory-panel UVs: main slots 9..36 then hotbar 36..45.
 fn inventory_icons(shared: &Shared, item_atlas: &ItemAtlas) -> Vec<Option<[f32; 4]>> {
     let inv = shared.inventory.lock().unwrap();
@@ -812,7 +843,7 @@ impl ApplicationHandler for App {
                     let gui = &self.gui_atlas;
                     let (mut hud_c, mut hud_g, mut hud_i) =
                         hud_geometry(gui, player.health, player.food, selected, &hotbar, aspect);
-                    let hud_text = Vec::new();
+                    let hud_text = count_text(&self.shared, gui, aspect, self.inventory_open);
                     if let Some(inv) = &inv_icons {
                         let (ic, ig, ii) = inventory_geometry(gui, inv, aspect);
                         hud_c.extend(ic);

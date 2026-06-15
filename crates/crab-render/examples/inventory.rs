@@ -5,7 +5,10 @@
 
 use std::path::Path;
 
-use crab_render::{hud_geometry, inventory_geometry, render_hud_to_png, HudFrame};
+use crab_render::{
+    hud_geometry, inventory_geometry, inventory_rect, inventory_slot_rect, push_text,
+    render_hud_to_png, HudFrame,
+};
 
 fn main() {
     let out = std::env::args()
@@ -56,12 +59,22 @@ fn main() {
     g.extend(ig);
     item.extend(iitem);
 
+    // Stack-size numbers on a few slots (bottom-right aligned).
+    let mut text = Vec::new();
+    let rect = inventory_rect(aspect);
+    for (slot, count) in [(0usize, "64"), (3, "16"), (12, "5"), (27, "32")] {
+        let (_x0, y0, x1, y1) = inventory_slot_rect(rect, slot);
+        let h = (y1 - y0) * 0.5;
+        let w = gui.text_width(count) * (h / 8.0) / aspect;
+        push_text(&mut text, &gui, count, x1 - w, y0 + h, h, aspect);
+    }
+
     render_hud_to_png(
         &HudFrame {
             color: &color,
             gui: &g,
             item: &item,
-            text: &[],
+            text: &text,
         },
         &gui.rgba,
         gui.width,

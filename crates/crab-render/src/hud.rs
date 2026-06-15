@@ -320,6 +320,23 @@ pub fn inventory_rect(aspect: f32) -> (f32, f32, f32, f32) {
     sprite_rect(0.0, 0.0, 0.78, 176.0, 166.0, aspect.max(0.01))
 }
 
+/// NDC rect of hotbar slot `i`'s 16x16 icon (matches [`hud_geometry`]).
+#[must_use]
+pub fn hotbar_slot_rect(aspect: f32, i: usize) -> (f32, f32, f32, f32) {
+    let bar = sprite_rect(
+        0.0,
+        -1.0 + 0.13 / 2.0 + 0.02,
+        0.13,
+        182.0,
+        22.0,
+        aspect.max(0.01),
+    );
+    let px = 3.0 + i as f32 * 20.0;
+    let (lx, ty) = px_to_ndc(bar, 182.0, 22.0, px, 3.0);
+    let (rx, by) = px_to_ndc(bar, 182.0, 22.0, px + 16.0, 19.0);
+    (lx, by, rx, ty)
+}
+
 /// Builds the open-inventory panel from the vanilla container background plus
 /// item icons. `items` holds 36 UVs — main inventory (0..27) then hotbar
 /// (27..36). Returns `(colour, gui_tex, item_tex)`.
