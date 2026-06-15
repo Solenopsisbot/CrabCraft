@@ -30,6 +30,9 @@ pub use entity::{
     EntityGeometry, EntityModelEntry,
 };
 
+pub mod gui;
+pub use gui::{load_gui_atlas, Glyph, GuiAtlas};
+
 /// Error type for asset loading.
 #[derive(Debug, thiserror::Error)]
 pub enum AssetError {

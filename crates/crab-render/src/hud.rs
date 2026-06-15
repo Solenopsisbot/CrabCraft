@@ -8,6 +8,7 @@
 use std::error::Error;
 use std::path::Path;
 
+use crab_assets::GuiAtlas;
 use wgpu::util::DeviceExt;
 
 use crate::renderer::{upload_texture, ATLAS_FORMAT, DEPTH_FORMAT};
@@ -192,19 +193,64 @@ fn push_tex_quad(v: &mut Vec<TexVertex>, x0: f32, y0: f32, x1: f32, y1: f32, uv:
     }
 }
 
-/// Builds the HUD geometry. `hotbar` holds up to 9 optional item-icon atlas UVs
-/// (slot 0..8); `selected` is the highlighted hotbar index. Returns
-/// `(coloured_verts, textured_verts)`.
+/// Centred NDC rect for a sprite of pixel size `(pw, ph)` drawn at on-screen
+/// height `h_ndc`, keeping square pixels for `aspect`. Returns `(x0,y0,x1,y1)`.
+fn sprite_rect(cx: f32, cy: f32, h_ndc: f32, pw: f32, ph: f32, a: f32) -> (f32, f32, f32, f32) {
+    let w_ndc = h_ndc * (pw / ph) / a;
+    (
+        cx - w_ndc / 2.0,
+        cy - h_ndc / 2.0,
+        cx + w_ndc / 2.0,
+        cy + h_ndc / 2.0,
+    )
+}
+
+/// Maps a pixel coordinate `(px, py)` (py from the sprite's TOP) within a sprite
+/// of pixel size `(pw, ph)` placed at NDC `rect` to an NDC point.
+fn px_to_ndc(rect: (f32, f32, f32, f32), pw: f32, ph: f32, px: f32, py: f32) -> (f32, f32) {
+    let (x0, y0, x1, y1) = rect;
+    (x0 + (px / pw) * (x1 - x0), y1 - (py / ph) * (y1 - y0))
+}
+
+/// Appends glyph quads for `text` (sampling the GUI/font atlas) with the
+/// top-left at `(x, y)` and glyph-cell height `h_ndc`; returns the end x.
+pub fn push_text(
+    out: &mut Vec<TexVertex>,
+    gui: &GuiAtlas,
+    text: &str,
+    x: f32,
+    y: f32,
+    h_ndc: f32,
+    aspect: f32,
+) -> f32 {
+    let scale = h_ndc / 8.0; // NDC per font pixel (vertical)
+    let hscale = scale / aspect.max(0.01); // NDC per pixel (horizontal, square)
+    let mut cx = x;
+    for ch in text.chars() {
+        let glyph = gui.glyph(ch);
+        if glyph.width > 0.0 {
+            push_tex_quad(out, cx, y - h_ndc, cx + glyph.width * hscale, y, glyph.uv);
+        }
+        cx += glyph.advance * hscale;
+    }
+    cx
+}
+
+/// Builds the HUD geometry from the vanilla widget sprites. `hotbar` holds up to
+/// 9 optional item-icon atlas UVs; `selected` is the highlighted slot. Returns
+/// `(colour, gui_tex, item_tex)` — gui_tex samples `gui`, item_tex the items.
 #[must_use]
 pub fn hud_geometry(
+    gui: &GuiAtlas,
     health: f32,
     food: i32,
     selected: usize,
     hotbar: &[Option<[f32; 4]>],
     aspect: f32,
-) -> (Vec<ColorVertex>, Vec<TexVertex>) {
+) -> (Vec<ColorVertex>, Vec<TexVertex>, Vec<TexVertex>) {
     let a = aspect.max(0.01);
     let mut c = Vec::new();
+    let mut g = Vec::new();
     let mut t = Vec::new();
     let white = [0.9, 0.9, 0.9];
 
@@ -213,32 +259,33 @@ pub fn hud_geometry(
     push_color_quad(&mut c, -arm / a, -thick, arm / a, thick, white);
     push_color_quad(&mut c, -thick / a, -arm, thick / a, arm, white);
 
-    // Hotbar: 9 *square* slots centred along the bottom (slot width in NDC is
-    // the height divided by the aspect so the cells aren't squished); the
-    // selected slot is brighter.
-    let slot_h = 0.11;
-    let sw = slot_h / a;
-    let gap = sw * 0.14;
-    let total = 9.0 * sw + 8.0 * gap;
-    let (y0, y1) = (-0.97, -0.97 + slot_h);
-    let mut x = -total / 2.0;
-    for i in 0..9 {
-        let col = if i == selected {
-            [0.85, 0.85, 0.85]
-        } else {
-            [0.30, 0.30, 0.33]
-        };
-        push_color_quad(&mut c, x, y0, x + sw, y1, col);
-        if let Some(Some(uv)) = hotbar.get(i) {
-            let ix = sw * 0.12;
-            let iy = (y1 - y0) * 0.12;
-            push_tex_quad(&mut t, x + ix, y0 + iy, x + sw - ix, y1 - iy, *uv);
+    // Hotbar bar (widgets sprite, 182x22) centred along the bottom.
+    let bar_h = 0.13;
+    let bar = sprite_rect(0.0, -1.0 + bar_h / 2.0 + 0.02, bar_h, 182.0, 22.0, a);
+    if let Some(uv) = gui.sprite("hotbar") {
+        push_tex_quad(&mut g, bar.0, bar.1, bar.2, bar.3, uv);
+    } else {
+        push_color_quad(&mut c, bar.0, bar.1, bar.2, bar.3, [0.2, 0.2, 0.22]);
+    }
+    // Selection box (24x24) over the selected slot.
+    if let Some(uv) = gui.sprite("selection") {
+        let sx = selected as f32 * 20.0 - 1.0;
+        let (lx, ty) = px_to_ndc(bar, 182.0, 22.0, sx, -1.0);
+        let (rx, by) = px_to_ndc(bar, 182.0, 22.0, sx + 24.0, 23.0);
+        push_tex_quad(&mut g, lx, by, rx, ty, uv);
+    }
+    // Item icons at the slot positions (3 + i*20, 3, 16x16) in bar pixels.
+    for (i, slot) in hotbar.iter().enumerate().take(9) {
+        if let Some(uv) = slot {
+            let px = 3.0 + i as f32 * 20.0;
+            let (lx, ty) = px_to_ndc(bar, 182.0, 22.0, px, 3.0);
+            let (rx, by) = px_to_ndc(bar, 182.0, 22.0, px + 16.0, 19.0);
+            push_tex_quad(&mut t, lx, by, rx, ty, *uv);
         }
-        x += sw + gap;
     }
 
-    // Health (left, red) and food (right, brown) bars over dark backgrounds.
-    let (by0, by1) = (-0.83, -0.80);
+    // Health (left, red) + food (right, brown) bars just above the hotbar.
+    let (by0, by1) = (bar.3 + 0.012, bar.3 + 0.042);
     push_color_quad(&mut c, -0.5, by0, -0.02, by1, [0.12, 0.12, 0.12]);
     let hp = (health / 20.0).clamp(0.0, 1.0);
     push_color_quad(&mut c, -0.5, by0, -0.5 + 0.48 * hp, by1, [0.85, 0.15, 0.15]);
@@ -246,97 +293,101 @@ pub fn hud_geometry(
     let fd = (food as f32 / 20.0).clamp(0.0, 1.0);
     push_color_quad(&mut c, 0.5 - 0.48 * fd, by0, 0.5, by1, [0.55, 0.40, 0.15]);
 
-    (c, t)
+    (c, g, t)
 }
 
-/// Builds the open-inventory panel: a dark background, a 9-wide grid of slot
-/// cells (3 main rows + a separated hotbar row), and item icons. `items` holds
-/// 36 optional atlas UVs — main inventory (0..27) then hotbar (27..36).
+/// NDC rect of inventory slot `idx` (0..27 main, 27..36 hotbar) within the
+/// vanilla inventory background placed at `rect` (176x166 px). Returns the
+/// 16x16-icon NDC quad `(x0, y0, x1, y1)`.
+#[must_use]
+pub fn inventory_slot_rect(rect: (f32, f32, f32, f32), idx: usize) -> (f32, f32, f32, f32) {
+    let (px, py) = if idx < 27 {
+        (
+            8.0 + (idx % 9) as f32 * 18.0,
+            84.0 + (idx / 9) as f32 * 18.0,
+        )
+    } else {
+        (8.0 + (idx - 27) as f32 * 18.0, 142.0)
+    };
+    let (lx, ty) = px_to_ndc(rect, 176.0, 166.0, px + 1.0, py + 1.0);
+    let (rx, by) = px_to_ndc(rect, 176.0, 166.0, px + 17.0, py + 17.0);
+    (lx, by, rx, ty)
+}
+
+/// NDC rect of the inventory background (176x166) centred on screen.
+#[must_use]
+pub fn inventory_rect(aspect: f32) -> (f32, f32, f32, f32) {
+    sprite_rect(0.0, 0.0, 0.78, 176.0, 166.0, aspect.max(0.01))
+}
+
+/// Builds the open-inventory panel from the vanilla container background plus
+/// item icons. `items` holds 36 UVs — main inventory (0..27) then hotbar
+/// (27..36). Returns `(colour, gui_tex, item_tex)`.
 #[must_use]
 pub fn inventory_geometry(
+    gui: &GuiAtlas,
     items: &[Option<[f32; 4]>],
     aspect: f32,
-) -> (Vec<ColorVertex>, Vec<TexVertex>) {
-    let a = aspect.max(0.01);
+) -> (Vec<ColorVertex>, Vec<TexVertex>, Vec<TexVertex>) {
     let mut c = Vec::new();
+    let mut g = Vec::new();
     let mut t = Vec::new();
+    let rect = inventory_rect(aspect);
 
-    let slot = 0.12_f32;
-    let sw = slot / a;
-    let gap = sw * 0.12;
-    let vgap = slot * 0.12;
-    let hotbar_gap = slot * 0.4;
-    let grid_w = 9.0 * sw + 8.0 * gap;
-    let x0 = -grid_w / 2.0;
-
-    let row_y1 = |row: usize| {
-        // Rows 0..3 from the top; the hotbar row (3) sits a little lower.
-        let extra = if row == 3 { hotbar_gap } else { 0.0 };
-        0.46 - row as f32 * (slot + vgap) - extra
-    };
-
-    // Background panel behind the grid.
-    let top = row_y1(0) + slot * 0.6;
-    let bottom = row_y1(3) - slot - slot * 0.6;
-    let pad = sw * 0.6;
-    push_color_quad(
-        &mut c,
-        x0 - pad,
-        bottom,
-        x0 + grid_w + pad,
-        top,
-        [0.14, 0.14, 0.17],
-    );
-
-    for row in 0..4 {
-        let y1 = row_y1(row);
-        let y0 = y1 - slot;
-        for col in 0..9 {
-            let x = x0 + col as f32 * (sw + gap);
-            push_color_quad(&mut c, x, y0, x + sw, y1, [0.33, 0.33, 0.36]);
-            let idx = if row < 3 { row * 9 + col } else { 27 + col };
-            if let Some(Some(uv)) = items.get(idx) {
-                let ix = sw * 0.1;
-                let iy = slot * 0.1;
-                push_tex_quad(&mut t, x + ix, y0 + iy, x + sw - ix, y1 - iy, *uv);
-            }
+    if let Some(uv) = gui.sprite("inventory") {
+        push_tex_quad(&mut g, rect.0, rect.1, rect.2, rect.3, uv);
+    } else {
+        push_color_quad(&mut c, rect.0, rect.1, rect.2, rect.3, [0.14, 0.14, 0.17]);
+    }
+    for (idx, slot) in items.iter().enumerate().take(36) {
+        if let Some(uv) = slot {
+            let (x0, y0, x1, y1) = inventory_slot_rect(rect, idx);
+            push_tex_quad(&mut t, x0, y0, x1, y1, *uv);
         }
     }
-    (c, t)
+    (c, g, t)
 }
 
-/// Headlessly renders the HUD over a solid background to a PNG (verification).
+/// All vertex streams for one HUD frame: flat-coloured quads, GUI-atlas sprites
+/// (backgrounds/widgets), item-atlas icons, and GUI-atlas text (drawn on top).
+pub struct HudFrame<'a> {
+    pub color: &'a [ColorVertex],
+    pub gui: &'a [TexVertex],
+    pub item: &'a [TexVertex],
+    pub text: &'a [TexVertex],
+}
+
+/// Headlessly renders a HUD frame over a solid background to a PNG.
 #[allow(clippy::too_many_arguments)]
 pub fn render_hud_to_png(
-    color_verts: &[ColorVertex],
-    tex_verts: &[TexVertex],
-    atlas_rgba: &[u8],
-    atlas_w: u32,
-    atlas_h: u32,
+    frame: &HudFrame,
+    gui_rgba: &[u8],
+    gui_w: u32,
+    gui_h: u32,
+    item_rgba: &[u8],
+    item_w: u32,
+    item_h: u32,
     width: u32,
     height: u32,
     path: &Path,
 ) -> Result<(), Box<dyn Error>> {
     let pixels = pollster::block_on(render_hud_to_rgba(
-        color_verts,
-        tex_verts,
-        atlas_rgba,
-        atlas_w,
-        atlas_h,
-        width,
-        height,
+        frame, gui_rgba, gui_w, gui_h, item_rgba, item_w, item_h, width, height,
     ))?;
     let img = image::RgbaImage::from_raw(width, height, pixels).ok_or("hud buffer wrong size")?;
     img.save(path)?;
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn render_hud_to_rgba(
-    color_verts: &[ColorVertex],
-    tex_verts: &[TexVertex],
-    atlas_rgba: &[u8],
-    atlas_w: u32,
-    atlas_h: u32,
+    frame: &HudFrame<'_>,
+    gui_rgba: &[u8],
+    gui_w: u32,
+    gui_h: u32,
+    item_rgba: &[u8],
+    item_w: u32,
+    item_h: u32,
     width: u32,
     height: u32,
 ) -> Result<Vec<u8>, Box<dyn Error>> {
@@ -358,25 +409,38 @@ async fn render_hud_to_rgba(
 
     let format = ATLAS_FORMAT;
     let pipelines = build_hud_pipelines(&device, format);
-    let atlas_bg = upload_texture(
+    let gui_bg = upload_texture(
         &device,
         &queue,
         &pipelines.atlas_layout,
-        atlas_rgba,
-        atlas_w,
-        atlas_h,
+        gui_rgba,
+        gui_w,
+        gui_h,
+    );
+    let item_bg = upload_texture(
+        &device,
+        &queue,
+        &pipelines.atlas_layout,
+        item_rgba,
+        item_w,
+        item_h,
     );
 
+    let vbuf = |label, verts: &[[f32; 4]]| {
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(label),
+            contents: bytemuck::cast_slice(verts),
+            usage: wgpu::BufferUsages::VERTEX,
+        })
+    };
     let color_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("hud color verts"),
-        contents: bytemuck::cast_slice(color_verts),
+        contents: bytemuck::cast_slice(frame.color),
         usage: wgpu::BufferUsages::VERTEX,
     });
-    let tex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("hud tex verts"),
-        contents: bytemuck::cast_slice(tex_verts),
-        usage: wgpu::BufferUsages::VERTEX,
-    });
+    let gui_buf = vbuf("hud gui verts", frame.gui);
+    let item_buf = vbuf("hud item verts", frame.item);
+    let text_buf = vbuf("hud text verts", frame.text);
 
     let size = wgpu::Extent3d {
         width,
@@ -449,12 +513,19 @@ async fn render_hud_to_rgba(
         });
         pass.set_pipeline(&pipelines.color);
         pass.set_vertex_buffer(0, color_buf.slice(..));
-        pass.draw(0..color_verts.len() as u32, 0..1);
-        if !tex_verts.is_empty() {
-            pass.set_pipeline(&pipelines.textured);
-            pass.set_bind_group(0, &atlas_bg, &[]);
-            pass.set_vertex_buffer(0, tex_buf.slice(..));
-            pass.draw(0..tex_verts.len() as u32, 0..1);
+        pass.draw(0..frame.color.len() as u32, 0..1);
+        // GUI backgrounds, then item icons, then text — each its own atlas.
+        for (verts, buf, bg) in [
+            (frame.gui, &gui_buf, &gui_bg),
+            (frame.item, &item_buf, &item_bg),
+            (frame.text, &text_buf, &gui_bg),
+        ] {
+            if !verts.is_empty() {
+                pass.set_pipeline(&pipelines.textured);
+                pass.set_bind_group(0, bg, &[]);
+                pass.set_vertex_buffer(0, buf.slice(..));
+                pass.draw(0..verts.len() as u32, 0..1);
+            }
         }
     }
 
@@ -502,17 +573,17 @@ mod tests {
 
     #[test]
     fn geometry_has_icons_only_for_filled_slots() {
+        let gui = crab_assets::GuiAtlas::empty();
         let uv = [0.0, 0.0, 0.5, 0.5];
         let hotbar = [Some(uv), None, Some(uv), None, None, None, None, None, None];
-        let (color, tex) = hud_geometry(20.0, 20, 2, &hotbar, 1.0);
+        let (_color, _g, item) = hud_geometry(&gui, 20.0, 20, 2, &hotbar, 1.0);
         // 2 filled slots -> 2 textured quads -> 12 vertices.
-        assert_eq!(tex.len(), 12);
-        // Colour geometry: crosshair(2) + 9 slots + 4 bars = 15 quads = 90 verts.
-        assert_eq!(color.len(), 90);
+        assert_eq!(item.len(), 12);
     }
 
     #[test]
     fn tex_quad_uv_is_upright() {
+        let gui = crab_assets::GuiAtlas::empty();
         let hotbar = [
             Some([0.1, 0.2, 0.3, 0.4]),
             None,
@@ -524,7 +595,7 @@ mod tests {
             None,
             None,
         ];
-        let (_c, t) = hud_geometry(20.0, 20, 0, &hotbar, 1.0);
+        let (_c, _g, t) = hud_geometry(&gui, 20.0, 20, 0, &hotbar, 1.0);
         // First vertex is the top-left corner -> (u0, v0).
         assert_eq!([t[0][2], t[0][3]], [0.1, 0.2]);
         // Third vertex is bottom-right -> (u1, v1).

@@ -146,6 +146,27 @@ fn load_item_atlas() -> crab_assets::ItemAtlas {
     }
 }
 
+/// Loads the GUI sprite + font atlas from `CRABCRAFT_JAR`, or an empty atlas.
+fn load_gui_atlas() -> crab_assets::GuiAtlas {
+    let Ok(jar) = std::env::var("CRABCRAFT_JAR") else {
+        return crab_assets::GuiAtlas::empty();
+    };
+    match crab_assets::load_gui_atlas(std::path::Path::new(&jar)) {
+        Ok(atlas) if atlas.loaded => {
+            tracing::info!("loaded GUI sprites + font from {jar}");
+            atlas
+        }
+        Ok(_) => {
+            tracing::warn!("GUI textures not found in {jar}; using flat HUD");
+            crab_assets::GuiAtlas::empty()
+        }
+        Err(e) => {
+            tracing::warn!("GUI atlas load failed ({e}); using flat HUD");
+            crab_assets::GuiAtlas::empty()
+        }
+    }
+}
+
 /// Loads 3D entity models + textures: geometry from `CRABCRAFT_ENTITY_MODELS`
 /// (a bedrock-samples `models/entity` dir) and textures from `CRABCRAFT_JAR`.
 /// Returns an empty atlas (entities render as boxes) if either is unset.
@@ -242,7 +263,8 @@ fn run_windowed(addr: String, login: LoginMode, deadline: Option<Duration>) -> R
     let entity_atlas = load_entity_atlas();
     let item_atlas = load_item_atlas();
     spawn_net_thread(addr, login, Arc::clone(&shared), deadline);
-    window::run(shared, atlas, entity_atlas, item_atlas)
+    let gui_atlas = load_gui_atlas();
+    window::run(shared, atlas, entity_atlas, item_atlas, gui_atlas)
 }
 
 /// Windowed online: authenticate on the network thread, then connect.
@@ -277,7 +299,8 @@ fn run_windowed_online(addr: String) -> Result<()> {
             }
         });
     });
-    window::run(shared, atlas, entity_atlas, item_atlas)
+    let gui_atlas = load_gui_atlas();
+    window::run(shared, atlas, entity_atlas, item_atlas, gui_atlas)
 }
 
 fn spawn_net_thread(

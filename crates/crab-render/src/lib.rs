@@ -18,7 +18,8 @@ pub mod renderer;
 
 pub use camera::Camera;
 pub use hud::{
-    build_hud_pipelines, hud_geometry, inventory_geometry, render_hud_to_png, HudPipelines,
+    build_hud_pipelines, hud_geometry, inventory_geometry, inventory_rect, inventory_slot_rect,
+    push_text, render_hud_to_png, HudFrame, HudPipelines,
 };
 pub use mesh::{box_mesh, entity_mesh, mesh_region, Mesh, Vertex};
 pub use renderer::{

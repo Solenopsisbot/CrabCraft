@@ -11,7 +11,7 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crab_assets::{Atlas, EntityAtlas, ItemAtlas};
+use crab_assets::{Atlas, EntityAtlas, GuiAtlas, ItemAtlas};
 use crab_render::{
     box_mesh, build_block_pipeline, build_hud_pipelines, entity_mesh, hud_geometry,
     inventory_geometry, mesh_region, upload_atlas, upload_texture, CameraUniform, HudPipelines,
@@ -110,9 +110,16 @@ struct Graphics {
     chunk_meshes: HashMap<(i32, i32), (wgpu::Buffer, u32)>,
     hud: HudPipelines,
     hud_color_buffer: Option<(wgpu::Buffer, u32)>,
-    hud_tex_buffer: Option<(wgpu::Buffer, u32)>,
+    /// HUD GUI-sprite verts (hotbar/inventory backgrounds, gui atlas).
+    hud_gui_buffer: Option<(wgpu::Buffer, u32)>,
+    /// HUD item-icon verts (item atlas).
+    hud_item_buffer: Option<(wgpu::Buffer, u32)>,
+    /// HUD text verts (font glyphs, gui atlas) drawn last.
+    hud_text_buffer: Option<(wgpu::Buffer, u32)>,
     /// Item-icon atlas bound for the HUD's textured pass.
     item_atlas_bind_group: wgpu::BindGroup,
+    /// GUI sprite + font atlas bound for the HUD's gui/text passes.
+    gui_atlas_bind_group: wgpu::BindGroup,
     /// Entity texture atlas (for 3D entity models).
     entity_atlas_bind_group: wgpu::BindGroup,
     /// Per-frame box mesh for entities lacking a model (block atlas texture).
@@ -127,6 +134,7 @@ impl Graphics {
         atlas: &Atlas,
         entity_atlas: &EntityAtlas,
         item_atlas: &ItemAtlas,
+        gui_atlas: &GuiAtlas,
     ) -> Self {
         let size = window.inner_size();
         let width = size.width.max(1);
@@ -210,6 +218,14 @@ impl Graphics {
             item_atlas.width,
             item_atlas.height,
         );
+        let gui_atlas_bind_group = upload_texture(
+            &device,
+            &queue,
+            &hud.atlas_layout,
+            &gui_atlas.rgba,
+            gui_atlas.width,
+            gui_atlas.height,
+        );
 
         let depth_view = create_depth(&device, width, height);
 
@@ -227,15 +243,37 @@ impl Graphics {
             chunk_meshes: HashMap::new(),
             hud,
             hud_color_buffer: None,
-            hud_tex_buffer: None,
+            hud_gui_buffer: None,
+            hud_item_buffer: None,
+            hud_text_buffer: None,
             item_atlas_bind_group,
+            gui_atlas_bind_group,
             entity_atlas_bind_group,
             box_entity_buffer: None,
             model_entity_buffer: None,
         }
     }
 
-    fn set_hud(&mut self, color_verts: &[[f32; 5]], tex_verts: &[[f32; 4]]) {
+    fn set_hud(
+        &mut self,
+        color_verts: &[[f32; 5]],
+        gui_verts: &[[f32; 4]],
+        item_verts: &[[f32; 4]],
+        text_verts: &[[f32; 4]],
+    ) {
+        let tex_buf = |device: &wgpu::Device, label: &str, verts: &[[f32; 4]]| {
+            (!verts.is_empty()).then(|| {
+                let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some(label),
+                    contents: bytemuck::cast_slice(verts),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+                (buffer, verts.len() as u32)
+            })
+        };
+        self.hud_gui_buffer = tex_buf(&self.device, "hud gui", gui_verts);
+        self.hud_item_buffer = tex_buf(&self.device, "hud item", item_verts);
+        self.hud_text_buffer = tex_buf(&self.device, "hud text", text_verts);
         self.hud_color_buffer = (!color_verts.is_empty()).then(|| {
             let buffer = self
                 .device
@@ -245,16 +283,6 @@ impl Graphics {
                     usage: wgpu::BufferUsages::VERTEX,
                 });
             (buffer, color_verts.len() as u32)
-        });
-        self.hud_tex_buffer = (!tex_verts.is_empty()).then(|| {
-            let buffer = self
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("hud tex"),
-                    contents: bytemuck::cast_slice(tex_verts),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-            (buffer, tex_verts.len() as u32)
         });
     }
 
@@ -367,18 +395,25 @@ impl Graphics {
                 pass.set_vertex_buffer(0, buffer.slice(..));
                 pass.draw(0..*count, 0..1);
             }
-            // HUD overlay: coloured pass (crosshair + hotbar + bars) then the
-            // textured pass (item icons sampled from the item atlas).
+            // HUD overlay: coloured quads, then GUI sprites (gui atlas), item
+            // icons (item atlas), and text (gui atlas) — in that order so text
+            // sits on top of icons which sit on top of backgrounds.
             if let Some((buf, count)) = &self.hud_color_buffer {
                 pass.set_pipeline(&self.hud.color);
                 pass.set_vertex_buffer(0, buf.slice(..));
                 pass.draw(0..*count, 0..1);
             }
-            if let Some((buf, count)) = &self.hud_tex_buffer {
-                pass.set_pipeline(&self.hud.textured);
-                pass.set_bind_group(0, &self.item_atlas_bind_group, &[]);
-                pass.set_vertex_buffer(0, buf.slice(..));
-                pass.draw(0..*count, 0..1);
+            pass.set_pipeline(&self.hud.textured);
+            for (buffer, bind) in [
+                (&self.hud_gui_buffer, &self.gui_atlas_bind_group),
+                (&self.hud_item_buffer, &self.item_atlas_bind_group),
+                (&self.hud_text_buffer, &self.gui_atlas_bind_group),
+            ] {
+                if let Some((buf, count)) = buffer {
+                    pass.set_bind_group(0, bind, &[]);
+                    pass.set_vertex_buffer(0, buf.slice(..));
+                    pass.draw(0..*count, 0..1);
+                }
             }
         }
         self.queue.submit(Some(encoder.finish()));
@@ -409,6 +444,7 @@ struct App {
     atlas: Arc<Atlas>,
     entity_atlas: Arc<EntityAtlas>,
     item_atlas: Arc<ItemAtlas>,
+    gui_atlas: Arc<GuiAtlas>,
     /// Finished chunk meshes from the background mesher thread.
     mesh_rx: Receiver<((i32, i32), Vec<Vertex>)>,
     gfx: Option<Graphics>,
@@ -444,6 +480,7 @@ impl App {
         atlas: Arc<Atlas>,
         entity_atlas: Arc<EntityAtlas>,
         item_atlas: Arc<ItemAtlas>,
+        gui_atlas: Arc<GuiAtlas>,
         mesh_rx: Receiver<((i32, i32), Vec<Vertex>)>,
     ) -> Self {
         Self {
@@ -451,6 +488,7 @@ impl App {
             atlas,
             entity_atlas,
             item_atlas,
+            gui_atlas,
             mesh_rx,
             gfx: None,
             yaw: 0.0,
@@ -662,6 +700,7 @@ impl ApplicationHandler for App {
             &self.atlas,
             &self.entity_atlas,
             &self.item_atlas,
+            &self.gui_atlas,
         ));
         self.last_frame = Instant::now();
     }
@@ -770,14 +809,17 @@ impl ApplicationHandler for App {
                     let camera = first_person_camera(eye, self.yaw, self.pitch, aspect);
                     gfx.box_entity_buffer = gfx.make_vertex_buffer(&box_v);
                     gfx.model_entity_buffer = gfx.make_vertex_buffer(&model_v);
-                    let (mut hud_c, mut hud_t) =
-                        hud_geometry(player.health, player.food, selected, &hotbar, aspect);
+                    let gui = &self.gui_atlas;
+                    let (mut hud_c, mut hud_g, mut hud_i) =
+                        hud_geometry(gui, player.health, player.food, selected, &hotbar, aspect);
+                    let hud_text = Vec::new();
                     if let Some(inv) = &inv_icons {
-                        let (ic, it) = inventory_geometry(inv, aspect);
+                        let (ic, ig, ii) = inventory_geometry(gui, inv, aspect);
                         hud_c.extend(ic);
-                        hud_t.extend(it);
+                        hud_g.extend(ig);
+                        hud_i.extend(ii);
                     }
-                    gfx.set_hud(&hud_c, &hud_t);
+                    gfx.set_hud(&hud_c, &hud_g, &hud_i, &hud_text);
                     gfx.render(&camera);
                 }
 
@@ -806,10 +848,12 @@ pub fn run(
     atlas: Atlas,
     entity_atlas: EntityAtlas,
     item_atlas: ItemAtlas,
+    gui_atlas: GuiAtlas,
 ) -> anyhow::Result<()> {
     let atlas = Arc::new(atlas);
     let entity_atlas = Arc::new(entity_atlas);
     let item_atlas = Arc::new(item_atlas);
+    let gui_atlas = Arc::new(gui_atlas);
     // Spawn the background mesher.
     let (mesh_tx, mesh_rx) = std::sync::mpsc::channel();
     {
@@ -819,7 +863,7 @@ pub fn run(
     }
 
     let event_loop = EventLoop::new()?;
-    let mut app = App::new(shared, atlas, entity_atlas, item_atlas, mesh_rx);
+    let mut app = App::new(shared, atlas, entity_atlas, item_atlas, gui_atlas, mesh_rx);
     event_loop.run_app(&mut app)?;
     Ok(())
 }

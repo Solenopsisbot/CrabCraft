@@ -1,10 +1,11 @@
-//! Renders the open-inventory panel (grid + item icons) over the HUD to a PNG.
+//! Renders the open inventory (vanilla container background + item icons + the
+//! HUD behind it) to a PNG.
 //!
 //! Usage: cargo run -p crab-render --example inventory -- <out.png> <jar>
 
 use std::path::Path;
 
-use crab_render::{hud_geometry, inventory_geometry, render_hud_to_png};
+use crab_render::{hud_geometry, inventory_geometry, render_hud_to_png, HudFrame};
 
 fn main() {
     let out = std::env::args()
@@ -13,7 +14,9 @@ fn main() {
     let jar = std::env::args()
         .nth(2)
         .expect("usage: inventory <out.png> <jar>");
+    let jar = Path::new(&jar);
 
+    let gui = crab_assets::load_gui_atlas(jar).expect("gui atlas");
     let names = [
         "diamond",
         "iron_ingot",
@@ -33,10 +36,8 @@ fn main() {
         "torch",
     ];
     let owned: Vec<String> = names.iter().map(ToString::to_string).collect();
-    let atlas = crab_assets::load_item_atlas(Path::new(&jar), &owned).expect("item atlas");
-    eprintln!("resolved {}/{} icons", atlas.len(), owned.len());
+    let atlas = crab_assets::load_item_atlas(jar, &owned).expect("item atlas");
 
-    // Fill the 36 inventory slots with a sampling of items (some empty).
     let inv: Vec<Option<[f32; 4]>> = (0..36)
         .map(|i| {
             if i % 3 == 1 {
@@ -46,18 +47,25 @@ fn main() {
             }
         })
         .collect();
-    // A hotbar sample too.
     let hotbar: Vec<Option<[f32; 4]>> = (0..9).map(|i| atlas.icon(names[i])).collect();
 
     let aspect = 16.0 / 9.0;
-    let (mut color, mut tex) = hud_geometry(15.0, 18, 2, &hotbar, aspect);
-    let (ic, it) = inventory_geometry(&inv, aspect);
+    let (mut color, mut g, mut item) = hud_geometry(&gui, 15.0, 18, 2, &hotbar, aspect);
+    let (ic, ig, iitem) = inventory_geometry(&gui, &inv, aspect);
     color.extend(ic);
-    tex.extend(it);
+    g.extend(ig);
+    item.extend(iitem);
 
     render_hud_to_png(
-        &color,
-        &tex,
+        &HudFrame {
+            color: &color,
+            gui: &g,
+            item: &item,
+            text: &[],
+        },
+        &gui.rgba,
+        gui.width,
+        gui.height,
         &atlas.rgba,
         atlas.width,
         atlas.height,
