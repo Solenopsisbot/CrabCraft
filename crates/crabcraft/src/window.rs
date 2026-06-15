@@ -120,6 +120,21 @@ fn push_color_quad(v: &mut Vec<[f32; 5]>, x0: f32, y0: f32, x1: f32, y1: f32, c:
     }
 }
 
+/// Pushes a textured 2D quad (item-atlas UV) into a HUD textured stream.
+fn push_tex2d(v: &mut Vec<[f32; 4]>, x0: f32, y0: f32, x1: f32, y1: f32, uv: [f32; 4]) {
+    let [u0, v0, u1, v1] = uv;
+    for q in [
+        [x0, y1, u0, v0],
+        [x1, y1, u1, v0],
+        [x1, y0, u1, v1],
+        [x0, y1, u0, v0],
+        [x1, y0, u1, v1],
+        [x0, y0, u0, v1],
+    ] {
+        v.push(q);
+    }
+}
+
 /// Builds chat geometry: recent log lines (and the input line when open) as
 /// dark bars + bitmap text near the bottom-left. Returns `(color, text)`.
 fn chat_geometry(
@@ -596,6 +611,8 @@ struct App {
     /// Chat input state: open + the line being typed.
     chat_open: bool,
     chat_buffer: String,
+    /// Cursor position in NDC (for inventory slot hit-testing).
+    cursor: (f32, f32),
     /// Per-entity smoothed render state (interpolation + walk animation).
     entity_anim: HashMap<i32, EntityAnim>,
     /// Smoothed camera eye position (eases toward the player's stepped pos).
@@ -638,6 +655,7 @@ impl App {
             inventory_open: false,
             chat_open: false,
             chat_buffer: String::new(),
+            cursor: (0.0, 0.0),
             entity_anim: HashMap::new(),
             render_eye: None,
         }
@@ -706,6 +724,25 @@ impl App {
             }
         }
         (box_v, model_v, item_v)
+    }
+
+    /// Hit-tests the cursor against the inventory grid and queues a click on the
+    /// matching inventory slot (panel slot p -> inventory slot 9+p).
+    fn inventory_click(&self, button: i8) {
+        let aspect = self.gfx.as_ref().map_or(1.0, Graphics::aspect);
+        let rect = crab_render::inventory_rect(aspect);
+        let (cx, cy) = self.cursor;
+        for panel in 0..36usize {
+            let (x0, y0, x1, y1) = crab_render::inventory_slot_rect(rect, panel);
+            if cx >= x0 && cx <= x1 && cy >= y0 && cy <= y1 {
+                self.shared
+                    .click_outbox
+                    .lock()
+                    .unwrap()
+                    .push((9 + panel as i16, button));
+                return;
+            }
+        }
     }
 
     /// Opens/closes the inventory, freeing or recapturing the cursor.
@@ -946,8 +983,31 @@ impl ApplicationHandler for App {
                     self.keys.remove(&code);
                 }
             }
+            WindowEvent::CursorMoved { position, .. } => {
+                if let Some(gfx) = self.gfx.as_ref() {
+                    let (w, h) = (
+                        f64::from(gfx.config.width.max(1)),
+                        f64::from(gfx.config.height.max(1)),
+                    );
+                    self.cursor = (
+                        (position.x / w * 2.0 - 1.0) as f32,
+                        (1.0 - position.y / h * 2.0) as f32,
+                    );
+                }
+            }
             WindowEvent::MouseInput { state, button, .. } => {
                 let pressed = state == ElementState::Pressed;
+                // While the inventory is open, clicks move items, not the world.
+                if self.inventory_open {
+                    if pressed {
+                        match button {
+                            MouseButton::Left => self.inventory_click(0),
+                            MouseButton::Right => self.inventory_click(1),
+                            _ => {}
+                        }
+                    }
+                    return;
+                }
                 let mut controls = self.shared.controls.lock().unwrap();
                 match button {
                     // Left mouse is held: attack stays true until release so the
@@ -1018,6 +1078,19 @@ impl ApplicationHandler for App {
                         hud_c.extend(ic);
                         hud_g.extend(ig);
                         hud_i.extend(ii);
+                        // Item held on the cursor, drawn at the mouse position.
+                        if let Some(it) = *self.shared.carried.lock().unwrap() {
+                            if let Some(uv) = u32::try_from(it.item_id)
+                                .ok()
+                                .and_then(crab_registry::item_name)
+                                .and_then(|n| self.item_atlas.icon(n))
+                            {
+                                let (cx, cy) = self.cursor;
+                                let s = 0.055;
+                                let hw = s / aspect;
+                                push_tex2d(&mut hud_i, cx - hw, cy - s, cx + hw, cy + s, uv);
+                            }
+                        }
                     }
                     gfx.set_hud(&hud_c, &hud_g, &hud_i, &hud_text);
                     gfx.render(&camera);

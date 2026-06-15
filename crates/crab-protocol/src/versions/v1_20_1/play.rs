@@ -643,6 +643,65 @@ impl Packet for ClientCommand {
     }
 }
 
+/// `0x0b` — click a slot in an open container (or the player inventory). For a
+/// normal left-click swap: `mode` = 0, `button` = 0, `changed` lists the slots
+/// we changed (their new contents), and `carried` is the new cursor stack.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClickContainer {
+    pub window_id: u8,
+    pub state_id: i32,
+    pub slot: i16,
+    pub button: i8,
+    pub mode: i32,
+    pub changed: Vec<(i16, Option<SlotItem>)>,
+    pub carried: Option<SlotItem>,
+}
+
+impl Packet for ClickContainer {
+    const ID: i32 = 0x0b;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Serverbound;
+
+    fn encode<B: BufMut>(&self, dst: &mut B) -> Result<(), ProtoError> {
+        dst.put_u8(self.window_id);
+        dst.put_varint(self.state_id);
+        dst.put_i16(self.slot);
+        dst.put_i8(self.button);
+        dst.put_varint(self.mode);
+        dst.put_varint(self.changed.len() as i32);
+        for (loc, item) in &self.changed {
+            dst.put_i16(*loc);
+            write_slot(dst, *item);
+        }
+        write_slot(dst, self.carried);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(src: &mut B) -> Result<Self, ProtoError> {
+        let window_id = src.read_u8()?;
+        let state_id = src.read_varint()?;
+        let slot = src.read_i16()?;
+        let button = src.read_i8()?;
+        let mode = src.read_varint()?;
+        let count = src.read_varint()?.max(0) as usize;
+        let mut changed = Vec::with_capacity(count.min(64));
+        for _ in 0..count {
+            let loc = src.read_i16()?;
+            changed.push((loc, read_slot(src)?));
+        }
+        let carried = read_slot(src)?;
+        Ok(Self {
+            window_id,
+            state_id,
+            slot,
+            button,
+            mode,
+            changed,
+            carried,
+        })
+    }
+}
+
 /// `0x2f` — swing an arm (cosmetic; sent alongside an attack). `hand`: 0 = main.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SwingArm {
@@ -993,6 +1052,31 @@ mod tests {
     #[test]
     fn set_held_item_roundtrips() {
         roundtrip(&SetHeldItem { slot: 4 });
+    }
+
+    #[test]
+    fn click_container_roundtrips() {
+        roundtrip(&ClickContainer {
+            window_id: 0,
+            state_id: 5,
+            slot: 36,
+            button: 0,
+            mode: 0,
+            changed: vec![
+                (36, None),
+                (
+                    9,
+                    Some(SlotItem {
+                        item_id: 1,
+                        count: 64,
+                    }),
+                ),
+            ],
+            carried: Some(SlotItem {
+                item_id: 764,
+                count: 1,
+            }),
+        });
     }
 
     #[test]

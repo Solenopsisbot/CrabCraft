@@ -15,9 +15,9 @@ use crab_protocol::versions::v1_20_1::login::{
     SetCompression,
 };
 use crab_protocol::versions::v1_20_1::play::{
-    ChatCommand, ClientChatMessage, ClientCommand, ClientInformation, ConfirmTeleport,
-    InteractEntity, Interaction, KeepAlive, KeepAliveResponse, PlayDisconnect, PlayerDigging,
-    SetContainerContent, SetContainerSlot, SetCreativeSlot, SetHealth, SetHeldItem,
+    ChatCommand, ClickContainer, ClientChatMessage, ClientCommand, ClientInformation,
+    ConfirmTeleport, InteractEntity, Interaction, KeepAlive, KeepAliveResponse, PlayDisconnect,
+    PlayerDigging, SetContainerContent, SetContainerSlot, SetCreativeSlot, SetHealth, SetHeldItem,
     SetPlayerPosition, SetPlayerPositionRotation, SlotItem, SwingArm, SynchronizePlayerPosition,
     SystemChat, UseItemOn,
 };
@@ -196,6 +196,12 @@ pub struct Shared {
     pub chat_log: Mutex<std::collections::VecDeque<String>>,
     /// Chat/command lines the UI wants sent (drained by the net thread).
     pub chat_outbox: Mutex<Vec<String>>,
+    /// The item on the cursor while the inventory is open.
+    pub carried: Mutex<Option<SlotItem>>,
+    /// Latest container `stateId` (echoed back in inventory clicks).
+    pub window_state: Mutex<i32>,
+    /// Inventory clicks the UI wants performed: `(slot, button)`.
+    pub click_outbox: Mutex<Vec<(i16, i8)>>,
     /// Cleared to `false` when the session ends, so readers can stop.
     pub running: AtomicBool,
 }
@@ -212,6 +218,9 @@ impl Shared {
             sfx: Mutex::new(None),
             chat_log: Mutex::new(std::collections::VecDeque::new()),
             chat_outbox: Mutex::new(Vec::new()),
+            carried: Mutex::new(None),
+            window_state: Mutex::new(0),
+            click_outbox: Mutex::new(Vec::new()),
             running: AtomicBool::new(true),
         }
     }
@@ -580,6 +589,37 @@ where
                         conn.send(&ClientChatMessage::unsigned(msg.clone())).await?;
                     }
                     push_chat(shared, msg);
+                }
+
+                // Inventory clicks: swap the clicked slot with the cursor stack,
+                // predict locally, and tell the server (it corrects via 0x12/0x14).
+                let clicks: Vec<(i16, i8)> =
+                    std::mem::take(&mut *shared.click_outbox.lock().unwrap());
+                for (slot, button) in clicks {
+                    let idx = slot as usize;
+                    let state_id = *shared.window_state.lock().unwrap();
+                    let swapped = {
+                        let mut inv = shared.inventory.lock().unwrap();
+                        let mut carried = shared.carried.lock().unwrap();
+                        if idx >= inv.len() {
+                            None
+                        } else {
+                            std::mem::swap(&mut inv[idx], &mut *carried);
+                            Some((inv[idx], *carried))
+                        }
+                    };
+                    if let Some((slot_item, carried)) = swapped {
+                        conn.send(&ClickContainer {
+                            window_id: 0,
+                            state_id,
+                            slot,
+                            button,
+                            mode: 0,
+                            changed: vec![(slot, slot_item)],
+                            carried,
+                        })
+                        .await?;
+                    }
                 }
 
                 if snapshot.spawned {
@@ -1043,6 +1083,7 @@ fn handle_container_content(shared: &Arc<Shared>, pkt: SetContainerContent) {
     if pkt.window_id != 0 {
         return; // only the player's own inventory is tracked
     }
+    *shared.window_state.lock().unwrap() = pkt.state_id;
     let mut inv = shared.inventory.lock().unwrap();
     *inv = pkt.slots;
     inv.resize(PLAYER_INVENTORY_SLOTS, None);
@@ -1051,6 +1092,7 @@ fn handle_container_content(shared: &Arc<Shared>, pkt: SetContainerContent) {
 
 /// Applies a single slot update to the tracked player inventory.
 fn handle_container_slot(shared: &Arc<Shared>, pkt: &SetContainerSlot) {
+    *shared.window_state.lock().unwrap() = pkt.state_id;
     if pkt.window_id != 0 {
         return;
     }
