@@ -680,6 +680,106 @@ impl Packet for InteractEntity {
     }
 }
 
+/// Writes an inventory `Slot`: present flag, then id/count/(empty NBT).
+fn write_slot<B: BufMut>(dst: &mut B, item: Option<SlotItem>) {
+    match item {
+        Some(it) => {
+            dst.put_bool(true);
+            dst.put_varint(it.item_id);
+            dst.put_i8(it.count);
+            dst.put_u8(0x00); // optionalNbt: none (TAG_End)
+        }
+        None => dst.put_bool(false),
+    }
+}
+
+/// Reads an inventory `Slot` (any item NBT is parsed and discarded).
+fn read_slot<B: Buf>(src: &mut B) -> Result<Option<SlotItem>, ProtoError> {
+    if src.read_bool()? {
+        let item_id = src.read_varint()?;
+        let count = src.read_i8()?;
+        let _nbt = nbt::read_nbt(src)?;
+        Ok(Some(SlotItem { item_id, count }))
+    } else {
+        Ok(None)
+    }
+}
+
+/// `0x12` — the full contents of an open window (window 0 = player inventory).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SetContainerContent {
+    pub window_id: u8,
+    pub state_id: i32,
+    pub slots: Vec<Option<SlotItem>>,
+    pub carried: Option<SlotItem>,
+}
+
+impl Packet for SetContainerContent {
+    const ID: i32 = 0x12;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Clientbound;
+
+    fn encode<B: BufMut>(&self, dst: &mut B) -> Result<(), ProtoError> {
+        dst.put_u8(self.window_id);
+        dst.put_varint(self.state_id);
+        dst.put_varint(self.slots.len() as i32);
+        for slot in &self.slots {
+            write_slot(dst, *slot);
+        }
+        write_slot(dst, self.carried);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(src: &mut B) -> Result<Self, ProtoError> {
+        let window_id = src.read_u8()?;
+        let state_id = src.read_varint()?;
+        let count = src.read_varint()?.max(0) as usize;
+        let mut slots = Vec::with_capacity(count.min(1024));
+        for _ in 0..count {
+            slots.push(read_slot(src)?);
+        }
+        let carried = read_slot(src)?;
+        Ok(Self {
+            window_id,
+            state_id,
+            slots,
+            carried,
+        })
+    }
+}
+
+/// `0x14` — a single slot update within a window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SetContainerSlot {
+    pub window_id: i8,
+    pub state_id: i32,
+    pub slot: i16,
+    pub item: Option<SlotItem>,
+}
+
+impl Packet for SetContainerSlot {
+    const ID: i32 = 0x14;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Clientbound;
+
+    fn encode<B: BufMut>(&self, dst: &mut B) -> Result<(), ProtoError> {
+        dst.put_i8(self.window_id);
+        dst.put_varint(self.state_id);
+        dst.put_i16(self.slot);
+        write_slot(dst, self.item);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(src: &mut B) -> Result<Self, ProtoError> {
+        Ok(Self {
+            window_id: src.read_i8()?,
+            state_id: src.read_varint()?,
+            slot: src.read_i16()?,
+            item: read_slot(src)?,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -822,6 +922,38 @@ mod tests {
                 hand: 0,
             },
             sneaking: false,
+        });
+    }
+
+    #[test]
+    fn inventory_packets_roundtrip() {
+        roundtrip(&SetContainerContent {
+            window_id: 0,
+            state_id: 1,
+            slots: vec![
+                None,
+                Some(SlotItem {
+                    item_id: 764,
+                    count: 5,
+                }),
+                None,
+            ],
+            carried: None,
+        });
+        roundtrip(&SetContainerSlot {
+            window_id: 0,
+            state_id: 2,
+            slot: 36,
+            item: Some(SlotItem {
+                item_id: 1,
+                count: 64,
+            }),
+        });
+        roundtrip(&SetContainerSlot {
+            window_id: -1,
+            state_id: 0,
+            slot: -1,
+            item: None,
         });
     }
 

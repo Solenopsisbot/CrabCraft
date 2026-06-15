@@ -16,9 +16,9 @@ use crab_protocol::versions::v1_20_1::login::{
 };
 use crab_protocol::versions::v1_20_1::play::{
     ClientChatMessage, ClientCommand, ClientInformation, ConfirmTeleport, InteractEntity,
-    Interaction, KeepAlive, KeepAliveResponse, PlayDisconnect, PlayerDigging, SetCreativeSlot,
-    SetHealth, SetPlayerPosition, SetPlayerPositionRotation, SlotItem, SwingArm,
-    SynchronizePlayerPosition, SystemChat, UseItemOn,
+    Interaction, KeepAlive, KeepAliveResponse, PlayDisconnect, PlayerDigging, SetContainerContent,
+    SetContainerSlot, SetCreativeSlot, SetHealth, SetPlayerPosition, SetPlayerPositionRotation,
+    SlotItem, SwingArm, SynchronizePlayerPosition, SystemChat, UseItemOn,
 };
 use crab_protocol::versions::PROTOCOL_1_20_1;
 use crab_protocol::BufExt;
@@ -38,6 +38,12 @@ const ID_ENTITY_TELEPORT: i32 = 0x68;
 const ID_ENTITY_DESTROY: i32 = 0x3e;
 const ID_UPDATE_HEALTH: i32 = 0x57;
 const ID_RESPAWN: i32 = 0x41;
+const ID_CONTAINER_CONTENT: i32 = 0x12;
+const ID_CONTAINER_SLOT: i32 = 0x14;
+
+/// Number of slots in the player inventory window (crafting + armour + main +
+/// hotbar + offhand).
+const PLAYER_INVENTORY_SLOTS: usize = 46;
 
 /// A tracked non-self entity (other player, mob, item, …) for rendering.
 #[derive(Clone, Copy, Debug)]
@@ -159,6 +165,8 @@ pub struct Shared {
     pub dirty_chunks: Mutex<HashSet<(i32, i32)>>,
     /// Other entities (players/mobs/...) by entity id.
     pub entities: Mutex<HashMap<i32, Entity>>,
+    /// The player inventory (window 0): `PLAYER_INVENTORY_SLOTS` slots.
+    pub inventory: Mutex<Vec<Option<SlotItem>>>,
     /// Cleared to `false` when the session ends, so readers can stop.
     pub running: AtomicBool,
 }
@@ -171,6 +179,7 @@ impl Shared {
             controls: Mutex::new(Controls::default()),
             dirty_chunks: Mutex::new(HashSet::new()),
             entities: Mutex::new(HashMap::new()),
+            inventory: Mutex::new(vec![None; PLAYER_INVENTORY_SLOTS]),
             running: AtomicBool::new(true),
         }
     }
@@ -458,6 +467,16 @@ where
                         // Entities don't carry across a respawn/dimension change.
                         shared.entities.lock().unwrap().clear();
                     }
+                    id if id == ID_CONTAINER_CONTENT => {
+                        if let Ok(pkt) = raw.decode::<SetContainerContent>() {
+                            handle_container_content(shared, pkt);
+                        }
+                    }
+                    id if id == ID_CONTAINER_SLOT => {
+                        if let Ok(pkt) = raw.decode::<SetContainerSlot>() {
+                            handle_container_slot(shared, &pkt);
+                        }
+                    }
                     id if id == PlayDisconnect::ID => {
                         let d: PlayDisconnect = raw.decode()?;
                         tracing::warn!("disconnected: {}", plain_text(&d.reason_json));
@@ -724,6 +743,61 @@ fn handle_entity_destroy(raw: &crab_net::RawPacket, shared: &Arc<Shared>) -> Res
         entities.remove(&b.read_varint()?);
     }
     Ok(())
+}
+
+/// A readable label for an item id (e.g. `"diamond"`), falling back to `item#N`.
+fn item_label(id: i32) -> String {
+    u32::try_from(id)
+        .ok()
+        .and_then(crab_registry::item_name)
+        .map_or_else(|| format!("item#{id}"), str::to_string)
+}
+
+/// Renders the non-empty inventory slots for logging.
+fn inventory_summary(inv: &[Option<SlotItem>]) -> String {
+    let items: Vec<String> = inv
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| s.map(|it| format!("[{i}]={}x{}", item_label(it.item_id), it.count)))
+        .collect();
+    if items.is_empty() {
+        "empty".to_string()
+    } else {
+        items.join(" ")
+    }
+}
+
+/// Replaces the tracked player inventory from a full window snapshot (window 0).
+fn handle_container_content(shared: &Arc<Shared>, pkt: SetContainerContent) {
+    if pkt.window_id != 0 {
+        return; // only the player's own inventory is tracked
+    }
+    let mut inv = shared.inventory.lock().unwrap();
+    *inv = pkt.slots;
+    inv.resize(PLAYER_INVENTORY_SLOTS, None);
+    tracing::info!("inventory: {}", inventory_summary(&inv));
+}
+
+/// Applies a single slot update to the tracked player inventory.
+fn handle_container_slot(shared: &Arc<Shared>, pkt: &SetContainerSlot) {
+    if pkt.window_id != 0 {
+        return;
+    }
+    let Ok(idx) = usize::try_from(pkt.slot) else {
+        return;
+    };
+    let mut inv = shared.inventory.lock().unwrap();
+    if idx < inv.len() {
+        inv[idx] = pkt.item;
+        if let Some(it) = pkt.item {
+            tracing::info!(
+                slot = pkt.slot,
+                item = item_label(it.item_id),
+                count = it.count,
+                "inventory slot updated"
+            );
+        }
+    }
 }
 
 /// The id and entry distance of the nearest entity whose bounding box the ray

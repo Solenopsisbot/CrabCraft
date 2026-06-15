@@ -13,9 +13,11 @@
 
 mod blocks_1_20_1;
 mod entities_1_20_1;
+mod items_1_20_1;
 
 pub use blocks_1_20_1::BLOCKS_1_20_1;
 pub use entities_1_20_1::ENTITIES_1_20_1;
+pub use items_1_20_1::ITEMS_1_20_1;
 
 /// An entity type and its default hitbox size.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -39,6 +41,29 @@ pub fn entity_def(id: u32) -> Option<&'static EntityDef> {
 #[must_use]
 pub fn entity_name(id: u32) -> Option<&'static str> {
     entity_def(id).map(|e| e.name)
+}
+
+/// An item type and its maximum stack size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ItemDef {
+    pub id: u32,
+    pub name: &'static str,
+    pub stack_size: u8,
+}
+
+/// Looks up an item by its registry id.
+#[must_use]
+pub fn item_def(id: u32) -> Option<&'static ItemDef> {
+    ITEMS_1_20_1
+        .binary_search_by_key(&id, |e| e.id)
+        .ok()
+        .map(|i| &ITEMS_1_20_1[i])
+}
+
+/// Item name (e.g. `"diamond"`) for an item id.
+#[must_use]
+pub fn item_name(id: u32) -> Option<&'static str> {
+    item_def(id).map(|e| e.name)
 }
 
 /// A block and the contiguous, disjoint range of global block-state IDs it owns.
@@ -113,6 +138,22 @@ mod tests {
     #[test]
     fn out_of_range_is_none() {
         assert_eq!(block_name(u32::MAX), None);
+        assert_eq!(item_name(u32::MAX), None);
+    }
+
+    #[test]
+    fn known_items_resolve() {
+        assert_eq!(item_name(0), Some("air"));
+        assert_eq!(item_name(1), Some("stone"));
+        assert_eq!(item_name(764), Some("diamond"));
+        assert_eq!(item_def(764).map(|i| i.stack_size), Some(64));
+    }
+
+    #[test]
+    fn item_table_is_sorted() {
+        for w in ITEMS_1_20_1.windows(2) {
+            assert!(w[0].id < w[1].id, "items not sorted at {}", w[0].name);
+        }
     }
 
     #[test]
