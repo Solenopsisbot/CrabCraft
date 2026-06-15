@@ -58,42 +58,6 @@ fn first_person_camera(
     }
 }
 
-/// Builds vertices for tracked entities, split into (box, model): entities with
-/// a loaded 3D model go in `model` (entity atlas), the rest in `box` (block
-/// atlas white tile + colour).
-fn build_entity_meshes(
-    shared: &Shared,
-    atlas: &Atlas,
-    entity_atlas: &EntityAtlas,
-) -> (Vec<Vertex>, Vec<Vertex>) {
-    let entities = shared.entities.lock().unwrap();
-    let white = atlas.white_uv();
-    let dims = [entity_atlas.width as f32, entity_atlas.height as f32];
-    let (mut box_v, mut model_v) = (Vec::new(), Vec::new());
-    for e in entities.values() {
-        if let Some(m) = entity_atlas.models.get(&e.type_id) {
-            model_v.extend(entity_mesh(
-                &m.geo,
-                [e.x as f32, e.y as f32, e.z as f32],
-                [m.atlas_x, m.atlas_y],
-                dims,
-                0.0,
-                0.0,
-            ));
-        } else {
-            let hw = f64::from(e.half_width);
-            let min = [(e.x - hw) as f32, e.y as f32, (e.z - hw) as f32];
-            let max = [
-                (e.x + hw) as f32,
-                (e.y + f64::from(e.height)) as f32,
-                (e.z + hw) as f32,
-            ];
-            box_v.extend(box_mesh(min, max, white, box_color(e.type_id)));
-        }
-    }
-    (box_v, model_v)
-}
-
 fn box_color(type_id: i32) -> [f32; 3] {
     let h = (type_id as u32).wrapping_mul(2_654_435_761);
     [
@@ -442,6 +406,20 @@ struct App {
     look_init: bool,
     keys: HashSet<KeyCode>,
     last_frame: Instant,
+    /// Per-entity smoothed render state (interpolation + walk animation).
+    entity_anim: HashMap<i32, EntityAnim>,
+    /// Smoothed camera eye position (eases toward the player's stepped pos).
+    render_eye: Option<Vec3>,
+}
+
+/// Smoothed render state for one entity.
+#[derive(Clone, Copy)]
+struct EntityAnim {
+    pos: [f32; 3],
+    /// Accumulated walk-cycle phase (radians).
+    phase: f32,
+    /// Smoothed limb-swing amplitude (0 = still).
+    amount: f32,
 }
 
 impl App {
@@ -464,7 +442,62 @@ impl App {
             look_init: false,
             keys: HashSet::new(),
             last_frame: Instant::now(),
+            entity_anim: HashMap::new(),
+            render_eye: None,
         }
+    }
+
+    /// Advances per-entity interpolation + walk animation by `dt` and builds the
+    /// entity meshes (boxed entities first, 3D-model entities second).
+    fn step_entities(&mut self, dt: f32) -> (Vec<Vertex>, Vec<Vertex>) {
+        let entities = self.shared.entities.lock().unwrap();
+        let ease = 1.0 - (-dt * 12.0).exp();
+        let mut alive = HashSet::new();
+        for (&id, e) in entities.iter() {
+            alive.insert(id);
+            let target = [e.x as f32, e.y as f32, e.z as f32];
+            let a = self.entity_anim.entry(id).or_insert(EntityAnim {
+                pos: target,
+                phase: 0.0,
+                amount: 0.0,
+            });
+            let before = a.pos;
+            for (k, &t) in target.iter().enumerate() {
+                a.pos[k] += (t - a.pos[k]) * ease;
+            }
+            let (dx, dz) = (a.pos[0] - before[0], a.pos[2] - before[2]);
+            let moved = (dx * dx + dz * dz).sqrt();
+            a.phase += moved * 2.2;
+            let target_amount = (moved / dt.max(1e-3) * 0.10).min(0.7);
+            a.amount += (target_amount - a.amount) * ease;
+        }
+        self.entity_anim.retain(|id, _| alive.contains(id));
+
+        let white = self.atlas.white_uv();
+        let dims = [
+            self.entity_atlas.width as f32,
+            self.entity_atlas.height as f32,
+        ];
+        let (mut box_v, mut model_v) = (Vec::new(), Vec::new());
+        for (&id, e) in entities.iter() {
+            let a = self.entity_anim[&id];
+            if let Some(m) = self.entity_atlas.models.get(&e.type_id) {
+                model_v.extend(entity_mesh(
+                    &m.geo,
+                    a.pos,
+                    [m.atlas_x, m.atlas_y],
+                    dims,
+                    a.phase,
+                    a.amount,
+                ));
+            } else {
+                let hw = e.half_width;
+                let min = [a.pos[0] - hw, a.pos[1], a.pos[2] - hw];
+                let max = [a.pos[0] + hw, a.pos[1] + e.height, a.pos[2] + hw];
+                box_v.extend(box_mesh(min, max, white, box_color(e.type_id)));
+            }
+        }
+        (box_v, model_v)
     }
 
     /// Updates look from arrow keys and publishes movement intent to the shared
@@ -631,13 +664,20 @@ impl ApplicationHandler for App {
                 self.update_input(dt);
                 self.process_meshes();
 
-                let (box_v, model_v) =
-                    build_entity_meshes(&self.shared, &self.atlas, &self.entity_atlas);
+                let (box_v, model_v) = self.step_entities(dt);
                 let hotbar = hotbar_icons(&self.shared, &self.item_atlas);
                 let selected = player.selected_slot as usize;
+                // Smooth the camera toward the 20 Hz-stepped player position.
+                let target_eye = Vec3::new(player.x as f32, player.y as f32, player.z as f32);
+                let eye = match self.render_eye {
+                    Some(prev) if player.spawned => {
+                        prev + (target_eye - prev) * (1.0 - (-dt * 22.0).exp())
+                    }
+                    _ => target_eye,
+                };
+                self.render_eye = Some(eye);
                 if let Some(gfx) = self.gfx.as_mut() {
                     let aspect = gfx.aspect();
-                    let eye = Vec3::new(player.x as f32, player.y as f32, player.z as f32);
                     let camera = first_person_camera(eye, self.yaw, self.pitch, aspect);
                     gfx.box_entity_buffer = gfx.make_vertex_buffer(&box_v);
                     gfx.model_entity_buffer = gfx.make_vertex_buffer(&model_v);

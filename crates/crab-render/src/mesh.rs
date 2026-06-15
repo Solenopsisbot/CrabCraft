@@ -479,6 +479,24 @@ mod tests {
     }
 
     #[test]
+    fn limb_swing_alternates_and_skips_body() {
+        use std::f32::consts::FRAC_PI_2;
+        // Non-limb bones never swing.
+        assert_eq!(limb_swing_deg("body", FRAC_PI_2, 1.0), 0.0);
+        assert_eq!(limb_swing_deg("head", FRAC_PI_2, 1.0), 0.0);
+        // Opposite legs swing in opposite directions.
+        let l0 = limb_swing_deg("leg0", FRAC_PI_2, 1.0);
+        let l1 = limb_swing_deg("leg1", FRAC_PI_2, 1.0);
+        assert!(l0 > 0.0 && l1 < 0.0 && (l0 + l1).abs() < 1e-3);
+        // Arm swings opposite the leg on the same side.
+        let leg = limb_swing_deg("right_leg", FRAC_PI_2, 1.0);
+        let arm = limb_swing_deg("right_arm", FRAC_PI_2, 1.0);
+        assert!(leg * arm < 0.0);
+        // No movement -> no swing.
+        assert_eq!(limb_swing_deg("leg0", FRAC_PI_2, 0.0), 0.0);
+    }
+
+    #[test]
     fn unloaded_region_is_empty() {
         let world = World::overworld();
         let atlas = Atlas::debug_uniform();
