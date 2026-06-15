@@ -43,6 +43,7 @@ const ID_CONTAINER_CONTENT: i32 = 0x12;
 const ID_CONTAINER_SLOT: i32 = 0x14;
 const ID_SET_HELD_ITEM: i32 = 0x4d;
 const ID_ENTITY_METADATA: i32 = 0x52;
+const ID_GAME_STATE: i32 = 0x1f;
 
 /// Number of slots in the player inventory window (crafting + armour + main +
 /// hotbar + offhand).
@@ -498,6 +499,16 @@ where
                     }
                     id if id == ID_ENTITY_METADATA => {
                         let _ = handle_entity_metadata(&raw, shared);
+                    }
+                    id if id == ID_GAME_STATE => {
+                        // reason 3 = change game mode (so runtime /gamemode works).
+                        let mut b = raw.body.clone();
+                        if let (Ok(reason), Ok(mode)) = (b.read_u8(), b.read_f32()) {
+                            if reason == 3 {
+                                shared.player.lock().unwrap().gamemode = mode as u8;
+                                tracing::info!(gamemode = mode as u8, "game mode changed");
+                            }
+                        }
                     }
                     id if id == ID_UPDATE_HEALTH => {
                         if let Ok(pkt) = raw.decode::<SetHealth>() {
