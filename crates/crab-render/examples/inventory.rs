@@ -58,7 +58,7 @@ fn main() {
     let hotbar: Vec<Option<[f32; 4]>> = (0..9).map(|i| atlas.icon(names[i])).collect();
 
     let aspect = 16.0 / 9.0;
-    let (mut color, mut g, mut item) = hud_geometry(&gui, 15.0, 18, 2, &hotbar, aspect);
+    let (mut color, mut g, mut item) = hud_geometry(&gui, 15.0, 18, 0.4, 7, 2, &hotbar, aspect);
     let (ic, ig, iitem) = inventory_geometry(&gui, &inv, aspect);
     color.extend(ic);
     g.extend(ig);

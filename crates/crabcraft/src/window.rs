@@ -1066,8 +1066,16 @@ impl ApplicationHandler for App {
                     gfx.model_entity_buffer = gfx.make_vertex_buffer(&model_v);
                     gfx.item_entity_buffer = gfx.make_vertex_buffer(&item_v);
                     let gui = &self.gui_atlas;
-                    let (mut hud_c, mut hud_g, mut hud_i) =
-                        hud_geometry(gui, player.health, player.food, selected, &hotbar, aspect);
+                    let (mut hud_c, mut hud_g, mut hud_i) = hud_geometry(
+                        gui,
+                        player.health,
+                        player.food,
+                        player.xp_bar,
+                        player.xp_level,
+                        selected,
+                        &hotbar,
+                        aspect,
+                    );
                     let mut hud_text = count_text(&self.shared, gui, aspect, self.inventory_open);
                     let (chat_c, chat_t) =
                         chat_geometry(&self.shared, gui, self.chat_open, &self.chat_buffer, aspect);

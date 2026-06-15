@@ -240,10 +240,13 @@ pub fn push_text(
 /// 9 optional item-icon atlas UVs; `selected` is the highlighted slot. Returns
 /// `(colour, gui_tex, item_tex)` — gui_tex samples `gui`, item_tex the items.
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 pub fn hud_geometry(
     gui: &GuiAtlas,
     health: f32,
     food: i32,
+    xp_bar: f32,
+    xp_level: i32,
     selected: usize,
     hotbar: &[Option<[f32; 4]>],
     aspect: f32,
@@ -284,14 +287,74 @@ pub fn hud_geometry(
         }
     }
 
-    // Health (left, red) + food (right, brown) bars just above the hotbar.
-    let (by0, by1) = (bar.3 + 0.012, bar.3 + 0.042);
-    push_color_quad(&mut c, -0.5, by0, -0.02, by1, [0.12, 0.12, 0.12]);
-    let hp = (health / 20.0).clamp(0.0, 1.0);
-    push_color_quad(&mut c, -0.5, by0, -0.5 + 0.48 * hp, by1, [0.85, 0.15, 0.15]);
-    push_color_quad(&mut c, 0.02, by0, 0.5, by1, [0.12, 0.12, 0.12]);
-    let fd = (food as f32 / 20.0).clamp(0.0, 1.0);
-    push_color_quad(&mut c, 0.5 - 0.48 * fd, by0, 0.5, by1, [0.55, 0.40, 0.15]);
+    // Status bars above the hotbar, drawn from icons.png if available.
+    let ppx = (bar.2 - bar.0) / 182.0; // NDC per bar pixel
+                                       // sprite at bar-pixel x, `y_up` px above the hotbar top, size (w,h) px.
+    let spr = |buf: &mut Vec<TexVertex>, px: f32, y_up: f32, w: f32, h: f32, uv: [f32; 4]| {
+        let x0 = bar.0 + px * ppx;
+        let y0 = bar.3 + y_up * ppx;
+        push_tex_quad(buf, x0, y0, x0 + w * ppx, y0 + h * ppx, uv);
+    };
+
+    if let (Some(xbg), Some(xfg)) = (gui.sprite("xp_bg"), gui.sprite("xp_full")) {
+        spr(&mut g, 0.0, 4.0, 182.0, 5.0, xbg);
+        let frac = xp_bar.clamp(0.0, 1.0);
+        if frac > 0.0 {
+            let cuv = [xfg[0], xfg[1], xfg[0] + (xfg[2] - xfg[0]) * frac, xfg[3]];
+            spr(&mut g, 0.0, 4.0, 182.0 * frac, 5.0, cuv);
+        }
+    }
+    if let (Some(hbg), Some(hfull), Some(hhalf)) = (
+        gui.sprite("heart_bg"),
+        gui.sprite("heart_full"),
+        gui.sprite("heart_half"),
+    ) {
+        for i in 0..10 {
+            let x = i as f32 * 8.0;
+            spr(&mut g, x, 12.0, 9.0, 9.0, hbg);
+            let level = health - i as f32 * 2.0;
+            if level >= 2.0 {
+                spr(&mut g, x, 12.0, 9.0, 9.0, hfull);
+            } else if level >= 1.0 {
+                spr(&mut g, x, 12.0, 9.0, 9.0, hhalf);
+            }
+        }
+    } else {
+        // No jar icons: fall back to a coloured health bar.
+        let (by0, by1) = (bar.3 + 0.012, bar.3 + 0.042);
+        let hp = (health / 20.0).clamp(0.0, 1.0);
+        push_color_quad(&mut c, -0.5, by0, -0.5 + 0.48 * hp, by1, [0.85, 0.15, 0.15]);
+    }
+    if let (Some(fbg), Some(ffull), Some(fhalf)) = (
+        gui.sprite("food_bg"),
+        gui.sprite("food_full"),
+        gui.sprite("food_half"),
+    ) {
+        for i in 0..10 {
+            let x = 169.0 - i as f32 * 8.0;
+            spr(&mut g, x, 12.0, 9.0, 9.0, fbg);
+            let level = food as f32 - i as f32 * 2.0;
+            if level >= 2.0 {
+                spr(&mut g, x, 12.0, 9.0, 9.0, ffull);
+            } else if level >= 1.0 {
+                spr(&mut g, x, 12.0, 9.0, 9.0, fhalf);
+            }
+        }
+    } else {
+        let (by0, by1) = (bar.3 + 0.012, bar.3 + 0.042);
+        let fd = (food as f32 / 20.0).clamp(0.0, 1.0);
+        push_color_quad(&mut c, 0.5 - 0.48 * fd, by0, 0.5, by1, [0.55, 0.40, 0.15]);
+    }
+
+    // XP level number, centred just above the xp bar (green, in the gui/font).
+    if xp_level > 0 && gui.sprite("xp_full").is_some() {
+        let s = xp_level.to_string();
+        let th = 7.0 * ppx; // ~7px tall
+        let tw = gui.text_width(&s) * ppx;
+        let cx = bar.0 + (91.0 * ppx) - tw / 2.0;
+        let top = bar.3 + 11.0 * ppx;
+        push_text(&mut g, gui, &s, cx, top, th, aspect);
+    }
 
     (c, g, t)
 }

@@ -11,11 +11,12 @@ use std::path::Path;
 use crate::AssetError;
 
 const ATLAS_W: u32 = 512;
-const ATLAS_H: u32 = 384;
+const ATLAS_H: u32 = 512;
 // Placement of each source image within the atlas.
 const WIDGETS_AT: (u32, u32) = (0, 0);
 const INVENTORY_AT: (u32, u32) = (256, 0);
 const FONT_AT: (u32, u32) = (0, 256);
+const ICONS_AT: (u32, u32) = (256, 256);
 
 /// One bitmap-font glyph: its atlas UV, drawn pixel width, and pixel advance.
 #[derive(Clone, Copy, Debug, Default)]
@@ -124,6 +125,19 @@ pub fn load_gui_atlas(jar_path: &Path) -> Result<GuiAtlas, AssetError> {
     ) {
         blit(&mut rgba, &src, w, h, INVENTORY_AT);
         sprites.insert("inventory", uv(INVENTORY_AT.0, INVENTORY_AT.1, 176, 166));
+    }
+    if let Some((src, w, h)) = read_png(&mut archive, "assets/minecraft/textures/gui/icons.png") {
+        blit(&mut rgba, &src, w, h, ICONS_AT);
+        let (ix, iy) = ICONS_AT;
+        // Status-bar icons (classic icons.png layout): 9x9 each; xp bar 182x5.
+        sprites.insert("heart_bg", uv(ix + 16, iy, 9, 9));
+        sprites.insert("heart_full", uv(ix + 52, iy, 9, 9));
+        sprites.insert("heart_half", uv(ix + 61, iy, 9, 9));
+        sprites.insert("food_bg", uv(ix + 16, iy + 27, 9, 9));
+        sprites.insert("food_full", uv(ix + 52, iy + 27, 9, 9));
+        sprites.insert("food_half", uv(ix + 61, iy + 27, 9, 9));
+        sprites.insert("xp_bg", uv(ix, iy + 64, 182, 5));
+        sprites.insert("xp_full", uv(ix, iy + 69, 182, 5));
     }
 
     let mut glyphs = vec![Glyph::default(); 256];

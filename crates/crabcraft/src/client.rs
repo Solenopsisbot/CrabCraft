@@ -44,6 +44,7 @@ const ID_CONTAINER_SLOT: i32 = 0x14;
 const ID_SET_HELD_ITEM: i32 = 0x4d;
 const ID_ENTITY_METADATA: i32 = 0x52;
 const ID_GAME_STATE: i32 = 0x1f;
+const ID_EXPERIENCE: i32 = 0x56;
 
 /// Number of slots in the player inventory window (crafting + armour + main +
 /// hotbar + offhand).
@@ -92,6 +93,9 @@ pub struct PlayerState {
     pub selected_slot: u8,
     /// Game mode: 0 = survival, 1 = creative, 2 = adventure, 3 = spectator.
     pub gamemode: u8,
+    /// Experience bar fill (0..=1) and level.
+    pub xp_bar: f32,
+    pub xp_level: i32,
 }
 
 impl Default for PlayerState {
@@ -109,6 +113,8 @@ impl Default for PlayerState {
             food: 20,
             selected_slot: 0,
             gamemode: 0,
+            xp_bar: 0.0,
+            xp_level: 0,
         }
     }
 }
@@ -499,6 +505,14 @@ where
                     }
                     id if id == ID_ENTITY_METADATA => {
                         let _ = handle_entity_metadata(&raw, shared);
+                    }
+                    id if id == ID_EXPERIENCE => {
+                        let mut b = raw.body.clone();
+                        if let (Ok(bar), Ok(level)) = (b.read_f32(), b.read_varint()) {
+                            let mut ps = shared.player.lock().unwrap();
+                            ps.xp_bar = bar;
+                            ps.xp_level = level;
+                        }
                     }
                     id if id == ID_GAME_STATE => {
                         // reason 3 = change game mode (so runtime /gamemode works).
