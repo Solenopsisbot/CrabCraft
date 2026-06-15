@@ -40,6 +40,7 @@ const ID_UPDATE_HEALTH: i32 = 0x57;
 const ID_RESPAWN: i32 = 0x41;
 const ID_CONTAINER_CONTENT: i32 = 0x12;
 const ID_CONTAINER_SLOT: i32 = 0x14;
+const ID_SET_HELD_ITEM: i32 = 0x4d;
 
 /// Number of slots in the player inventory window (crafting + armour + main +
 /// hotbar + offhand).
@@ -72,6 +73,8 @@ pub struct PlayerState {
     /// Current health (0..=20) and food (0..=20).
     pub health: f32,
     pub food: i32,
+    /// Selected hotbar slot (0..=8).
+    pub selected_slot: u8,
 }
 
 impl Default for PlayerState {
@@ -87,6 +90,7 @@ impl Default for PlayerState {
             vel: [0.0; 3],
             health: 20.0,
             food: 20,
+            selected_slot: 0,
         }
     }
 }
@@ -475,6 +479,15 @@ where
                     id if id == ID_CONTAINER_SLOT => {
                         if let Ok(pkt) = raw.decode::<SetContainerSlot>() {
                             handle_container_slot(shared, &pkt);
+                        }
+                    }
+                    id if id == ID_SET_HELD_ITEM => {
+                        // Clientbound "Set Held Item": a single hotbar index byte.
+                        let mut body = raw.body.clone();
+                        if let Ok(slot) = body.read_u8() {
+                            if slot <= 8 {
+                                shared.player.lock().unwrap().selected_slot = slot;
+                            }
                         }
                     }
                     id if id == PlayDisconnect::ID => {

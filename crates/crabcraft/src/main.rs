@@ -122,6 +122,28 @@ fn load_atlas() -> crab_assets::Atlas {
     }
 }
 
+/// Loads the flat item-icon atlas (for the hotbar) from `CRABCRAFT_JAR`, or an
+/// empty atlas (no icons) if unset/unreadable.
+fn load_item_atlas() -> crab_assets::ItemAtlas {
+    let Ok(jar) = std::env::var("CRABCRAFT_JAR") else {
+        return crab_assets::ItemAtlas::empty();
+    };
+    let names: Vec<String> = crab_registry::ITEMS_1_20_1
+        .iter()
+        .map(|i| i.name.to_string())
+        .collect();
+    match crab_assets::load_item_atlas(std::path::Path::new(&jar), &names) {
+        Ok(atlas) => {
+            tracing::info!("loaded {} item icons from {jar}", atlas.len());
+            atlas
+        }
+        Err(e) => {
+            tracing::warn!("item icon load failed ({e}); hotbar shows no icons");
+            crab_assets::ItemAtlas::empty()
+        }
+    }
+}
+
 /// Loads 3D entity models + textures: geometry from `CRABCRAFT_ENTITY_MODELS`
 /// (a bedrock-samples `models/entity` dir) and textures from `CRABCRAFT_JAR`.
 /// Returns an empty atlas (entities render as boxes) if either is unset.
@@ -180,8 +202,9 @@ fn run_windowed(addr: String, login: LoginMode, deadline: Option<Duration>) -> R
     let shared = Arc::new(Shared::new());
     let atlas = load_atlas();
     let entity_atlas = load_entity_atlas();
+    let item_atlas = load_item_atlas();
     spawn_net_thread(addr, login, Arc::clone(&shared), deadline);
-    window::run(shared, atlas, entity_atlas)
+    window::run(shared, atlas, entity_atlas, item_atlas)
 }
 
 /// Windowed online: authenticate on the network thread, then connect.
@@ -189,6 +212,7 @@ fn run_windowed_online(addr: String) -> Result<()> {
     let shared = Arc::new(Shared::new());
     let atlas = load_atlas();
     let entity_atlas = load_entity_atlas();
+    let item_atlas = load_item_atlas();
     let net_shared = Arc::clone(&shared);
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_multi_thread()
@@ -214,7 +238,7 @@ fn run_windowed_online(addr: String) -> Result<()> {
             }
         });
     });
-    window::run(shared, atlas, entity_atlas)
+    window::run(shared, atlas, entity_atlas, item_atlas)
 }
 
 fn spawn_net_thread(

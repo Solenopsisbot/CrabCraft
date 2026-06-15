@@ -135,6 +135,18 @@ impl ItemAtlas {
     pub fn is_empty(&self) -> bool {
         self.icons.is_empty()
     }
+
+    /// An atlas with no icons (a single transparent tile). Lets the renderer
+    /// run without a jar — the hotbar simply shows no item icons.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            rgba: vec![0u8; (TILE * TILE * 4) as usize],
+            width: TILE,
+            height: TILE,
+            icons: HashMap::new(),
+        }
+    }
 }
 
 /// JSON form of a block model file.

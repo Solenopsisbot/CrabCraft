@@ -11,10 +11,10 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crab_assets::{Atlas, EntityAtlas};
+use crab_assets::{Atlas, EntityAtlas, ItemAtlas};
 use crab_render::{
-    box_mesh, build_block_pipeline, entity_mesh, mesh_region, upload_atlas, upload_texture,
-    CameraUniform, Vertex, DEPTH_FORMAT,
+    box_mesh, build_block_pipeline, build_hud_pipelines, entity_mesh, hud_geometry, mesh_region,
+    upload_atlas, upload_texture, CameraUniform, HudPipelines, Vertex, DEPTH_FORMAT,
 };
 use glam::Vec3;
 use wgpu::util::DeviceExt;
@@ -101,109 +101,19 @@ fn box_color(type_id: i32) -> [f32; 3] {
     ]
 }
 
-/// A tiny white "+" drawn in screen-centre NDC, depth-test disabled.
-/// 2D coloured HUD overlay (crosshair, hotbar, health/food bars). Vertex =
-/// NDC position + RGB; depth-test disabled so it draws on top.
-const HUD_WGSL: &str = "
-struct VsIn { @location(0) pos: vec2<f32>, @location(1) color: vec3<f32> };
-struct VsOut { @builtin(position) clip: vec4<f32>, @location(0) color: vec3<f32> };
-@vertex fn vs(in: VsIn) -> VsOut {
-    var o: VsOut; o.clip = vec4<f32>(in.pos, 0.0, 1.0); o.color = in.color; return o;
-}
-@fragment fn fs(in: VsOut) -> @location(0) vec4<f32> { return vec4<f32>(in.color, 1.0); }
-";
-
-fn push_quad2d(v: &mut Vec<[f32; 5]>, x0: f32, y0: f32, x1: f32, y1: f32, c: [f32; 3]) {
-    for [px, py] in [[x0, y0], [x1, y0], [x1, y1], [x0, y0], [x1, y1], [x0, y1]] {
-        v.push([px, py, c[0], c[1], c[2]]);
-    }
-}
-
-/// Builds the HUD (crosshair + 9-slot hotbar + health/food bars). `aspect`
-/// keeps square things square; health/food are 0..=20.
-fn hud_vertices(health: f32, food: i32, aspect: f32) -> Vec<[f32; 5]> {
-    let a = aspect.max(0.01);
-    let mut v = Vec::new();
-    let white = [0.9, 0.9, 0.9];
-
-    // Crosshair.
-    let (arm, thick) = (0.018, 0.0022);
-    push_quad2d(&mut v, -arm / a, -thick, arm / a, thick, white);
-    push_quad2d(&mut v, -thick / a, -arm, thick / a, arm, white);
-
-    // Hotbar: 9 slots centred along the bottom (slot 0 highlighted).
-    let (sw, gap) = (0.05 / a, 0.008 / a);
-    let total = 9.0 * sw + 8.0 * gap;
-    let (y0, y1) = (-0.985, -0.87);
-    let mut x = -total / 2.0;
-    for i in 0..9 {
-        let c = if i == 0 {
-            [0.72, 0.72, 0.72]
-        } else {
-            [0.30, 0.30, 0.33]
-        };
-        push_quad2d(&mut v, x, y0, x + sw, y1, c);
-        x += sw + gap;
-    }
-
-    // Health bar (left) and food bar (right) over dark backgrounds.
-    let (by0, by1) = (-0.83, -0.80);
-    push_quad2d(&mut v, -0.5, by0, -0.02, by1, [0.12, 0.12, 0.12]);
-    let hp = (health / 20.0).clamp(0.0, 1.0);
-    push_quad2d(&mut v, -0.5, by0, -0.5 + 0.48 * hp, by1, [0.85, 0.15, 0.15]);
-    push_quad2d(&mut v, 0.02, by0, 0.5, by1, [0.12, 0.12, 0.12]);
-    let fd = (food as f32 / 20.0).clamp(0.0, 1.0);
-    push_quad2d(&mut v, 0.5 - 0.48 * fd, by0, 0.5, by1, [0.55, 0.40, 0.15]);
-    v
-}
-
-fn build_hud_pipeline(device: &wgpu::Device, format: wgpu::TextureFormat) -> wgpu::RenderPipeline {
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("hud shader"),
-        source: wgpu::ShaderSource::Wgsl(HUD_WGSL.into()),
-    });
-    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("hud layout"),
-        bind_group_layouts: &[],
-        push_constant_ranges: &[],
-    });
-    const ATTRS: [wgpu::VertexAttribute; 2] =
-        wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x3];
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("hud pipeline"),
-        layout: Some(&layout),
-        vertex: wgpu::VertexState {
-            module: &shader,
-            entry_point: "vs",
-            buffers: &[wgpu::VertexBufferLayout {
-                array_stride: 20,
-                step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &ATTRS,
-            }],
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &shader,
-            entry_point: "fs",
-            targets: &[Some(wgpu::ColorTargetState {
-                format,
-                blend: Some(wgpu::BlendState::REPLACE),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-            compilation_options: wgpu::PipelineCompilationOptions::default(),
-        }),
-        primitive: wgpu::PrimitiveState::default(),
-        depth_stencil: Some(wgpu::DepthStencilState {
-            format: DEPTH_FORMAT,
-            depth_write_enabled: false,
-            depth_compare: wgpu::CompareFunction::Always,
-            stencil: wgpu::StencilState::default(),
-            bias: wgpu::DepthBiasState::default(),
-        }),
-        multisample: wgpu::MultisampleState::default(),
-        multiview: None,
-        cache: None,
-    })
+/// Builds the 9 hotbar item-icon UVs from the player's inventory (slots 36..44)
+/// using the item atlas, for `hud_geometry`.
+fn hotbar_icons(shared: &Shared, item_atlas: &ItemAtlas) -> Vec<Option<[f32; 4]>> {
+    let inv = shared.inventory.lock().unwrap();
+    (0..9)
+        .map(|i| {
+            inv.get(36 + i).and_then(|slot| *slot).and_then(|it| {
+                let id = u32::try_from(it.item_id).ok()?;
+                let name = crab_registry::item_name(id)?;
+                item_atlas.icon(name)
+            })
+        })
+        .collect()
 }
 
 /// GPU + window resources, created once the event loop is `resumed`.
@@ -220,8 +130,11 @@ struct Graphics {
     depth_view: wgpu::TextureView,
     /// Cached vertex buffer per chunk column.
     chunk_meshes: HashMap<(i32, i32), (wgpu::Buffer, u32)>,
-    hud_pipeline: wgpu::RenderPipeline,
-    hud_buffer: Option<(wgpu::Buffer, u32)>,
+    hud: HudPipelines,
+    hud_color_buffer: Option<(wgpu::Buffer, u32)>,
+    hud_tex_buffer: Option<(wgpu::Buffer, u32)>,
+    /// Item-icon atlas bound for the HUD's textured pass.
+    item_atlas_bind_group: wgpu::BindGroup,
     /// Entity texture atlas (for 3D entity models).
     entity_atlas_bind_group: wgpu::BindGroup,
     /// Per-frame box mesh for entities lacking a model (block atlas texture).
@@ -231,7 +144,12 @@ struct Graphics {
 }
 
 impl Graphics {
-    fn new(window: Arc<Window>, atlas: &Atlas, entity_atlas: &EntityAtlas) -> Self {
+    fn new(
+        window: Arc<Window>,
+        atlas: &Atlas,
+        entity_atlas: &EntityAtlas,
+        item_atlas: &ItemAtlas,
+    ) -> Self {
         let size = window.inner_size();
         let width = size.width.max(1);
         let height = size.height.max(1);
@@ -305,7 +223,15 @@ impl Graphics {
             entity_atlas.height,
         );
 
-        let hud_pipeline = build_hud_pipeline(&device, config.format);
+        let hud = build_hud_pipelines(&device, config.format);
+        let item_atlas_bind_group = upload_texture(
+            &device,
+            &queue,
+            &hud.atlas_layout,
+            &item_atlas.rgba,
+            item_atlas.width,
+            item_atlas.height,
+        );
 
         let depth_view = create_depth(&device, width, height);
 
@@ -321,27 +247,37 @@ impl Graphics {
             atlas_bind_group,
             depth_view,
             chunk_meshes: HashMap::new(),
-            hud_pipeline,
-            hud_buffer: None,
+            hud,
+            hud_color_buffer: None,
+            hud_tex_buffer: None,
+            item_atlas_bind_group,
             entity_atlas_bind_group,
             box_entity_buffer: None,
             model_entity_buffer: None,
         }
     }
 
-    fn set_hud(&mut self, verts: &[[f32; 5]]) {
-        self.hud_buffer = if verts.is_empty() {
-            None
-        } else {
+    fn set_hud(&mut self, color_verts: &[[f32; 5]], tex_verts: &[[f32; 4]]) {
+        self.hud_color_buffer = (!color_verts.is_empty()).then(|| {
             let buffer = self
                 .device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("hud"),
-                    contents: bytemuck::cast_slice(verts),
+                    label: Some("hud color"),
+                    contents: bytemuck::cast_slice(color_verts),
                     usage: wgpu::BufferUsages::VERTEX,
                 });
-            Some((buffer, verts.len() as u32))
-        };
+            (buffer, color_verts.len() as u32)
+        });
+        self.hud_tex_buffer = (!tex_verts.is_empty()).then(|| {
+            let buffer = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("hud tex"),
+                    contents: bytemuck::cast_slice(tex_verts),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+            (buffer, tex_verts.len() as u32)
+        });
     }
 
     fn make_vertex_buffer(&self, vertices: &[Vertex]) -> Option<(wgpu::Buffer, u32)> {
@@ -453,9 +389,16 @@ impl Graphics {
                 pass.set_vertex_buffer(0, buffer.slice(..));
                 pass.draw(0..*count, 0..1);
             }
-            // HUD overlay (crosshair + hotbar + health/food bars).
-            if let Some((buf, count)) = &self.hud_buffer {
-                pass.set_pipeline(&self.hud_pipeline);
+            // HUD overlay: coloured pass (crosshair + hotbar + bars) then the
+            // textured pass (item icons sampled from the item atlas).
+            if let Some((buf, count)) = &self.hud_color_buffer {
+                pass.set_pipeline(&self.hud.color);
+                pass.set_vertex_buffer(0, buf.slice(..));
+                pass.draw(0..*count, 0..1);
+            }
+            if let Some((buf, count)) = &self.hud_tex_buffer {
+                pass.set_pipeline(&self.hud.textured);
+                pass.set_bind_group(0, &self.item_atlas_bind_group, &[]);
                 pass.set_vertex_buffer(0, buf.slice(..));
                 pass.draw(0..*count, 0..1);
             }
@@ -487,6 +430,7 @@ struct App {
     shared: Arc<Shared>,
     atlas: Arc<Atlas>,
     entity_atlas: Arc<EntityAtlas>,
+    item_atlas: Arc<ItemAtlas>,
     /// Finished chunk meshes from the background mesher thread.
     mesh_rx: Receiver<((i32, i32), Vec<Vertex>)>,
     gfx: Option<Graphics>,
@@ -503,12 +447,14 @@ impl App {
         shared: Arc<Shared>,
         atlas: Arc<Atlas>,
         entity_atlas: Arc<EntityAtlas>,
+        item_atlas: Arc<ItemAtlas>,
         mesh_rx: Receiver<((i32, i32), Vec<Vertex>)>,
     ) -> Self {
         Self {
             shared,
             atlas,
             entity_atlas,
+            item_atlas,
             mesh_rx,
             gfx: None,
             yaw: 0.0,
@@ -614,7 +560,12 @@ impl ApplicationHandler for App {
             .set_cursor_grab(CursorGrabMode::Locked)
             .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined));
         window.set_cursor_visible(false);
-        self.gfx = Some(Graphics::new(window, &self.atlas, &self.entity_atlas));
+        self.gfx = Some(Graphics::new(
+            window,
+            &self.atlas,
+            &self.entity_atlas,
+            &self.item_atlas,
+        ));
         self.last_frame = Instant::now();
     }
 
@@ -680,13 +631,17 @@ impl ApplicationHandler for App {
 
                 let (box_v, model_v) =
                     build_entity_meshes(&self.shared, &self.atlas, &self.entity_atlas);
+                let hotbar = hotbar_icons(&self.shared, &self.item_atlas);
+                let selected = player.selected_slot as usize;
                 if let Some(gfx) = self.gfx.as_mut() {
                     let aspect = gfx.aspect();
                     let eye = Vec3::new(player.x as f32, player.y as f32, player.z as f32);
                     let camera = first_person_camera(eye, self.yaw, self.pitch, aspect);
                     gfx.box_entity_buffer = gfx.make_vertex_buffer(&box_v);
                     gfx.model_entity_buffer = gfx.make_vertex_buffer(&model_v);
-                    gfx.set_hud(&hud_vertices(player.health, player.food, aspect));
+                    let (hud_c, hud_t) =
+                        hud_geometry(player.health, player.food, selected, &hotbar, aspect);
+                    gfx.set_hud(&hud_c, &hud_t);
                     gfx.render(&camera);
                 }
 
@@ -710,9 +665,15 @@ impl ApplicationHandler for App {
 }
 
 /// Runs the windowed renderer (blocking; must be called on the main thread).
-pub fn run(shared: Arc<Shared>, atlas: Atlas, entity_atlas: EntityAtlas) -> anyhow::Result<()> {
+pub fn run(
+    shared: Arc<Shared>,
+    atlas: Atlas,
+    entity_atlas: EntityAtlas,
+    item_atlas: ItemAtlas,
+) -> anyhow::Result<()> {
     let atlas = Arc::new(atlas);
     let entity_atlas = Arc::new(entity_atlas);
+    let item_atlas = Arc::new(item_atlas);
     // Spawn the background mesher.
     let (mesh_tx, mesh_rx) = std::sync::mpsc::channel();
     {
@@ -722,7 +683,7 @@ pub fn run(shared: Arc<Shared>, atlas: Atlas, entity_atlas: EntityAtlas) -> anyh
     }
 
     let event_loop = EventLoop::new()?;
-    let mut app = App::new(shared, atlas, entity_atlas, mesh_rx);
+    let mut app = App::new(shared, atlas, entity_atlas, item_atlas, mesh_rx);
     event_loop.run_app(&mut app)?;
     Ok(())
 }
