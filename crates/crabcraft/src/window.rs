@@ -81,6 +81,54 @@ fn hotbar_icons(shared: &Shared, item_atlas: &ItemAtlas) -> Vec<Option<[f32; 4]>
         .collect()
 }
 
+fn push_color_quad(v: &mut Vec<[f32; 5]>, x0: f32, y0: f32, x1: f32, y1: f32, c: [f32; 3]) {
+    for [px, py] in [[x0, y0], [x1, y0], [x1, y1], [x0, y0], [x1, y1], [x0, y1]] {
+        v.push([px, py, c[0], c[1], c[2]]);
+    }
+}
+
+/// Builds chat geometry: recent log lines (and the input line when open) as
+/// dark bars + bitmap text near the bottom-left. Returns `(color, text)`.
+fn chat_geometry(
+    shared: &Shared,
+    gui: &GuiAtlas,
+    chat_open: bool,
+    buffer: &str,
+    aspect: f32,
+) -> (Vec<[f32; 5]>, Vec<[f32; 4]>) {
+    let mut color = Vec::new();
+    let mut text = Vec::new();
+    let line_h = 0.038;
+    let x = -0.96;
+    let y_in = -0.52; // input-line top (above the hotbar)
+    let hscale = (line_h / 8.0) / aspect.max(0.01);
+    let bar = |color: &mut Vec<[f32; 5]>, s: &str, y: f32| {
+        let w = (gui.text_width(s) * hscale).max(0.05);
+        push_color_quad(
+            color,
+            x - 0.006,
+            y - line_h,
+            x + w + 0.006,
+            y,
+            [0.05, 0.05, 0.05],
+        );
+    };
+
+    let log = shared.chat_log.lock().unwrap();
+    let shown = if chat_open { 10 } else { 7 };
+    for (i, line) in log.iter().rev().take(shown).enumerate() {
+        let y = y_in - (i as f32 + 1.0) * (line_h * 1.25);
+        bar(&mut color, line, y);
+        crab_render::push_text(&mut text, gui, line, x, y, line_h, aspect);
+    }
+    if chat_open {
+        let s = format!("> {buffer}");
+        bar(&mut color, &s, y_in);
+        crab_render::push_text(&mut text, gui, &s, x, y_in, line_h, aspect);
+    }
+    (color, text)
+}
+
 /// Builds the stack-size number text (font quads) for the hotbar, and for the
 /// inventory grid when it's open. Counts of 1 are not shown.
 fn count_text(shared: &Shared, gui: &GuiAtlas, aspect: f32, inv_open: bool) -> Vec<[f32; 4]> {
@@ -489,6 +537,9 @@ struct App {
     selected_slot: u8,
     /// Whether the inventory panel is open (E toggles).
     inventory_open: bool,
+    /// Chat input state: open + the line being typed.
+    chat_open: bool,
+    chat_buffer: String,
     /// Per-entity smoothed render state (interpolation + walk animation).
     entity_anim: HashMap<i32, EntityAnim>,
     /// Smoothed camera eye position (eases toward the player's stepped pos).
@@ -529,6 +580,8 @@ impl App {
             last_frame: Instant::now(),
             selected_slot: 0,
             inventory_open: false,
+            chat_open: false,
+            chat_buffer: String::new(),
             entity_anim: HashMap::new(),
             render_eye: None,
         }
@@ -607,8 +660,8 @@ impl App {
     /// Updates look from arrow keys and publishes movement intent to the shared
     /// `Controls` for the network thread to apply via physics.
     fn update_input(&mut self, dt: f32) {
-        // While the inventory is open, freeze movement/look input.
-        if self.inventory_open {
+        // While the inventory or chat is open, freeze movement/look input.
+        if self.inventory_open || self.chat_open {
             let mut controls = self.shared.controls.lock().unwrap();
             controls.forward = 0.0;
             controls.strafe = 0.0;
@@ -737,8 +790,8 @@ impl ApplicationHandler for App {
     }
 
     fn device_event(&mut self, _event_loop: &ActiveEventLoop, _id: DeviceId, event: DeviceEvent) {
-        if self.inventory_open {
-            return; // cursor is free for the inventory; don't turn the view
+        if self.inventory_open || self.chat_open {
+            return; // don't turn the view while a UI is focused
         }
         if let DeviceEvent::MouseMotion { delta } = event {
             const SENSITIVITY: f32 = 0.12; // degrees per pixel
@@ -761,10 +814,43 @@ impl ApplicationHandler for App {
                         physical_key: PhysicalKey::Code(code),
                         state,
                         repeat,
+                        text,
                         ..
                     },
                 ..
             } => {
+                let pressed = state == ElementState::Pressed;
+                // Chat input swallows all keys while open.
+                if self.chat_open {
+                    if pressed {
+                        match code {
+                            KeyCode::Escape => {
+                                self.chat_open = false;
+                                self.chat_buffer.clear();
+                            }
+                            KeyCode::Enter | KeyCode::NumpadEnter => {
+                                let msg = std::mem::take(&mut self.chat_buffer);
+                                if !msg.trim().is_empty() {
+                                    self.shared.chat_outbox.lock().unwrap().push(msg);
+                                }
+                                self.chat_open = false;
+                            }
+                            KeyCode::Backspace => {
+                                self.chat_buffer.pop();
+                            }
+                            _ => {
+                                if let Some(t) = &text {
+                                    for ch in t.chars() {
+                                        if !ch.is_control() && self.chat_buffer.len() < 200 {
+                                            self.chat_buffer.push(ch);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    return;
+                }
                 if code == KeyCode::Escape {
                     // Esc closes the inventory first, otherwise quits.
                     if self.inventory_open {
@@ -772,7 +858,17 @@ impl ApplicationHandler for App {
                     } else {
                         event_loop.exit();
                     }
-                } else if state == ElementState::Pressed {
+                } else if pressed {
+                    if !self.inventory_open && !repeat && code == KeyCode::KeyT {
+                        self.chat_open = true;
+                        self.chat_buffer.clear();
+                        return;
+                    }
+                    if !self.inventory_open && !repeat && code == KeyCode::Slash {
+                        self.chat_open = true;
+                        self.chat_buffer = "/".to_string();
+                        return;
+                    }
                     if code == KeyCode::KeyE && !repeat {
                         let open = !self.inventory_open;
                         self.set_inventory_open(open);
@@ -843,7 +939,11 @@ impl ApplicationHandler for App {
                     let gui = &self.gui_atlas;
                     let (mut hud_c, mut hud_g, mut hud_i) =
                         hud_geometry(gui, player.health, player.food, selected, &hotbar, aspect);
-                    let hud_text = count_text(&self.shared, gui, aspect, self.inventory_open);
+                    let mut hud_text = count_text(&self.shared, gui, aspect, self.inventory_open);
+                    let (chat_c, chat_t) =
+                        chat_geometry(&self.shared, gui, self.chat_open, &self.chat_buffer, aspect);
+                    hud_c.extend(chat_c);
+                    hud_text.extend(chat_t);
                     if let Some(inv) = &inv_icons {
                         let (ic, ig, ii) = inventory_geometry(gui, inv, aspect);
                         hud_c.extend(ic);

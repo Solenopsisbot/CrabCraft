@@ -339,6 +339,64 @@ impl Packet for ClientChatMessage {
     }
 }
 
+/// `0x04` — run a chat command (the leading `/` is stripped). 1.20.1 requires
+/// commands to use this packet rather than a chat message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChatCommand {
+    pub command: String,
+    pub timestamp: i64,
+    pub salt: i64,
+}
+
+impl ChatCommand {
+    /// Builds an unsigned command (offline-mode). `command` excludes the `/`.
+    pub fn new(command: String) -> Self {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        Self {
+            command,
+            timestamp,
+            salt: 0,
+        }
+    }
+}
+
+impl Packet for ChatCommand {
+    const ID: i32 = 0x04;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Serverbound;
+
+    fn encode<B: BufMut>(&self, dst: &mut B) -> Result<(), ProtoError> {
+        dst.put_string(&self.command);
+        dst.put_i64(self.timestamp);
+        dst.put_i64(self.salt);
+        dst.put_varint(0); // no argument signatures
+        dst.put_varint(0); // message count
+        dst.put_slice(&[0u8; 3]); // acknowledged bitset
+        Ok(())
+    }
+
+    fn decode<B: Buf>(src: &mut B) -> Result<Self, ProtoError> {
+        let command = src.read_string(256)?;
+        let timestamp = src.read_i64()?;
+        let salt = src.read_i64()?;
+        let sigs = src.read_varint()?.max(0);
+        for _ in 0..sigs {
+            let _name = src.read_string(16)?;
+            let _sig = src.read_bytes(256)?;
+        }
+        let _message_count = src.read_varint()?;
+        let _ack = src.read_bytes(3)?;
+        Ok(Self {
+            command,
+            timestamp,
+            salt,
+        })
+    }
+}
+
 /// `0x08` — tell the server our client settings. Some servers expect this
 /// before they treat us as fully joined.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -859,6 +917,15 @@ mod tests {
         roundtrip(&SystemChat {
             content: r#"{"text":"Ferris joined the game","color":"yellow"}"#.into(),
             overlay: false,
+        });
+    }
+
+    #[test]
+    fn chat_command_roundtrips() {
+        roundtrip(&ChatCommand {
+            command: "time set day".into(),
+            timestamp: 123,
+            salt: 7,
         });
     }
 

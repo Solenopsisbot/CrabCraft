@@ -15,11 +15,11 @@ use crab_protocol::versions::v1_20_1::login::{
     SetCompression,
 };
 use crab_protocol::versions::v1_20_1::play::{
-    ClientChatMessage, ClientCommand, ClientInformation, ConfirmTeleport, InteractEntity,
-    Interaction, KeepAlive, KeepAliveResponse, PlayDisconnect, PlayerDigging, SetContainerContent,
-    SetContainerSlot, SetCreativeSlot, SetHealth, SetHeldItem, SetPlayerPosition,
-    SetPlayerPositionRotation, SlotItem, SwingArm, SynchronizePlayerPosition, SystemChat,
-    UseItemOn,
+    ChatCommand, ClientChatMessage, ClientCommand, ClientInformation, ConfirmTeleport,
+    InteractEntity, Interaction, KeepAlive, KeepAliveResponse, PlayDisconnect, PlayerDigging,
+    SetContainerContent, SetContainerSlot, SetCreativeSlot, SetHealth, SetHeldItem,
+    SetPlayerPosition, SetPlayerPositionRotation, SlotItem, SwingArm, SynchronizePlayerPosition,
+    SystemChat, UseItemOn,
 };
 use crab_protocol::versions::PROTOCOL_1_20_1;
 use crab_protocol::BufExt;
@@ -187,6 +187,10 @@ pub struct Shared {
     pub inventory: Mutex<Vec<Option<SlotItem>>>,
     /// Sink for sound-effect names (e.g. `"dig/grass1"`); set when audio is on.
     pub sfx: Mutex<Option<std::sync::mpsc::Sender<String>>>,
+    /// Recent chat lines (incoming system/player chat + our own), newest last.
+    pub chat_log: Mutex<std::collections::VecDeque<String>>,
+    /// Chat/command lines the UI wants sent (drained by the net thread).
+    pub chat_outbox: Mutex<Vec<String>>,
     /// Cleared to `false` when the session ends, so readers can stop.
     pub running: AtomicBool,
 }
@@ -201,6 +205,8 @@ impl Shared {
             entities: Mutex::new(HashMap::new()),
             inventory: Mutex::new(vec![None; PLAYER_INVENTORY_SLOTS]),
             sfx: Mutex::new(None),
+            chat_log: Mutex::new(std::collections::VecDeque::new()),
+            chat_outbox: Mutex::new(Vec::new()),
             running: AtomicBool::new(true),
         }
     }
@@ -415,7 +421,9 @@ where
                     id if id == SystemChat::ID => {
                         let c: SystemChat = raw.decode()?;
                         if !c.overlay {
-                            tracing::info!(target: "chat", "{}", plain_text(&c.content));
+                            let line = plain_text(&c.content);
+                            tracing::info!(target: "chat", "{line}");
+                            push_chat(shared, line);
                         }
                     }
                     id if id == ID_JOIN_GAME => {
@@ -552,6 +560,18 @@ where
                     })
                     .await?;
                     shared.player.lock().unwrap().selected_slot = controls.selected_slot;
+                }
+
+                // Send queued chat / commands; show our own line locally.
+                let outgoing: Vec<String> =
+                    std::mem::take(&mut *shared.chat_outbox.lock().unwrap());
+                for msg in outgoing {
+                    if let Some(cmd) = msg.strip_prefix('/') {
+                        conn.send(&ChatCommand::new(cmd.to_string())).await?;
+                    } else {
+                        conn.send(&ClientChatMessage::unsigned(msg.clone())).await?;
+                    }
+                    push_chat(shared, msg);
                 }
 
                 if snapshot.spawned {
@@ -1009,6 +1029,15 @@ fn nearest_entity_hit(
         }
     }
     best
+}
+
+/// Appends a chat line to the capped chat log.
+fn push_chat(shared: &Arc<Shared>, line: String) {
+    let mut log = shared.chat_log.lock().unwrap();
+    log.push_back(line);
+    while log.len() > 100 {
+        log.pop_front();
+    }
 }
 
 /// Very small chat-component flattener for readable logging.
