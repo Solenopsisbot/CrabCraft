@@ -37,7 +37,9 @@ Verified end-to-end against a vanilla 1.20.1 server (offline mode unless noted):
   a swing + InteractEntity; verified to damage and kill a mob on a live server
 - **Survival vitals**: tracks **health/food**, and on death sends a respawn
   request automatically
-- **HUD**: crosshair, a 9-slot hotbar outline, and health/food bars
+- **HUD**: crosshair, a 9-slot hotbar (with item icons), and health/food bars
+- **Sounds**: block-break sounds loaded from your launcher's asset store and
+  played via `rodio` (set `CRABCRAFT_ASSETS`)
 - **Online mode**: AES-128-CFB8 encryption + the Minecraft server hash + RSA
   handshake, with Microsoft device-code login (see caveats below)
 
@@ -59,11 +61,12 @@ side-by-side rather than by rewriting the core.
 | `crab-protocol` | Wire codecs (VarInt/VarLong/String/UUID/Position), NBT, the `Packet` trait, and per-version packet definitions (`versions::v1_20_1`) |
 | `crab-net` | Async connection: length framing, zlib compression sublayer, AES-128-CFB8 encryption, connection state |
 | `crab-world` | Chunk/section decoding (paletted containers), the `World` block store, dimension extents |
-| `crab-registry` | Data-driven registries (generated block-state → name table) |
+| `crab-registry` | Data-driven registries (generated block/item/entity tables, break times) |
 | `crab-physics` | AABB-vs-voxel collision and gravity |
 | `crab-render` | `wgpu` renderer: chunk meshing, entity models, offscreen + windowed |
 | `crab-assets` | Loads block + entity models/textures (jar + bedrock geometry); atlases |
 | `crab-auth` | Session crypto (server hash, RSA) and Microsoft account login |
+| `crab-audio` | Loads sounds from the launcher asset store; `rodio` playback |
 | `crabcraft` | The client binary that wires it all together |
 
 ## Build & run
@@ -156,7 +159,8 @@ the official server jar:
 - [ ] Blockstate variants & multipart (fence/wall connections, rotated stairs), biome tint
 - [ ] Entity animation/interpolation + per-mob hitbox models
 - [ ] Precise per-block collision shapes (slabs/stairs/fluids)
-- [ ] Inventory GUI, item rendering in the hotbar, crafting, sounds
+- [x] Hotbar item icons + block-break sounds (from your asset store)
+- [ ] Inventory GUI, crafting, more sound events (steps/hurt/ambient)
 - [ ] More protocol versions (1.20.2+, 1.21, …) as sibling modules
 - [ ] (Far future, maybe) Forge mod support — see the note below
 

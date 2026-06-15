@@ -1,0 +1,13 @@
+[package]
+name = "crab-audio"
+description = "Loads Minecraft sounds from the launcher asset store and plays them via rodio."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+tracing.workspace = true
+serde_json = "1"
+rodio = "0.19"

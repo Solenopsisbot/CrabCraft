@@ -19,6 +19,7 @@ crab-auth.workspace = true
 crab-physics.workspace = true
 crab-assets.workspace = true
 crab-registry.workspace = true
+crab-audio.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
 tracing.workspace = true

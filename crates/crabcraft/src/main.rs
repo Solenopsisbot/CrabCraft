@@ -79,6 +79,7 @@ fn run_online(addr: String, render: bool) -> Result<()> {
                 .context("Microsoft login")?;
             tracing::info!(user = %session.username, "authenticated");
             let shared = Arc::new(Shared::new());
+            init_sound(&shared);
             connect_and_play(&addr, LoginMode::Online(session), shared, None).await
         })
     }
@@ -90,6 +91,7 @@ fn run_headless(addr: String, login: LoginMode, deadline: Option<Duration>) -> R
         .enable_all()
         .build()?;
     let shared = Arc::new(Shared::new());
+    init_sound(&shared);
     rt.block_on(connect_and_play(&addr, login, shared, deadline))
 }
 
@@ -197,9 +199,45 @@ fn load_entity_atlas() -> crab_assets::EntityAtlas {
     atlas
 }
 
+/// If `CRABCRAFT_ASSETS` points at a launcher asset store, spawns a sound
+/// thread (owning the audio device) and wires it into `shared.sfx`. The asset
+/// index id defaults to 1.20.1's `"5"` (override with `CRABCRAFT_ASSET_INDEX`).
+fn init_sound(shared: &Arc<Shared>) {
+    let Ok(assets) = std::env::var("CRABCRAFT_ASSETS") else {
+        tracing::info!("set CRABCRAFT_ASSETS=<.../assets> for sounds; running silent");
+        return;
+    };
+    let id = std::env::var("CRABCRAFT_ASSET_INDEX").unwrap_or_else(|_| "5".to_string());
+    let assets = std::path::PathBuf::from(assets);
+    let index =
+        match crab_audio::AssetIndex::load(&assets.join("indexes").join(format!("{id}.json"))) {
+            Ok(i) => i,
+            Err(e) => {
+                tracing::warn!("sound asset index failed ({e}); running silent");
+                return;
+            }
+        };
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    *shared.sfx.lock().unwrap() = Some(tx);
+    std::thread::spawn(move || {
+        let player = crab_audio::SoundPlayer::new();
+        tracing::info!(
+            objects = index.len(),
+            audio = player.available(),
+            "sound enabled"
+        );
+        while let Ok(name) = rx.recv() {
+            if let Some(bytes) = crab_audio::read_sound(&assets, &index, &name) {
+                player.play_ogg(bytes);
+            }
+        }
+    });
+}
+
 /// Windowed: networking on a background thread, rendering on the main thread.
 fn run_windowed(addr: String, login: LoginMode, deadline: Option<Duration>) -> Result<()> {
     let shared = Arc::new(Shared::new());
+    init_sound(&shared);
     let atlas = load_atlas();
     let entity_atlas = load_entity_atlas();
     let item_atlas = load_item_atlas();
@@ -210,6 +248,7 @@ fn run_windowed(addr: String, login: LoginMode, deadline: Option<Duration>) -> R
 /// Windowed online: authenticate on the network thread, then connect.
 fn run_windowed_online(addr: String) -> Result<()> {
     let shared = Arc::new(Shared::new());
+    init_sound(&shared);
     let atlas = load_atlas();
     let entity_atlas = load_entity_atlas();
     let item_atlas = load_item_atlas();

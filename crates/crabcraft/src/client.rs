@@ -182,6 +182,8 @@ pub struct Shared {
     pub entities: Mutex<HashMap<i32, Entity>>,
     /// The player inventory (window 0): `PLAYER_INVENTORY_SLOTS` slots.
     pub inventory: Mutex<Vec<Option<SlotItem>>>,
+    /// Sink for sound-effect names (e.g. `"dig/grass1"`); set when audio is on.
+    pub sfx: Mutex<Option<std::sync::mpsc::Sender<String>>>,
     /// Cleared to `false` when the session ends, so readers can stop.
     pub running: AtomicBool,
 }
@@ -195,6 +197,7 @@ impl Shared {
             dirty_chunks: Mutex::new(HashSet::new()),
             entities: Mutex::new(HashMap::new()),
             inventory: Mutex::new(vec![None; PLAYER_INVENTORY_SLOTS]),
+            sfx: Mutex::new(None),
             running: AtomicBool::new(true),
         }
     }
@@ -574,6 +577,7 @@ where
                                         block_sequence += 1;
                                         conn.send(&dig_packet(2, b, face, block_sequence)).await?;
                                         dig = None;
+                                        play_break_sound(shared, b);
                                         break_block_local(shared, b);
                                     }
                                 }
@@ -597,6 +601,7 @@ where
                                             conn.send(&dig_packet(2, target, face, block_sequence))
                                                 .await?;
                                         }
+                                        play_break_sound(shared, target);
                                         break_block_local(shared, target);
                                     } else {
                                         dig = Some(DigProgress {
@@ -872,6 +877,21 @@ fn dig_packet(status: i32, block: [i32; 3], face: i8, sequence: i32) -> PlayerDi
         z: block[2],
         face,
         sequence,
+    }
+}
+
+/// Queues the block-break sound for `block` (call before it is removed).
+fn play_break_sound(shared: &Arc<Shared>, block: [i32; 3]) {
+    let name = shared
+        .world
+        .lock()
+        .unwrap()
+        .block_state(block[0], block[1], block[2])
+        .and_then(crab_registry::block_name);
+    if let Some(name) = name {
+        if let Some(tx) = shared.sfx.lock().unwrap().as_ref() {
+            let _ = tx.send(crab_audio::break_sound(name));
+        }
     }
 }
 
