@@ -41,15 +41,20 @@ fn main() {
     let owned: Vec<String> = names.iter().map(ToString::to_string).collect();
     let atlas = crab_assets::load_item_atlas(jar, &owned).expect("item atlas");
 
-    let inv: Vec<Option<[f32; 4]>> = (0..36)
-        .map(|i| {
-            if i % 3 == 1 {
-                None
-            } else {
-                atlas.icon(names[i % names.len()])
-            }
-        })
-        .collect();
+    // 46 window slots: 0=result, 1-4 craft, 5-8 armour, 9-35 main, 36-44 hotbar,
+    // 45 offhand. Populate a representative spread to check positions.
+    let mut inv: Vec<Option<[f32; 4]>> = vec![None; 46];
+    inv[0] = atlas.icon("oak_log"); // crafting result
+    inv[1] = atlas.icon("diamond"); // crafting input
+    inv[4] = atlas.icon("cobblestone");
+    inv[5] = atlas.icon("iron_pickaxe"); // armour column
+    inv[8] = atlas.icon("bow");
+    inv[45] = atlas.icon("diamond_sword"); // offhand
+    for (i, slot) in inv.iter_mut().enumerate().take(45).skip(9) {
+        if i % 3 != 1 {
+            *slot = atlas.icon(names[i % names.len()]);
+        }
+    }
     let hotbar: Vec<Option<[f32; 4]>> = (0..9).map(|i| atlas.icon(names[i])).collect();
 
     let aspect = 16.0 / 9.0;

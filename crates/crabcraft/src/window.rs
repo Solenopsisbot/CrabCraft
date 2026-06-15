@@ -199,19 +199,19 @@ fn count_text(shared: &Shared, gui: &GuiAtlas, aspect: f32, inv_open: bool) -> V
     }
     if inv_open {
         let rect = crab_render::inventory_rect(aspect);
-        for idx in 9..45 {
-            if let Some(it) = inv.get(idx).and_then(|s| *s) {
-                push_count(it.count, crab_render::inventory_slot_rect(rect, idx - 9));
+        for slot in 0..46 {
+            if let Some(it) = inv.get(slot).and_then(|s| *s) {
+                push_count(it.count, crab_render::inventory_slot_rect(rect, slot));
             }
         }
     }
     out
 }
 
-/// Builds the 36 inventory-panel UVs: main slots 9..36 then hotbar 36..45.
+/// Builds the item-icon UVs for all 46 player-inventory window slots.
 fn inventory_icons(shared: &Shared, item_atlas: &ItemAtlas) -> Vec<Option<[f32; 4]>> {
     let inv = shared.inventory.lock().unwrap();
-    (9..45)
+    (0..46)
         .map(|i| {
             inv.get(i).and_then(|s| *s).and_then(|it| {
                 let id = u32::try_from(it.item_id).ok()?;
@@ -732,14 +732,14 @@ impl App {
         let aspect = self.gfx.as_ref().map_or(1.0, Graphics::aspect);
         let rect = crab_render::inventory_rect(aspect);
         let (cx, cy) = self.cursor;
-        for panel in 0..36usize {
-            let (x0, y0, x1, y1) = crab_render::inventory_slot_rect(rect, panel);
+        for slot in 0..46usize {
+            let (x0, y0, x1, y1) = crab_render::inventory_slot_rect(rect, slot);
             if cx >= x0 && cx <= x1 && cy >= y0 && cy <= y1 {
                 self.shared
                     .click_outbox
                     .lock()
                     .unwrap()
-                    .push((9 + panel as i16, button));
+                    .push((slot as i16, button));
                 return;
             }
         }

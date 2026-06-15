@@ -615,7 +615,7 @@ where
                         if idx >= inv.len() {
                             None
                         } else {
-                            std::mem::swap(&mut inv[idx], &mut *carried);
+                            apply_inventory_click(&mut inv, &mut carried, idx, button);
                             Some((inv[idx], *carried))
                         }
                     };
@@ -1151,6 +1151,77 @@ fn block_name_at(shared: &Arc<Shared>, block: [i32; 3]) -> Option<&'static str> 
         .unwrap()
         .block_state(block[0], block[1], block[2])
         .and_then(crab_registry::block_name)
+}
+
+/// Maximum stack size for an item id (default 64).
+fn stack_max(item_id: i32) -> i8 {
+    u32::try_from(item_id)
+        .ok()
+        .and_then(crab_registry::item_def)
+        .map_or(64, |d| d.stack_size.min(127) as i8)
+}
+
+/// Applies a vanilla inventory click locally (the server stays authoritative
+/// and corrects via 0x12/0x14). Left (`button` 0) = pick up / place all / merge;
+/// right (1) = pick up half / place one.
+fn apply_inventory_click(
+    inv: &mut [Option<SlotItem>],
+    carried: &mut Option<SlotItem>,
+    idx: usize,
+    button: i8,
+) {
+    let slot = inv[idx];
+    let cur = *carried;
+    if button == 0 {
+        match (cur, slot) {
+            (Some(mut c), Some(mut s)) if c.item_id == s.item_id => {
+                // Merge the cursor stack into the slot, up to the max.
+                let space = (stack_max(s.item_id) - s.count).max(0);
+                let mv = space.min(c.count);
+                s.count += mv;
+                c.count -= mv;
+                inv[idx] = Some(s);
+                *carried = (c.count > 0).then_some(c);
+            }
+            _ => {
+                inv[idx] = cur;
+                *carried = slot;
+            }
+        }
+    } else {
+        match (cur, slot) {
+            (None, Some(mut s)) => {
+                // Pick up half (rounded up).
+                let half = (s.count + 1) / 2;
+                *carried = Some(SlotItem {
+                    item_id: s.item_id,
+                    count: half,
+                });
+                s.count -= half;
+                inv[idx] = (s.count > 0).then_some(s);
+            }
+            (Some(mut c), None) => {
+                inv[idx] = Some(SlotItem {
+                    item_id: c.item_id,
+                    count: 1,
+                });
+                c.count -= 1;
+                *carried = (c.count > 0).then_some(c);
+            }
+            (Some(mut c), Some(mut s))
+                if c.item_id == s.item_id && s.count < stack_max(s.item_id) =>
+            {
+                s.count += 1;
+                c.count -= 1;
+                inv[idx] = Some(s);
+                *carried = (c.count > 0).then_some(c);
+            }
+            _ => {
+                inv[idx] = cur;
+                *carried = slot;
+            }
+        }
+    }
 }
 
 /// Queues the block-break sound for `block` (call before it is removed).

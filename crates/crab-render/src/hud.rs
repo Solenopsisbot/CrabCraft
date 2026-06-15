@@ -296,19 +296,31 @@ pub fn hud_geometry(
     (c, g, t)
 }
 
-/// NDC rect of inventory slot `idx` (0..27 main, 27..36 hotbar) within the
-/// vanilla inventory background placed at `rect` (176x166 px). Returns the
-/// 16x16-icon NDC quad `(x0, y0, x1, y1)`.
+/// Pixel cell of a window slot in the vanilla inventory texture. Slot numbering
+/// matches the server player-inventory window: 0 = crafting result, 1-4 =
+/// crafting grid, 5-8 = armour, 9-35 = main, 36-44 = hotbar, 45 = offhand.
+fn slot_px(slot: usize) -> (f32, f32) {
+    match slot {
+        0 => (154.0, 28.0),
+        1 => (98.0, 18.0),
+        2 => (116.0, 18.0),
+        3 => (98.0, 36.0),
+        4 => (116.0, 36.0),
+        5..=8 => (8.0, 8.0 + (slot - 5) as f32 * 18.0),
+        45 => (77.0, 62.0),
+        9..=35 => {
+            let i = slot - 9;
+            (8.0 + (i % 9) as f32 * 18.0, 84.0 + (i / 9) as f32 * 18.0)
+        }
+        _ => (8.0 + (slot.min(44) - 36) as f32 * 18.0, 142.0),
+    }
+}
+
+/// NDC rect of a window slot's 16x16 icon within the inventory background at
+/// `rect` (176x166 px). `slot` is the server window-slot index (0..46).
 #[must_use]
-pub fn inventory_slot_rect(rect: (f32, f32, f32, f32), idx: usize) -> (f32, f32, f32, f32) {
-    let (px, py) = if idx < 27 {
-        (
-            8.0 + (idx % 9) as f32 * 18.0,
-            84.0 + (idx / 9) as f32 * 18.0,
-        )
-    } else {
-        (8.0 + (idx - 27) as f32 * 18.0, 142.0)
-    };
+pub fn inventory_slot_rect(rect: (f32, f32, f32, f32), slot: usize) -> (f32, f32, f32, f32) {
+    let (px, py) = slot_px(slot);
     let (lx, ty) = px_to_ndc(rect, 176.0, 166.0, px + 1.0, py + 1.0);
     let (rx, by) = px_to_ndc(rect, 176.0, 166.0, px + 17.0, py + 17.0);
     (lx, by, rx, ty)
@@ -338,8 +350,8 @@ pub fn hotbar_slot_rect(aspect: f32, i: usize) -> (f32, f32, f32, f32) {
 }
 
 /// Builds the open-inventory panel from the vanilla container background plus
-/// item icons. `items` holds 36 UVs — main inventory (0..27) then hotbar
-/// (27..36). Returns `(colour, gui_tex, item_tex)`.
+/// item icons. `items` is indexed by server window slot (0..46). Returns
+/// `(colour, gui_tex, item_tex)`.
 #[must_use]
 pub fn inventory_geometry(
     gui: &GuiAtlas,
@@ -356,9 +368,9 @@ pub fn inventory_geometry(
     } else {
         push_color_quad(&mut c, rect.0, rect.1, rect.2, rect.3, [0.14, 0.14, 0.17]);
     }
-    for (idx, slot) in items.iter().enumerate().take(36) {
-        if let Some(uv) = slot {
-            let (x0, y0, x1, y1) = inventory_slot_rect(rect, idx);
+    for (slot, uv) in items.iter().enumerate().take(46) {
+        if let Some(uv) = uv {
+            let (x0, y0, x1, y1) = inventory_slot_rect(rect, slot);
             push_tex_quad(&mut t, x0, y0, x1, y1, *uv);
         }
     }
