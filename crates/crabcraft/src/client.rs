@@ -17,8 +17,9 @@ use crab_protocol::versions::v1_20_1::login::{
 use crab_protocol::versions::v1_20_1::play::{
     ClientChatMessage, ClientCommand, ClientInformation, ConfirmTeleport, InteractEntity,
     Interaction, KeepAlive, KeepAliveResponse, PlayDisconnect, PlayerDigging, SetContainerContent,
-    SetContainerSlot, SetCreativeSlot, SetHealth, SetPlayerPosition, SetPlayerPositionRotation,
-    SlotItem, SwingArm, SynchronizePlayerPosition, SystemChat, UseItemOn,
+    SetContainerSlot, SetCreativeSlot, SetHealth, SetHeldItem, SetPlayerPosition,
+    SetPlayerPositionRotation, SlotItem, SwingArm, SynchronizePlayerPosition, SystemChat,
+    UseItemOn,
 };
 use crab_protocol::versions::PROTOCOL_1_20_1;
 use crab_protocol::BufExt;
@@ -123,6 +124,8 @@ pub struct Controls {
     pub attack: bool,
     /// Edge-triggered: place a block (right click).
     pub use_item: bool,
+    /// Desired hotbar slot (0..=8), set by number keys / scroll.
+    pub selected_slot: u8,
 }
 
 /// Maps a face normal to the Minecraft direction enum (0=down..5=east).
@@ -342,6 +345,7 @@ where
     // Hold-to-dig state and the previous-tick attack-held flag (for click edges).
     let mut dig: Option<DigProgress> = None;
     let mut was_attacking = false;
+    let mut last_selected: u8 = 0;
     // ~20 Hz physics + position updates, like the vanilla client.
     let tick_dt = 0.05;
     let mut pos_tick = tokio::time::interval(Duration::from_secs_f64(tick_dt));
@@ -527,6 +531,20 @@ where
                 let attack_edge = attack_held && !was_attacking;
                 was_attacking = attack_held;
                 let snapshot = { *shared.player.lock().unwrap() };
+
+                // Hotbar slot change (number keys / scroll): tell the server and
+                // mirror locally so the HUD highlight follows immediately.
+                if snapshot.spawned
+                    && controls.selected_slot != last_selected
+                    && controls.selected_slot < 9
+                {
+                    last_selected = controls.selected_slot;
+                    conn.send(&SetHeldItem {
+                        slot: i16::from(controls.selected_slot),
+                    })
+                    .await?;
+                    shared.player.lock().unwrap().selected_slot = controls.selected_slot;
+                }
 
                 if snapshot.spawned {
                     let yaw = f64::from(controls.yaw).to_radians();

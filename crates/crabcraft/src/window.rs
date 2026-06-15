@@ -406,6 +406,8 @@ struct App {
     look_init: bool,
     keys: HashSet<KeyCode>,
     last_frame: Instant,
+    /// Selected hotbar slot (0..=8), driven by number keys / scroll.
+    selected_slot: u8,
     /// Per-entity smoothed render state (interpolation + walk animation).
     entity_anim: HashMap<i32, EntityAnim>,
     /// Smoothed camera eye position (eases toward the player's stepped pos).
@@ -442,6 +444,7 @@ impl App {
             look_init: false,
             keys: HashSet::new(),
             last_frame: Instant::now(),
+            selected_slot: 0,
             entity_anim: HashMap::new(),
             render_eye: None,
         }
@@ -517,6 +520,24 @@ impl App {
             self.pitch = (self.pitch + LOOK_SPEED * dt).clamp(-89.0, 89.0);
         }
 
+        // Number keys 1..9 select a hotbar slot.
+        const DIGITS: [KeyCode; 9] = [
+            KeyCode::Digit1,
+            KeyCode::Digit2,
+            KeyCode::Digit3,
+            KeyCode::Digit4,
+            KeyCode::Digit5,
+            KeyCode::Digit6,
+            KeyCode::Digit7,
+            KeyCode::Digit8,
+            KeyCode::Digit9,
+        ];
+        for (i, key) in DIGITS.iter().enumerate() {
+            if pressed(*key) {
+                self.selected_slot = i as u8;
+            }
+        }
+
         let axis = |pos: KeyCode, neg: KeyCode| (pressed(pos) as i32 - pressed(neg) as i32) as f32;
         let mut controls = self.shared.controls.lock().unwrap();
         controls.forward = axis(KeyCode::KeyW, KeyCode::KeyS);
@@ -524,6 +545,7 @@ impl App {
         controls.jump = pressed(KeyCode::Space);
         controls.yaw = self.yaw;
         controls.pitch = self.pitch;
+        controls.selected_slot = self.selected_slot;
     }
 
     /// Uploads chunk meshes finished by the background mesher (GPU upload only;
@@ -647,6 +669,17 @@ impl ApplicationHandler for App {
                     // Right mouse places on press (edge-triggered).
                     MouseButton::Right if pressed => controls.use_item = true,
                     _ => {}
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                // Scroll cycles the hotbar slot (up = previous, down = next).
+                let dy = match delta {
+                    winit::event::MouseScrollDelta::LineDelta(_, y) => y,
+                    winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32,
+                };
+                if dy.abs() > 0.01 {
+                    let step = if dy > 0.0 { 8 } else { 1 }; // +8 == -1 (mod 9)
+                    self.selected_slot = (self.selected_slot + step) % 9;
                 }
             }
             WindowEvent::RedrawRequested => {

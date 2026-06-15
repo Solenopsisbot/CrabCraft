@@ -213,10 +213,14 @@ pub fn hud_geometry(
     push_color_quad(&mut c, -arm / a, -thick, arm / a, thick, white);
     push_color_quad(&mut c, -thick / a, -arm, thick / a, arm, white);
 
-    // Hotbar: 9 slots centred along the bottom; the selected slot is brighter.
-    let (sw, gap) = (0.05 / a, 0.008 / a);
+    // Hotbar: 9 *square* slots centred along the bottom (slot width in NDC is
+    // the height divided by the aspect so the cells aren't squished); the
+    // selected slot is brighter.
+    let slot_h = 0.11;
+    let sw = slot_h / a;
+    let gap = sw * 0.14;
     let total = 9.0 * sw + 8.0 * gap;
-    let (y0, y1) = (-0.985, -0.87);
+    let (y0, y1) = (-0.97, -0.97 + slot_h);
     let mut x = -total / 2.0;
     for i in 0..9 {
         let col = if i == selected {

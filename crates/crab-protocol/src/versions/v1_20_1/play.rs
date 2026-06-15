@@ -608,6 +608,29 @@ impl Packet for SwingArm {
     }
 }
 
+/// `0x28` — select a hotbar slot (0..=8).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SetHeldItem {
+    pub slot: i16,
+}
+
+impl Packet for SetHeldItem {
+    const ID: i32 = 0x28;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Serverbound;
+
+    fn encode<B: BufMut>(&self, dst: &mut B) -> Result<(), ProtoError> {
+        dst.put_i16(self.slot);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(src: &mut B) -> Result<Self, ProtoError> {
+        Ok(Self {
+            slot: src.read_i16()?,
+        })
+    }
+}
+
 /// How the player is interacting with an entity in [`InteractEntity`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Interaction {
@@ -898,6 +921,11 @@ mod tests {
             saturation: 4.0,
         });
         roundtrip(&ClientCommand { action: 0 });
+    }
+
+    #[test]
+    fn set_held_item_roundtrips() {
+        roundtrip(&SetHeldItem { slot: 4 });
     }
 
     #[test]
