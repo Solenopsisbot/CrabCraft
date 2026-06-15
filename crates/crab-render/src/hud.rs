@@ -668,7 +668,7 @@ mod tests {
         let gui = crab_assets::GuiAtlas::empty();
         let uv = [0.0, 0.0, 0.5, 0.5];
         let hotbar = [Some(uv), None, Some(uv), None, None, None, None, None, None];
-        let (_color, _g, item) = hud_geometry(&gui, 20.0, 20, 2, &hotbar, 1.0);
+        let (_color, _g, item) = hud_geometry(&gui, 20.0, 20, 0.0, 0, 2, &hotbar, 1.0);
         // 2 filled slots -> 2 textured quads -> 12 vertices.
         assert_eq!(item.len(), 12);
     }
@@ -687,7 +687,7 @@ mod tests {
             None,
             None,
         ];
-        let (_c, _g, t) = hud_geometry(&gui, 20.0, 20, 0, &hotbar, 1.0);
+        let (_c, _g, t) = hud_geometry(&gui, 20.0, 20, 0.0, 0, 0, &hotbar, 1.0);
         // First vertex is the top-left corner -> (u0, v0).
         assert_eq!([t[0][2], t[0][3]], [0.1, 0.2]);
         // Third vertex is bottom-right -> (u1, v1).
