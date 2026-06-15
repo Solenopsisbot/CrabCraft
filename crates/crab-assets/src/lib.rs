@@ -26,8 +26,8 @@ use model::{resolve, ElementJson, Resolved};
 
 pub mod entity;
 pub use entity::{
-    load_entity_atlas, load_entity_texture, load_geometry, parse_geometry, Bone, Cube, EntityAtlas,
-    EntityGeometry, EntityModelEntry,
+    load_entity_atlas, load_entity_texture, load_geometry, parse_geometry, player_geometry, Bone,
+    Cube, EntityAtlas, EntityGeometry, EntityModelEntry,
 };
 
 pub mod gui;

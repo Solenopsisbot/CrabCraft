@@ -144,6 +144,72 @@ pub fn parse_geometry(json: &str) -> Option<EntityGeometry> {
     })
 }
 
+/// The classic (wide-arm) Java player model, hardcoded since `bedrock-samples`
+/// ships no `player.geo.json`. Box UVs match the 64x64 skin layout; bone names
+/// (`*_arm`/`*_leg`) drive the walk animation.
+#[must_use]
+pub fn player_geometry() -> EntityGeometry {
+    let bone = |name: &str, pivot: [f32; 3], origin: [f32; 3], size: [f32; 3], uv: [f32; 2]| Bone {
+        name: name.to_string(),
+        pivot,
+        rotation: [0.0, 0.0, 0.0],
+        cubes: vec![Cube {
+            origin,
+            size,
+            uv,
+            mirror: false,
+        }],
+    };
+    EntityGeometry {
+        texture_width: 64.0,
+        texture_height: 64.0,
+        bones: vec![
+            bone(
+                "head",
+                [0.0, 24.0, 0.0],
+                [-4.0, 24.0, -4.0],
+                [8.0, 8.0, 8.0],
+                [0.0, 0.0],
+            ),
+            bone(
+                "body",
+                [0.0, 24.0, 0.0],
+                [-4.0, 12.0, -2.0],
+                [8.0, 12.0, 4.0],
+                [16.0, 16.0],
+            ),
+            bone(
+                "right_arm",
+                [-5.0, 22.0, 0.0],
+                [-8.0, 12.0, -2.0],
+                [4.0, 12.0, 4.0],
+                [40.0, 16.0],
+            ),
+            bone(
+                "left_arm",
+                [5.0, 22.0, 0.0],
+                [4.0, 12.0, -2.0],
+                [4.0, 12.0, 4.0],
+                [32.0, 48.0],
+            ),
+            bone(
+                "right_leg",
+                [-2.0, 12.0, 0.0],
+                [-4.0, 0.0, -2.0],
+                [4.0, 12.0, 4.0],
+                [0.0, 16.0],
+            ),
+            bone(
+                "left_leg",
+                [2.0, 12.0, 0.0],
+                [0.0, 0.0, -2.0],
+                [4.0, 12.0, 4.0],
+                [16.0, 48.0],
+            ),
+        ],
+    }
+}
+
 /// Loads an entity model from `<models_dir>/<name>.geo.json`.
 pub fn load_geometry(models_dir: &Path, name: &str) -> Option<EntityGeometry> {
     let text = fs::read_to_string(models_dir.join(format!("{name}.geo.json"))).ok()?;
@@ -155,10 +221,15 @@ pub fn load_geometry(models_dir: &Path, name: &str) -> Option<EntityGeometry> {
 pub fn load_entity_texture(jar_path: &Path, name: &str) -> Option<(Vec<u8>, u32, u32)> {
     let file = fs::File::open(jar_path).ok()?;
     let mut archive = zip::ZipArchive::new(std::io::BufReader::new(file)).ok()?;
-    for candidate in [
+    let mut candidates = vec![
         format!("assets/minecraft/textures/entity/{name}/{name}.png"),
         format!("assets/minecraft/textures/entity/{name}.png"),
-    ] {
+    ];
+    if name == "player" {
+        // Default skin (no per-player skins in offline mode).
+        candidates.push("assets/minecraft/textures/entity/player/wide/steve.png".to_string());
+    }
+    for candidate in candidates {
         if let Ok(mut entry) = archive.by_name(&candidate) {
             let mut bytes = Vec::new();
             if entry.read_to_end(&mut bytes).is_ok() {
@@ -201,10 +272,10 @@ pub fn load_entity_atlas(
     let mut loaded: Vec<(i32, EntityGeometry, Vec<u8>, u32, u32)> = Vec::new();
     let (mut max_w, mut max_h) = (1u32, 1u32);
     for (id, name) in types {
-        if let (Some(geo), Some((rgba, w, h))) = (
-            load_geometry(models_dir, name),
-            load_entity_texture(jar_path, name),
-        ) {
+        // The player has no bedrock geo file; use the hardcoded humanoid.
+        let geo =
+            load_geometry(models_dir, name).or_else(|| (name == "player").then(player_geometry));
+        if let (Some(geo), Some((rgba, w, h))) = (geo, load_entity_texture(jar_path, name)) {
             max_w = max_w.max(w);
             max_h = max_h.max(h);
             loaded.push((*id, geo, rgba, w, h));
