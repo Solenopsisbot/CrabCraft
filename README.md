@@ -31,15 +31,18 @@ Verified end-to-end against a vanilla 1.20.1 server (offline mode unless noted):
 - **Block editing**: raycast-targeted **breaking** and **placing**, reconciled
   with the server
 - **Entities**: tracks other players/mobs (spawn, relative move, teleport,
-  destroy) and renders them as **3D models** (Bedrock geometry + jar textures,
-  falling back to boxes)
+  destroy) and renders them as **3D models** (Bedrock geometry incl. bone rest
+  rotations + jar textures, falling back to boxes), **smoothly interpolated**
+  between updates with a **procedural walk animation** (limbs swing while moving)
 - **Combat**: **left-click attacks** the mob you're aiming at (within reach) via
   a swing + InteractEntity; verified to damage and kill a mob on a live server
 - **Survival vitals**: tracks **health/food**, and on death sends a respawn
   request automatically
-- **HUD**: crosshair, a 9-slot hotbar (with item icons), and health/food bars
-- **Sounds**: block-break sounds loaded from your launcher's asset store and
-  played via `rodio` (set `CRABCRAFT_ASSETS`)
+- **HUD**: crosshair, a 9-slot hotbar (square cells, item icons, selectable with
+  number keys / scroll), and health/food bars
+- **Inventory**: open with **E** to view the full inventory grid + item icons
+- **Sounds**: break / place / footstep / mining / hurt sounds loaded from your
+  launcher's asset store and played via `rodio` (set `CRABCRAFT_ASSETS`)
 - **Online mode**: AES-128-CFB8 encryption + the Minecraft server hash + RSA
   handshake, with Microsoft device-code login (see caveats below)
 
@@ -106,9 +109,10 @@ textures from your jar; entities without a loaded model render as coloured boxes
 
 Windowed controls: **WASD** move · **Space** jump · **mouse** (or arrow keys)
 look · **left-click** attack a mob in your sights, else break the targeted block
-· **right-click** place · **Esc** quit. Movement is
-client-physics-simulated and sent to the server. (Run with `--release` for
-smooth framerates — debug builds mesh chunks slowly.)
+· **right-click** place · **1-9 / scroll** select hotbar slot · **E** inventory ·
+**Esc** close inventory / quit. Movement is client-physics-simulated and sent to
+the server. (Run with `--release` for smooth framerates — debug builds mesh
+chunks slowly.) For sounds, also set `CRABCRAFT_ASSETS=<.../assets>`.
 
 Render the bundled synthetic test world to a PNG (headless, no server needed):
 
@@ -156,11 +160,13 @@ the official server jar:
 - [x] Melee combat (attack mobs), health/food tracking + death-respawn
 - [x] Minimal HUD (crosshair, hotbar outline, health/food bars)
 - [x] Element block models (slabs/stairs/plants/lanterns render as real shapes)
+- [x] Entity bone rest rotations + interpolation + procedural walk animation
+- [x] Hotbar item icons + slot switching; inventory grid (view) on E
+- [x] Sounds: break / place / footstep / mining / hurt (from your asset store)
 - [ ] Blockstate variants & multipart (fence/wall connections, rotated stairs), biome tint
-- [ ] Entity animation/interpolation + per-mob hitbox models
+- [ ] Inventory **interaction** (container clicks to move items), crafting
+- [ ] Entity yaw/head facing + per-mob hitbox models; ambient sounds
 - [ ] Precise per-block collision shapes (slabs/stairs/fluids)
-- [x] Hotbar item icons + block-break sounds (from your asset store)
-- [ ] Inventory GUI, crafting, more sound events (steps/hurt/ambient)
 - [ ] More protocol versions (1.20.2+, 1.21, …) as sibling modules
 - [ ] (Far future, maybe) Forge mod support — see the note below
 

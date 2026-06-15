@@ -17,7 +17,9 @@ pub mod mesh;
 pub mod renderer;
 
 pub use camera::Camera;
-pub use hud::{build_hud_pipelines, hud_geometry, render_hud_to_png, HudPipelines};
+pub use hud::{
+    build_hud_pipelines, hud_geometry, inventory_geometry, render_hud_to_png, HudPipelines,
+};
 pub use mesh::{box_mesh, entity_mesh, mesh_region, Mesh, Vertex};
 pub use renderer::{
     build_block_pipeline, render_to_png, render_to_rgba, upload_atlas, upload_texture,

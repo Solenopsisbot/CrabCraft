@@ -13,8 +13,9 @@ use std::time::{Duration, Instant};
 
 use crab_assets::{Atlas, EntityAtlas, ItemAtlas};
 use crab_render::{
-    box_mesh, build_block_pipeline, build_hud_pipelines, entity_mesh, hud_geometry, mesh_region,
-    upload_atlas, upload_texture, CameraUniform, HudPipelines, Vertex, DEPTH_FORMAT,
+    box_mesh, build_block_pipeline, build_hud_pipelines, entity_mesh, hud_geometry,
+    inventory_geometry, mesh_region, upload_atlas, upload_texture, CameraUniform, HudPipelines,
+    Vertex, DEPTH_FORMAT,
 };
 use glam::Vec3;
 use wgpu::util::DeviceExt;
@@ -67,16 +68,27 @@ fn box_color(type_id: i32) -> [f32; 3] {
     ]
 }
 
-/// Builds the 9 hotbar item-icon UVs from the player's inventory (slots 36..44)
-/// using the item atlas, for `hud_geometry`.
+/// Builds the 9 hotbar item-icon UVs from the player's inventory (slots 36..44).
 fn hotbar_icons(shared: &Shared, item_atlas: &ItemAtlas) -> Vec<Option<[f32; 4]>> {
     let inv = shared.inventory.lock().unwrap();
     (0..9)
         .map(|i| {
-            inv.get(36 + i).and_then(|slot| *slot).and_then(|it| {
+            inv.get(36 + i).and_then(|s| *s).and_then(|it| {
                 let id = u32::try_from(it.item_id).ok()?;
-                let name = crab_registry::item_name(id)?;
-                item_atlas.icon(name)
+                item_atlas.icon(crab_registry::item_name(id)?)
+            })
+        })
+        .collect()
+}
+
+/// Builds the 36 inventory-panel UVs: main slots 9..36 then hotbar 36..45.
+fn inventory_icons(shared: &Shared, item_atlas: &ItemAtlas) -> Vec<Option<[f32; 4]>> {
+    let inv = shared.inventory.lock().unwrap();
+    (9..45)
+        .map(|i| {
+            inv.get(i).and_then(|s| *s).and_then(|it| {
+                let id = u32::try_from(it.item_id).ok()?;
+                item_atlas.icon(crab_registry::item_name(id)?)
             })
         })
         .collect()
@@ -408,6 +420,8 @@ struct App {
     last_frame: Instant,
     /// Selected hotbar slot (0..=8), driven by number keys / scroll.
     selected_slot: u8,
+    /// Whether the inventory panel is open (E toggles).
+    inventory_open: bool,
     /// Per-entity smoothed render state (interpolation + walk animation).
     entity_anim: HashMap<i32, EntityAnim>,
     /// Smoothed camera eye position (eases toward the player's stepped pos).
@@ -445,6 +459,7 @@ impl App {
             keys: HashSet::new(),
             last_frame: Instant::now(),
             selected_slot: 0,
+            inventory_open: false,
             entity_anim: HashMap::new(),
             render_eye: None,
         }
@@ -503,9 +518,34 @@ impl App {
         (box_v, model_v)
     }
 
+    /// Opens/closes the inventory, freeing or recapturing the cursor.
+    fn set_inventory_open(&mut self, open: bool) {
+        self.inventory_open = open;
+        if let Some(gfx) = self.gfx.as_ref() {
+            if open {
+                let _ = gfx.window.set_cursor_grab(CursorGrabMode::None);
+                gfx.window.set_cursor_visible(true);
+            } else {
+                let _ = gfx
+                    .window
+                    .set_cursor_grab(CursorGrabMode::Locked)
+                    .or_else(|_| gfx.window.set_cursor_grab(CursorGrabMode::Confined));
+                gfx.window.set_cursor_visible(false);
+            }
+        }
+    }
+
     /// Updates look from arrow keys and publishes movement intent to the shared
     /// `Controls` for the network thread to apply via physics.
     fn update_input(&mut self, dt: f32) {
+        // While the inventory is open, freeze movement/look input.
+        if self.inventory_open {
+            let mut controls = self.shared.controls.lock().unwrap();
+            controls.forward = 0.0;
+            controls.strafe = 0.0;
+            controls.jump = false;
+            return;
+        }
         let pressed = |c: KeyCode| self.keys.contains(&c);
         if pressed(KeyCode::ArrowLeft) {
             self.yaw -= LOOK_SPEED * dt;
@@ -627,6 +667,9 @@ impl ApplicationHandler for App {
     }
 
     fn device_event(&mut self, _event_loop: &ActiveEventLoop, _id: DeviceId, event: DeviceEvent) {
+        if self.inventory_open {
+            return; // cursor is free for the inventory; don't turn the view
+        }
         if let DeviceEvent::MouseMotion { delta } = event {
             const SENSITIVITY: f32 = 0.12; // degrees per pixel
             self.yaw += delta.0 as f32 * SENSITIVITY;
@@ -647,13 +690,23 @@ impl ApplicationHandler for App {
                     KeyEvent {
                         physical_key: PhysicalKey::Code(code),
                         state,
+                        repeat,
                         ..
                     },
                 ..
             } => {
                 if code == KeyCode::Escape {
-                    event_loop.exit();
+                    // Esc closes the inventory first, otherwise quits.
+                    if self.inventory_open {
+                        self.set_inventory_open(false);
+                    } else {
+                        event_loop.exit();
+                    }
                 } else if state == ElementState::Pressed {
+                    if code == KeyCode::KeyE && !repeat {
+                        let open = !self.inventory_open;
+                        self.set_inventory_open(open);
+                    }
                     self.keys.insert(code);
                 } else {
                     self.keys.remove(&code);
@@ -699,6 +752,9 @@ impl ApplicationHandler for App {
 
                 let (box_v, model_v) = self.step_entities(dt);
                 let hotbar = hotbar_icons(&self.shared, &self.item_atlas);
+                let inv_icons = self
+                    .inventory_open
+                    .then(|| inventory_icons(&self.shared, &self.item_atlas));
                 let selected = player.selected_slot as usize;
                 // Smooth the camera toward the 20 Hz-stepped player position.
                 let target_eye = Vec3::new(player.x as f32, player.y as f32, player.z as f32);
@@ -714,8 +770,13 @@ impl ApplicationHandler for App {
                     let camera = first_person_camera(eye, self.yaw, self.pitch, aspect);
                     gfx.box_entity_buffer = gfx.make_vertex_buffer(&box_v);
                     gfx.model_entity_buffer = gfx.make_vertex_buffer(&model_v);
-                    let (hud_c, hud_t) =
+                    let (mut hud_c, mut hud_t) =
                         hud_geometry(player.health, player.food, selected, &hotbar, aspect);
+                    if let Some(inv) = &inv_icons {
+                        let (ic, it) = inventory_geometry(inv, aspect);
+                        hud_c.extend(ic);
+                        hud_t.extend(it);
+                    }
                     gfx.set_hud(&hud_c, &hud_t);
                     gfx.render(&camera);
                 }

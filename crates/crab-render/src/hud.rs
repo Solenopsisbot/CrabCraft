@@ -249,6 +249,62 @@ pub fn hud_geometry(
     (c, t)
 }
 
+/// Builds the open-inventory panel: a dark background, a 9-wide grid of slot
+/// cells (3 main rows + a separated hotbar row), and item icons. `items` holds
+/// 36 optional atlas UVs — main inventory (0..27) then hotbar (27..36).
+#[must_use]
+pub fn inventory_geometry(
+    items: &[Option<[f32; 4]>],
+    aspect: f32,
+) -> (Vec<ColorVertex>, Vec<TexVertex>) {
+    let a = aspect.max(0.01);
+    let mut c = Vec::new();
+    let mut t = Vec::new();
+
+    let slot = 0.12_f32;
+    let sw = slot / a;
+    let gap = sw * 0.12;
+    let vgap = slot * 0.12;
+    let hotbar_gap = slot * 0.4;
+    let grid_w = 9.0 * sw + 8.0 * gap;
+    let x0 = -grid_w / 2.0;
+
+    let row_y1 = |row: usize| {
+        // Rows 0..3 from the top; the hotbar row (3) sits a little lower.
+        let extra = if row == 3 { hotbar_gap } else { 0.0 };
+        0.46 - row as f32 * (slot + vgap) - extra
+    };
+
+    // Background panel behind the grid.
+    let top = row_y1(0) + slot * 0.6;
+    let bottom = row_y1(3) - slot - slot * 0.6;
+    let pad = sw * 0.6;
+    push_color_quad(
+        &mut c,
+        x0 - pad,
+        bottom,
+        x0 + grid_w + pad,
+        top,
+        [0.14, 0.14, 0.17],
+    );
+
+    for row in 0..4 {
+        let y1 = row_y1(row);
+        let y0 = y1 - slot;
+        for col in 0..9 {
+            let x = x0 + col as f32 * (sw + gap);
+            push_color_quad(&mut c, x, y0, x + sw, y1, [0.33, 0.33, 0.36]);
+            let idx = if row < 3 { row * 9 + col } else { 27 + col };
+            if let Some(Some(uv)) = items.get(idx) {
+                let ix = sw * 0.1;
+                let iy = slot * 0.1;
+                push_tex_quad(&mut t, x + ix, y0 + iy, x + sw - ix, y1 - iy, *uv);
+            }
+        }
+    }
+    (c, t)
+}
+
 /// Headlessly renders the HUD over a solid background to a PNG (verification).
 #[allow(clippy::too_many_arguments)]
 pub fn render_hud_to_png(
