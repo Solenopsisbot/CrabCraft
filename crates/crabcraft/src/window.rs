@@ -102,48 +102,81 @@ fn box_color(type_id: i32) -> [f32; 3] {
 }
 
 /// A tiny white "+" drawn in screen-centre NDC, depth-test disabled.
-const CROSSHAIR_WGSL: &str = "
-@vertex fn vs(@location(0) p: vec2<f32>) -> @builtin(position) vec4<f32> {
-    return vec4<f32>(p, 0.0, 1.0);
+/// 2D coloured HUD overlay (crosshair, hotbar, health/food bars). Vertex =
+/// NDC position + RGB; depth-test disabled so it draws on top.
+const HUD_WGSL: &str = "
+struct VsIn { @location(0) pos: vec2<f32>, @location(1) color: vec3<f32> };
+struct VsOut { @builtin(position) clip: vec4<f32>, @location(0) color: vec3<f32> };
+@vertex fn vs(in: VsIn) -> VsOut {
+    var o: VsOut; o.clip = vec4<f32>(in.pos, 0.0, 1.0); o.color = in.color; return o;
 }
-@fragment fn fs() -> @location(0) vec4<f32> { return vec4<f32>(0.9, 0.9, 0.9, 1.0); }
+@fragment fn fs(in: VsOut) -> @location(0) vec4<f32> { return vec4<f32>(in.color, 1.0); }
 ";
 
-/// Two thin bars (a "+") in NDC, kept pixel-square via `aspect`.
-fn crosshair_vertices(aspect: f32) -> Vec<[f32; 2]> {
-    let arm = 0.018;
-    let thick = 0.0022;
-    let (hx, hy) = (arm / aspect, thick);
-    let (vx, vy) = (thick / aspect, arm);
-    let quad = |x: f32, y: f32| [[-x, -y], [x, -y], [x, y], [-x, -y], [x, y], [-x, y]];
+fn push_quad2d(v: &mut Vec<[f32; 5]>, x0: f32, y0: f32, x1: f32, y1: f32, c: [f32; 3]) {
+    for [px, py] in [[x0, y0], [x1, y0], [x1, y1], [x0, y0], [x1, y1], [x0, y1]] {
+        v.push([px, py, c[0], c[1], c[2]]);
+    }
+}
+
+/// Builds the HUD (crosshair + 9-slot hotbar + health/food bars). `aspect`
+/// keeps square things square; health/food are 0..=20.
+fn hud_vertices(health: f32, food: i32, aspect: f32) -> Vec<[f32; 5]> {
+    let a = aspect.max(0.01);
     let mut v = Vec::new();
-    v.extend_from_slice(&quad(hx, hy));
-    v.extend_from_slice(&quad(vx, vy));
+    let white = [0.9, 0.9, 0.9];
+
+    // Crosshair.
+    let (arm, thick) = (0.018, 0.0022);
+    push_quad2d(&mut v, -arm / a, -thick, arm / a, thick, white);
+    push_quad2d(&mut v, -thick / a, -arm, thick / a, arm, white);
+
+    // Hotbar: 9 slots centred along the bottom (slot 0 highlighted).
+    let (sw, gap) = (0.05 / a, 0.008 / a);
+    let total = 9.0 * sw + 8.0 * gap;
+    let (y0, y1) = (-0.985, -0.87);
+    let mut x = -total / 2.0;
+    for i in 0..9 {
+        let c = if i == 0 {
+            [0.72, 0.72, 0.72]
+        } else {
+            [0.30, 0.30, 0.33]
+        };
+        push_quad2d(&mut v, x, y0, x + sw, y1, c);
+        x += sw + gap;
+    }
+
+    // Health bar (left) and food bar (right) over dark backgrounds.
+    let (by0, by1) = (-0.83, -0.80);
+    push_quad2d(&mut v, -0.5, by0, -0.02, by1, [0.12, 0.12, 0.12]);
+    let hp = (health / 20.0).clamp(0.0, 1.0);
+    push_quad2d(&mut v, -0.5, by0, -0.5 + 0.48 * hp, by1, [0.85, 0.15, 0.15]);
+    push_quad2d(&mut v, 0.02, by0, 0.5, by1, [0.12, 0.12, 0.12]);
+    let fd = (food as f32 / 20.0).clamp(0.0, 1.0);
+    push_quad2d(&mut v, 0.5 - 0.48 * fd, by0, 0.5, by1, [0.55, 0.40, 0.15]);
     v
 }
 
-fn build_crosshair_pipeline(
-    device: &wgpu::Device,
-    format: wgpu::TextureFormat,
-) -> wgpu::RenderPipeline {
+fn build_hud_pipeline(device: &wgpu::Device, format: wgpu::TextureFormat) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("crosshair shader"),
-        source: wgpu::ShaderSource::Wgsl(CROSSHAIR_WGSL.into()),
+        label: Some("hud shader"),
+        source: wgpu::ShaderSource::Wgsl(HUD_WGSL.into()),
     });
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("crosshair layout"),
+        label: Some("hud layout"),
         bind_group_layouts: &[],
         push_constant_ranges: &[],
     });
-    const ATTRS: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![0 => Float32x2];
+    const ATTRS: [wgpu::VertexAttribute; 2] =
+        wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x3];
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("crosshair pipeline"),
+        label: Some("hud pipeline"),
         layout: Some(&layout),
         vertex: wgpu::VertexState {
             module: &shader,
             entry_point: "vs",
             buffers: &[wgpu::VertexBufferLayout {
-                array_stride: 8,
+                array_stride: 20,
                 step_mode: wgpu::VertexStepMode::Vertex,
                 attributes: &ATTRS,
             }],
@@ -187,9 +220,8 @@ struct Graphics {
     depth_view: wgpu::TextureView,
     /// Cached vertex buffer per chunk column.
     chunk_meshes: HashMap<(i32, i32), (wgpu::Buffer, u32)>,
-    crosshair_pipeline: wgpu::RenderPipeline,
-    crosshair_buffer: wgpu::Buffer,
-    crosshair_count: u32,
+    hud_pipeline: wgpu::RenderPipeline,
+    hud_buffer: Option<(wgpu::Buffer, u32)>,
     /// Entity texture atlas (for 3D entity models).
     entity_atlas_bind_group: wgpu::BindGroup,
     /// Per-frame box mesh for entities lacking a model (block atlas texture).
@@ -273,14 +305,7 @@ impl Graphics {
             entity_atlas.height,
         );
 
-        let crosshair_pipeline = build_crosshair_pipeline(&device, config.format);
-        let crosshair_verts = crosshair_vertices(width as f32 / height as f32);
-        let crosshair_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("crosshair"),
-            contents: bytemuck::cast_slice(&crosshair_verts),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-        let crosshair_count = crosshair_verts.len() as u32;
+        let hud_pipeline = build_hud_pipeline(&device, config.format);
 
         let depth_view = create_depth(&device, width, height);
 
@@ -296,13 +321,27 @@ impl Graphics {
             atlas_bind_group,
             depth_view,
             chunk_meshes: HashMap::new(),
-            crosshair_pipeline,
-            crosshair_buffer,
-            crosshair_count,
+            hud_pipeline,
+            hud_buffer: None,
             entity_atlas_bind_group,
             box_entity_buffer: None,
             model_entity_buffer: None,
         }
+    }
+
+    fn set_hud(&mut self, verts: &[[f32; 5]]) {
+        self.hud_buffer = if verts.is_empty() {
+            None
+        } else {
+            let buffer = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("hud"),
+                    contents: bytemuck::cast_slice(verts),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+            Some((buffer, verts.len() as u32))
+        };
     }
 
     fn make_vertex_buffer(&self, vertices: &[Vertex]) -> Option<(wgpu::Buffer, u32)> {
@@ -414,10 +453,12 @@ impl Graphics {
                 pass.set_vertex_buffer(0, buffer.slice(..));
                 pass.draw(0..*count, 0..1);
             }
-            // Crosshair overlay (no camera/atlas bind groups).
-            pass.set_pipeline(&self.crosshair_pipeline);
-            pass.set_vertex_buffer(0, self.crosshair_buffer.slice(..));
-            pass.draw(0..self.crosshair_count, 0..1);
+            // HUD overlay (crosshair + hotbar + health/food bars).
+            if let Some((buf, count)) = &self.hud_buffer {
+                pass.set_pipeline(&self.hud_pipeline);
+                pass.set_vertex_buffer(0, buf.slice(..));
+                pass.draw(0..*count, 0..1);
+            }
         }
         self.queue.submit(Some(encoder.finish()));
         frame.present();
@@ -645,6 +686,7 @@ impl ApplicationHandler for App {
                     let camera = first_person_camera(eye, self.yaw, self.pitch, aspect);
                     gfx.box_entity_buffer = gfx.make_vertex_buffer(&box_v);
                     gfx.model_entity_buffer = gfx.make_vertex_buffer(&model_v);
+                    gfx.set_hud(&hud_vertices(player.health, player.food, aspect));
                     gfx.render(&camera);
                 }
 

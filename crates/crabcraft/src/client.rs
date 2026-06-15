@@ -15,9 +15,10 @@ use crab_protocol::versions::v1_20_1::login::{
     SetCompression,
 };
 use crab_protocol::versions::v1_20_1::play::{
-    ClientChatMessage, ClientInformation, ConfirmTeleport, KeepAlive, KeepAliveResponse,
-    PlayDisconnect, PlayerDigging, SetCreativeSlot, SetPlayerPosition, SetPlayerPositionRotation,
-    SlotItem, SynchronizePlayerPosition, SystemChat, UseItemOn,
+    ClientChatMessage, ClientCommand, ClientInformation, ConfirmTeleport, KeepAlive,
+    KeepAliveResponse, PlayDisconnect, PlayerDigging, SetCreativeSlot, SetHealth,
+    SetPlayerPosition, SetPlayerPositionRotation, SlotItem, SynchronizePlayerPosition, SystemChat,
+    UseItemOn,
 };
 use crab_protocol::versions::PROTOCOL_1_20_1;
 use crab_protocol::BufExt;
@@ -35,6 +36,8 @@ const ID_REL_MOVE: i32 = 0x2b;
 const ID_MOVE_LOOK: i32 = 0x2c;
 const ID_ENTITY_TELEPORT: i32 = 0x68;
 const ID_ENTITY_DESTROY: i32 = 0x3e;
+const ID_UPDATE_HEALTH: i32 = 0x57;
+const ID_RESPAWN: i32 = 0x41;
 
 /// A tracked non-self entity (other player, mob, item, …) for rendering.
 #[derive(Clone, Copy, Debug)]
@@ -49,7 +52,7 @@ pub struct Entity {
 }
 
 /// Our current position/orientation as last told by the server.
-#[derive(Default, Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct PlayerState {
     pub x: f64,
     pub y: f64,
@@ -60,6 +63,26 @@ pub struct PlayerState {
     pub on_ground: bool,
     /// Velocity `[x, y, z]` for client-side physics.
     pub vel: [f64; 3],
+    /// Current health (0..=20) and food (0..=20).
+    pub health: f32,
+    pub food: i32,
+}
+
+impl Default for PlayerState {
+    fn default() -> Self {
+        Self {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            yaw: 0.0,
+            pitch: 0.0,
+            spawned: false,
+            on_ground: false,
+            vel: [0.0; 3],
+            health: 20.0,
+            food: 20,
+        }
+    }
 }
 
 /// Player input intent, written by the renderer and consumed by the net thread.
@@ -287,6 +310,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let mut greeted = false;
+    let mut dead = false;
     let mut block_sequence: i32 = 0;
     // ~20 Hz physics + position updates, like the vanilla client.
     let tick_dt = 0.05;
@@ -413,6 +437,26 @@ where
                     }
                     id if id == ID_ENTITY_DESTROY => {
                         let _ = handle_entity_destroy(&raw, shared);
+                    }
+                    id if id == ID_UPDATE_HEALTH => {
+                        if let Ok(pkt) = raw.decode::<SetHealth>() {
+                            {
+                                let mut ps = shared.player.lock().unwrap();
+                                ps.health = pkt.health;
+                                ps.food = pkt.food;
+                            }
+                            if pkt.health <= 0.0 && !dead {
+                                dead = true;
+                                tracing::info!("died — respawning");
+                                conn.send(&ClientCommand { action: 0 }).await?;
+                            } else if pkt.health > 0.0 {
+                                dead = false;
+                            }
+                        }
+                    }
+                    id if id == ID_RESPAWN => {
+                        // Entities don't carry across a respawn/dimension change.
+                        shared.entities.lock().unwrap().clear();
                     }
                     id if id == PlayDisconnect::ID => {
                         let d: PlayDisconnect = raw.decode()?;

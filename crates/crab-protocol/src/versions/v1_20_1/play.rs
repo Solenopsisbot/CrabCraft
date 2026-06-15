@@ -533,6 +533,58 @@ impl Packet for SetCreativeSlot {
     }
 }
 
+/// `0x57` — current health, food, and saturation.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SetHealth {
+    pub health: f32,
+    pub food: i32,
+    pub saturation: f32,
+}
+
+impl Packet for SetHealth {
+    const ID: i32 = 0x57;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Clientbound;
+
+    fn encode<B: BufMut>(&self, dst: &mut B) -> Result<(), ProtoError> {
+        dst.put_f32(self.health);
+        dst.put_varint(self.food);
+        dst.put_f32(self.saturation);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(src: &mut B) -> Result<Self, ProtoError> {
+        Ok(Self {
+            health: src.read_f32()?,
+            food: src.read_varint()?,
+            saturation: src.read_f32()?,
+        })
+    }
+}
+
+/// `0x07` — client status action (0 = perform respawn, 1 = request stats).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClientCommand {
+    pub action: i32,
+}
+
+impl Packet for ClientCommand {
+    const ID: i32 = 0x07;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Serverbound;
+
+    fn encode<B: BufMut>(&self, dst: &mut B) -> Result<(), ProtoError> {
+        dst.put_varint(self.action);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(src: &mut B) -> Result<Self, ProtoError> {
+        Ok(Self {
+            action: src.read_varint()?,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -641,6 +693,16 @@ mod tests {
             inside_block: false,
             sequence: 7,
         });
+    }
+
+    #[test]
+    fn set_health_and_client_command_roundtrip() {
+        roundtrip(&SetHealth {
+            health: 12.5,
+            food: 17,
+            saturation: 4.0,
+        });
+        roundtrip(&ClientCommand { action: 0 });
     }
 
     #[test]
