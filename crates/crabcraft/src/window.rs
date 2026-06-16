@@ -653,6 +653,8 @@ struct EntityAnim {
     phase: f32,
     /// Smoothed limb-swing amplitude (0 = still).
     amount: f32,
+    /// Smoothed facing yaw (degrees, Minecraft convention).
+    yaw: f32,
 }
 
 impl App {
@@ -703,6 +705,7 @@ impl App {
                 pos: target,
                 phase: 0.0,
                 amount: 0.0,
+                yaw: e.yaw,
             });
             let before = a.pos;
             for (k, &t) in target.iter().enumerate() {
@@ -713,6 +716,12 @@ impl App {
             a.phase += moved * 2.2;
             let target_amount = (moved / dt.max(1e-3) * 0.10).min(0.7);
             a.amount += (target_amount - a.amount) * ease;
+            // Ease the facing yaw along the shortest arc (wrap at +-180).
+            let mut dyaw = (e.yaw - a.yaw).rem_euclid(360.0);
+            if dyaw > 180.0 {
+                dyaw -= 360.0;
+            }
+            a.yaw += dyaw * ease;
         }
         self.entity_anim.retain(|id, _| alive.contains(id));
 
@@ -744,6 +753,7 @@ impl App {
                     a.phase,
                     a.amount,
                     e.scale,
+                    a.yaw,
                 ));
             } else {
                 let hw = e.half_width;

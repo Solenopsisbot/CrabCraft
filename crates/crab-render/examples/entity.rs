@@ -18,6 +18,12 @@ fn main() {
     let swing: f32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(0.0);
     // Optional model scale (slime size).
     let scale: f32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(1.0);
+    // Optional entity yaw (degrees, Minecraft convention).
+    let yaw: f32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+    // Optional camera eye (x,y,z) for picking a viewing angle.
+    let ex: f32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(2.2);
+    let ey: f32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(1.3);
+    let ez: f32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(2.8);
 
     let geo = crab_assets::parse_geometry(&std::fs::read_to_string(&geo_path).unwrap())
         .expect("parse geometry");
@@ -40,12 +46,25 @@ fn main() {
             swing,
             1.0,
             scale,
+            yaw,
         ),
     };
 
+    {
+        let mut mn = [f32::MAX; 3];
+        let mut mx = [f32::MIN; 3];
+        for v in &mesh.vertices {
+            for k in 0..3 {
+                mn[k] = mn[k].min(v.position[k]);
+                mx[k] = mx[k].max(v.position[k]);
+            }
+        }
+        eprintln!("mesh AABB: min={mn:?} max={mx:?}");
+    }
+
     let (w, h) = (800u32, 800u32);
     let camera = Camera {
-        eye: Vec3::new(2.2, 1.3, 2.8),
+        eye: Vec3::new(ex, ey, ez),
         target: Vec3::new(0.0, 0.8, 0.0),
         up: Vec3::Y,
         aspect: w as f32 / h as f32,

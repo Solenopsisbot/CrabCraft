@@ -35,6 +35,7 @@ const ID_SPAWN_ENTITY: i32 = 0x01;
 const ID_SPAWN_PLAYER: i32 = 0x03;
 const ID_REL_MOVE: i32 = 0x2b;
 const ID_MOVE_LOOK: i32 = 0x2c;
+const ID_ENTITY_ROTATION: i32 = 0x2d;
 const ID_ENTITY_TELEPORT: i32 = 0x68;
 const ID_ENTITY_DESTROY: i32 = 0x3e;
 const ID_UPDATE_HEALTH: i32 = 0x57;
@@ -79,6 +80,8 @@ pub struct Entity {
     pub type_id: i32,
     /// Render scale (slimes set this from their metadata size).
     pub scale: f32,
+    /// Facing yaw in degrees (Minecraft convention), for model rotation.
+    pub yaw: f32,
     /// For dropped-item entities: the contained item id (for icon rendering).
     pub item: Option<i32>,
 }
@@ -497,8 +500,14 @@ where
                     id if id == ID_SPAWN_PLAYER => {
                         let _ = handle_spawn_player(&raw, shared);
                     }
-                    id if id == ID_REL_MOVE || id == ID_MOVE_LOOK => {
-                        let _ = handle_rel_move(&raw, shared);
+                    id if id == ID_REL_MOVE => {
+                        let _ = handle_rel_move(&raw, shared, false);
+                    }
+                    id if id == ID_MOVE_LOOK => {
+                        let _ = handle_rel_move(&raw, shared, true);
+                    }
+                    id if id == ID_ENTITY_ROTATION => {
+                        let _ = handle_entity_rotation(&raw, shared);
                     }
                     id if id == ID_ENTITY_TELEPORT => {
                         let _ = handle_entity_teleport(&raw, shared);
@@ -920,6 +929,9 @@ fn handle_spawn_object(raw: &crab_net::RawPacket, shared: &Arc<Shared>) -> Resul
     let _uuid = b.read_uuid()?;
     let kind = b.read_varint()?;
     let (x, y, z) = (b.read_f64()?, b.read_f64()?, b.read_f64()?);
+    // Spawn Entity order: pitch, yaw, head-yaw (each a 256-step angle byte).
+    let _pitch = b.read_u8()?;
+    let yaw = angle_to_deg(b.read_u8()?);
     let (half_width, height) = crab_registry::entity_def(kind as u32)
         .map(|d| (d.width / 2.0, d.height))
         .unwrap_or((0.45, 1.3));
@@ -933,10 +945,16 @@ fn handle_spawn_object(raw: &crab_net::RawPacket, shared: &Arc<Shared>) -> Resul
             height,
             type_id: kind,
             scale: 1.0,
+            yaw,
             item: None,
         },
     );
     Ok(())
+}
+
+/// Converts a Minecraft angle byte (256 steps = 360°) to degrees.
+fn angle_to_deg(byte: u8) -> f32 {
+    f32::from(byte) * 360.0 / 256.0
 }
 
 fn handle_spawn_player(raw: &crab_net::RawPacket, shared: &Arc<Shared>) -> Result<()> {
@@ -944,6 +962,8 @@ fn handle_spawn_player(raw: &crab_net::RawPacket, shared: &Arc<Shared>) -> Resul
     let id = b.read_varint()?;
     let _uuid = b.read_uuid()?;
     let (x, y, z) = (b.read_f64()?, b.read_f64()?, b.read_f64()?);
+    // Spawn Player order: yaw, pitch.
+    let yaw = angle_to_deg(b.read_u8()?);
     shared.entities.lock().unwrap().insert(
         id,
         Entity {
@@ -954,6 +974,7 @@ fn handle_spawn_player(raw: &crab_net::RawPacket, shared: &Arc<Shared>) -> Resul
             height: 1.8,
             type_id: 122, // "player"
             scale: 1.0,
+            yaw,
             item: None,
         },
     );
@@ -1075,14 +1096,29 @@ fn set_entity_size(shared: &Arc<Shared>, id: i32, size: f32) {
 
 /// Relative move (works for both `rel_entity_move` and `entity_move_look`;
 /// trailing look bytes are ignored).
-fn handle_rel_move(raw: &crab_net::RawPacket, shared: &Arc<Shared>) -> Result<()> {
+fn handle_rel_move(raw: &crab_net::RawPacket, shared: &Arc<Shared>, has_rot: bool) -> Result<()> {
     let mut b = raw.body.clone();
     let id = b.read_varint()?;
     let (dx, dy, dz) = (b.read_i16()?, b.read_i16()?, b.read_i16()?);
+    let yaw = has_rot.then(|| angle_to_deg(b.read_u8().unwrap_or(0)));
     if let Some(e) = shared.entities.lock().unwrap().get_mut(&id) {
         e.x += f64::from(dx) / 4096.0;
         e.y += f64::from(dy) / 4096.0;
         e.z += f64::from(dz) / 4096.0;
+        if let Some(yaw) = yaw {
+            e.yaw = yaw;
+        }
+    }
+    Ok(())
+}
+
+/// Update Entity Rotation (0x2d): yaw + pitch only.
+fn handle_entity_rotation(raw: &crab_net::RawPacket, shared: &Arc<Shared>) -> Result<()> {
+    let mut b = raw.body.clone();
+    let id = b.read_varint()?;
+    let yaw = angle_to_deg(b.read_u8()?);
+    if let Some(e) = shared.entities.lock().unwrap().get_mut(&id) {
+        e.yaw = yaw;
     }
     Ok(())
 }
@@ -1091,10 +1127,12 @@ fn handle_entity_teleport(raw: &crab_net::RawPacket, shared: &Arc<Shared>) -> Re
     let mut b = raw.body.clone();
     let id = b.read_varint()?;
     let (x, y, z) = (b.read_f64()?, b.read_f64()?, b.read_f64()?);
+    let yaw = angle_to_deg(b.read_u8()?);
     if let Some(e) = shared.entities.lock().unwrap().get_mut(&id) {
         e.x = x;
         e.y = y;
         e.z = z;
+        e.yaw = yaw;
     }
     Ok(())
 }

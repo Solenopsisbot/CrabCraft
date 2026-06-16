@@ -331,7 +331,12 @@ pub fn entity_mesh(
     limb_swing: f32,
     limb_amount: f32,
     scale: f32,
+    yaw_deg: f32,
 ) -> Vec<Vertex> {
+    // Whole-model facing: Minecraft yaw 0 = south (+Z) and increases clockwise
+    // (90 = west/-X). Our model's front (head) is at -Z and we mirror X, so the
+    // spin that lands yaw 0 facing +Z (calibrated by render) is `-yaw`.
+    let (yaw_sin, yaw_cos) = (-yaw_deg).to_radians().sin_cos();
     let (sw, sh) = (uv_size[0].max(1.0), uv_size[1].max(1.0));
     let (ox, oy) = (uv_origin[0], uv_origin[1]);
     let uvr = |x0: f32, y0: f32, x1: f32, y1: f32| {
@@ -354,16 +359,31 @@ pub fn entity_mesh(
             -bone.rotation[2],
         ];
         // Bedrock model space -> world: rotate about the bone pivot, then /16,
-        // X negated (Bedrock/Java mirror), + feet offset.
+        // X negated (Bedrock/Java mirror), spin by the entity yaw about the
+        // vertical axis, then translate to the feet offset.
         let place = |px: f32, py: f32, pz: f32| {
             let r = rotate_euler([px, py, pz], bone.pivot, euler);
+            let (lx, ly, lz) = (
+                -r[0] / 16.0 * scale,
+                r[1] / 16.0 * scale,
+                r[2] / 16.0 * scale,
+            );
             [
-                -r[0] / 16.0 * scale + offset[0],
-                r[1] / 16.0 * scale + offset[1],
-                r[2] / 16.0 * scale + offset[2],
+                offset[0] + lx * yaw_cos - lz * yaw_sin,
+                offset[1] + ly,
+                offset[2] + lx * yaw_sin + lz * yaw_cos,
             ]
         };
-        let nrm = |n: [f32; 3]| rotate_euler(n, [0.0, 0.0, 0.0], euler);
+        let nrm = |n: [f32; 3]| {
+            let r = rotate_euler(n, [0.0, 0.0, 0.0], euler);
+            // Match `place`: mirror X, then apply the yaw spin.
+            let (lx, lz) = (-r[0], r[2]);
+            [
+                lx * yaw_cos - lz * yaw_sin,
+                r[1],
+                lx * yaw_sin + lz * yaw_cos,
+            ]
+        };
 
         for cube in &bone.cubes {
             let o = cube.origin;
