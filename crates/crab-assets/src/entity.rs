@@ -210,6 +210,49 @@ pub fn player_geometry() -> EntityGeometry {
     }
 }
 
+/// Maps a registry entity name to its bedrock geometry file base name and jar
+/// texture path (relative to `textures/entity/`), for the mobs whose asset
+/// names differ from the entity name — shared models (e.g. `cave_spider` uses
+/// the spider model), variant skins (`axolotl/axolotl_lucy`), or subfolders
+/// (`magma_cube` -> `slime/magmacube`). Without this they'd render as boxes.
+#[must_use]
+pub fn entity_alias(name: &str) -> Option<(&'static str, &'static str)> {
+    Some(match name {
+        // Shared models with their own texture.
+        "cave_spider" => ("spider", "spider/cave_spider"),
+        "magma_cube" => ("magma_cube", "slime/magmacube"),
+        "mooshroom" => ("mooshroom", "cow/red_mooshroom"),
+        "elder_guardian" => ("guardian", "guardian_elder"),
+        "piglin_brute" => ("piglin", "piglin/piglin_brute"),
+        "zombified_piglin" => ("piglin", "piglin/zombified_piglin"),
+        "zoglin" => ("hoglin", "hoglin/zoglin"),
+        "wither" => ("wither_boss", "wither/wither"),
+        "giant" => ("zombie", "zombie/zombie"),
+        "illusioner" => ("evoker", "illager/illusioner"),
+        "wandering_trader" => ("villager_v2", "wandering_trader"),
+        // Horses (all share the horse model).
+        "horse" => ("horse_v2", "horse/horse_brown"),
+        "donkey" => ("horse_v2", "horse/donkey"),
+        "mule" => ("horse_v2", "horse/mule"),
+        "skeleton_horse" => ("horse_v2", "horse/horse_skeleton"),
+        "zombie_horse" => ("horse_v2", "horse/horse_brown"),
+        // Own model, but a variant/relocated texture.
+        "axolotl" => ("axolotl", "axolotl/axolotl_lucy"),
+        "cat" => ("cat", "cat/red"),
+        "ender_dragon" => ("ender_dragon", "enderdragon/dragon"),
+        "frog" => ("frog", "frog/temperate_frog"),
+        "llama" => ("llama", "llama/creamy"),
+        "trader_llama" => ("llama", "llama/creamy"),
+        "parrot" => ("parrot", "parrot/parrot_red_blue"),
+        "polar_bear" => ("polar_bear", "bear/polarbear"),
+        "rabbit" => ("rabbit", "rabbit/brown"),
+        "turtle" => ("turtle", "turtle/big_sea_turtle"),
+        "vex" => ("vex", "illager/vex"),
+        "armor_stand" => ("armor_stand", "armorstand/wood"),
+        _ => return None,
+    })
+}
+
 /// Loads an entity model from `<models_dir>/<name>.geo.json`.
 pub fn load_geometry(models_dir: &Path, name: &str) -> Option<EntityGeometry> {
     let text = fs::read_to_string(models_dir.join(format!("{name}.geo.json"))).ok()?;
@@ -221,10 +264,16 @@ pub fn load_geometry(models_dir: &Path, name: &str) -> Option<EntityGeometry> {
 pub fn load_entity_texture(jar_path: &Path, name: &str) -> Option<(Vec<u8>, u32, u32)> {
     let file = fs::File::open(jar_path).ok()?;
     let mut archive = zip::ZipArchive::new(std::io::BufReader::new(file)).ok()?;
-    let mut candidates = vec![
-        format!("assets/minecraft/textures/entity/{name}/{name}.png"),
-        format!("assets/minecraft/textures/entity/{name}.png"),
-    ];
+    let mut candidates = Vec::new();
+    // Aliased texture path first (variant skins / subfolders), then the
+    // standard `entity/<name>/<name>.png` and `entity/<name>.png` layouts.
+    if let Some((_, tex)) = entity_alias(name) {
+        candidates.push(format!("assets/minecraft/textures/entity/{tex}.png"));
+    }
+    candidates.push(format!(
+        "assets/minecraft/textures/entity/{name}/{name}.png"
+    ));
+    candidates.push(format!("assets/minecraft/textures/entity/{name}.png"));
     if name == "player" {
         // Default skin (no per-player skins in offline mode).
         candidates.push("assets/minecraft/textures/entity/player/wide/steve.png".to_string());
@@ -273,8 +322,10 @@ pub fn load_entity_atlas(
     let (mut max_w, mut max_h) = (1u32, 1u32);
     for (id, name) in types {
         // The player has no bedrock geo file; use the hardcoded humanoid.
-        let geo =
-            load_geometry(models_dir, name).or_else(|| (name == "player").then(player_geometry));
+        // Shared-model mobs (cave_spider, horses, …) load an aliased geo file.
+        let geo_name = entity_alias(name).map_or(name.as_str(), |(g, _)| g);
+        let geo = load_geometry(models_dir, geo_name)
+            .or_else(|| (name == "player").then(player_geometry));
         if let (Some(geo), Some((rgba, w, h))) = (geo, load_entity_texture(jar_path, name)) {
             max_w = max_w.max(w);
             max_h = max_h.max(h);
@@ -336,4 +387,34 @@ fn arr3(v: Option<&Value>) -> Option<[f32; 3]> {
 fn arr2(v: Option<&Value>) -> Option<[f32; 2]> {
     let a = v?.as_array()?;
     Some([a.first()?.as_f64()? as f32, a.get(1)?.as_f64()? as f32])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn aliases_map_shared_models_and_variant_skins() {
+        // Shared model + own texture.
+        assert_eq!(
+            entity_alias("cave_spider"),
+            Some(("spider", "spider/cave_spider"))
+        );
+        assert_eq!(
+            entity_alias("magma_cube"),
+            Some(("magma_cube", "slime/magmacube"))
+        );
+        assert_eq!(
+            entity_alias("horse"),
+            Some(("horse_v2", "horse/horse_brown"))
+        );
+        // Variant skin under its own model.
+        assert_eq!(
+            entity_alias("parrot"),
+            Some(("parrot", "parrot/parrot_red_blue"))
+        );
+        // Unaliased mobs fall through to the name-based defaults.
+        assert_eq!(entity_alias("cow"), None);
+        assert_eq!(entity_alias("zombie"), None);
+    }
 }
