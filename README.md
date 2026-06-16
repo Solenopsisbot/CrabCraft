@@ -40,10 +40,13 @@ Verified end-to-end against a vanilla 1.20.1 server (offline mode unless noted):
 - **Survival vitals**: tracks **health/food**, and on death sends a respawn
   request automatically
 - **HUD**: rendered with the **real Minecraft GUI textures** + bitmap font —
-  hotbar widget (number-key/scroll selection), health/food bars, and **stack-size
-  numbers** on items
+  hotbar widget (number-key/scroll selection), **hearts/hunger + XP bar & level**
+  (from `icons.png`), and **stack-size numbers** on items
 - **Inventory**: open with **E** (real container texture); **click to move/swap
-  items** (Click Container), with the carried stack drawn at the cursor
+  items** (left/right-click semantics) across all 46 slots — including the
+  **2×2 crafting** grid (the server returns the result) and **armour** slots
+- **Pause menu**: **Esc** opens a menu with the vanilla button sprites
+  (Back to Game / Quit), hover highlight + click
 - **Chat & commands**: **T** to chat, **/** for a command; messages send (chat +
   Chat Command packets) and incoming system chat shows in an on-screen log
 - **Sounds**: break / place / hit / footstep / mining / hurt / attack sounds
@@ -115,9 +118,10 @@ textures from your jar; entities without a loaded model render as coloured boxes
 Windowed controls: **WASD** move · **Space** jump · **mouse** (or arrow keys)
 look · **left-click** attack a mob in your sights, else break the targeted block
 · **right-click** place · **1-9 / scroll** select hotbar slot · **E** inventory ·
-**Esc** close inventory / quit. Movement is client-physics-simulated and sent to
-the server. (Run with `--release` for smooth framerates — debug builds mesh
-chunks slowly.) For sounds, also set `CRABCRAFT_ASSETS=<.../assets>`.
+**T** chat · **/** command · **Esc** pause menu (Quit to exit). Movement is
+client-physics-simulated and sent to the server. (Run with `--release` for smooth
+framerates — debug builds mesh chunks slowly.) For sounds, also set
+`CRABCRAFT_ASSETS=<.../assets>`.
 
 Render the bundled synthetic test world to a PNG (headless, no server needed):
 
@@ -171,8 +175,11 @@ the official server jar:
 - [x] Inventory open + click-to-move/swap items; hotbar slot switching
 - [x] Chat + commands (send/receive, on-screen log)
 - [x] Sounds: break / place / hit / footstep / mining / hurt / attack
+- [x] Crafting (2×2) + armour via the full inventory window; left/right clicks
+- [x] Real HUD (hearts / hunger / XP+level); pause menu with vanilla buttons
+- [x] Player model (humanoid + default skin) for other players
 - [ ] Blockstate variants & multipart (fence/wall connections, rotated stairs), biome tint
-- [ ] Crafting; right-click split / shift-click move; container (chest) GUIs
+- [ ] Shift-click move; container (chest/furnace) GUIs; in-inventory 3D player
 - [ ] Entity yaw/head facing + per-mob hitbox models; ambient sounds
 - [ ] Precise per-block collision shapes (slabs/stairs/fluids)
 - [ ] More protocol versions (1.20.2+, 1.21, …) as sibling modules
