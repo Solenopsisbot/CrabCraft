@@ -776,7 +776,8 @@ where
                     });
 
                     // Place on a fresh right-click — only if the held item is a
-                    // block (empty hand / non-block items do nothing).
+                    // real block. Empty hand, air (id 0), zero-count slots, and
+                    // non-block items all right-click to nothing and stay silent.
                     if do_place {
                         let held = {
                             let inv = shared.inventory.lock().unwrap();
@@ -784,10 +785,7 @@ where
                                 .copied()
                                 .flatten()
                         };
-                        let placed = held.and_then(|it| {
-                            let name = u32::try_from(it.item_id).ok().and_then(crab_registry::item_name)?;
-                            crab_registry::block_by_name(name).map(|b| b.default_state)
-                        });
+                        let placed = placeable_state(held);
                         if let (Some(hit), Some(state)) = (hit, placed) {
                             let p = hit.place_position();
                             block_sequence += 1;
@@ -1233,6 +1231,18 @@ fn block_name_at(shared: &Arc<Shared>, block: [i32; 3]) -> Option<&'static str> 
         .and_then(crab_registry::block_name)
 }
 
+/// The block state a held item would place on right-click, or `None` if it
+/// isn't a real, non-air block. Empty hand (`None`), air (item id 0), zero-count
+/// slots, and non-block items all yield `None`, so right-clicking them places
+/// nothing and plays no sound — regardless of which hotbar slot is selected.
+fn placeable_state(held: Option<SlotItem>) -> Option<u32> {
+    let it = held.filter(|it| it.count > 0)?;
+    let id = u32::try_from(it.item_id).ok().filter(|&id| id != 0)?;
+    let name = crab_registry::item_name(id)?;
+    let state = crab_registry::block_by_name(name)?.default_state;
+    (!crab_registry::is_air(state)).then_some(state)
+}
+
 /// Maximum stack size for an item id (default 64).
 fn stack_max(item_id: i32) -> i8 {
     u32::try_from(item_id)
@@ -1388,5 +1398,33 @@ fn split_host_port(addr: &str) -> (String, u16) {
     match addr.rsplit_once(':') {
         Some((host, port)) => (host.to_string(), port.parse().unwrap_or(25565)),
         None => (addr.to_string(), 25565),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn slot(item_id: i32, count: i8) -> Option<SlotItem> {
+        Some(SlotItem { item_id, count })
+    }
+
+    #[test]
+    fn only_real_blocks_are_placeable() {
+        // Empty hand -> nothing (this is the no-op, silent case for any slot).
+        assert_eq!(placeable_state(None), None);
+        // Air (item id 0) -> nothing (was the phantom "stone place" leak).
+        assert_eq!(placeable_state(slot(0, 1)), None);
+        // A zero-count slot -> nothing.
+        assert_eq!(placeable_state(slot(1, 0)), None);
+        // A non-block item (diamond sword) -> nothing.
+        assert_eq!(placeable_state(slot(797, 1)), None);
+        // A real block (stone, item id 1) -> its non-air default state.
+        let state = placeable_state(slot(1, 64)).expect("stone is placeable");
+        assert!(!crab_registry::is_air(state));
+        assert_eq!(
+            crab_registry::block_by_name("stone").unwrap().default_state,
+            state
+        );
     }
 }
