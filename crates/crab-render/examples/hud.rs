@@ -35,7 +35,12 @@ fn main() {
     let atlas = crab_assets::load_item_atlas(jar, &owned).expect("item atlas");
     let hotbar: Vec<Option<[f32; 4]>> = names.iter().map(|n| atlas.icon(n)).collect();
 
-    let aspect = 16.0 / 9.0;
+    let aspect: f32 = std::env::args()
+        .nth(3)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(16.0 / 9.0);
+    let height = 540u32;
+    let width = (height as f32 * aspect) as u32;
     let (color, g, item) = hud_geometry(&gui, 7.0, 13, 0.6, 30, 3, &hotbar, aspect);
     let mut text = Vec::new();
     push_text(&mut text, &gui, "Crabcraft 1.20.1", -0.6, 0.9, 0.05, aspect);
@@ -54,8 +59,8 @@ fn main() {
         &atlas.rgba,
         atlas.width,
         atlas.height,
-        960,
-        540,
+        width,
+        height,
         Path::new(&out),
     )
     .expect("render hud");
