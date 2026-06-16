@@ -125,6 +125,15 @@ pub fn block_name(state: u32) -> Option<&'static str> {
     block_for_state(state).map(|b| b.name)
 }
 
+/// Looks up a block by (bare or namespaced) name, e.g. `"oak_planks"`.
+#[must_use]
+pub fn block_by_name(name: &str) -> Option<&'static BlockDef> {
+    let bare = name.strip_prefix("minecraft:").unwrap_or(name);
+    BLOCKS_1_20_1
+        .iter()
+        .find(|b| b.name.strip_prefix("minecraft:") == Some(bare))
+}
+
 /// Whether a state is one of the non-collidable air blocks.
 #[must_use]
 pub fn is_air(state: u32) -> bool {

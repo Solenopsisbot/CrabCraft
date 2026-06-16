@@ -681,13 +681,10 @@ where
                                 dig = cancel_dig(conn, dig, &mut block_sequence).await?;
                             }
                         }
-                        // Clicking toward a block always plays its hit sound, even
-                        // before it breaks (and we send a swing).
+                        // A fresh click swings the arm (the mining hit + break
+                        // sounds play as digging progresses, not on every click).
                         if !attacked_entity {
                             conn.send(&SwingArm { hand: 0 }).await?;
-                            if let Some(h) = &hit {
-                                play_break_sound(shared, h.block);
-                            }
                         }
                     }
 
@@ -749,9 +746,20 @@ where
                         }
                     }
 
-                    // Place on a fresh right-click against the targeted face.
+                    // Place on a fresh right-click — only if the held item is a
+                    // block (empty hand / non-block items do nothing).
                     if do_place {
-                        if let Some(hit) = hit {
+                        let held = {
+                            let inv = shared.inventory.lock().unwrap();
+                            inv.get(36 + controls.selected_slot as usize)
+                                .copied()
+                                .flatten()
+                        };
+                        let placed = held.and_then(|it| {
+                            let name = u32::try_from(it.item_id).ok().and_then(crab_registry::item_name)?;
+                            crab_registry::block_by_name(name).map(|b| b.default_state)
+                        });
+                        if let (Some(hit), Some(state)) = (hit, placed) {
                             let p = hit.place_position();
                             block_sequence += 1;
                             conn.send(&UseItemOn {
@@ -765,9 +773,9 @@ where
                                 sequence: block_sequence,
                             })
                             .await?;
-                            shared.world.lock().unwrap().set_block_state(p[0], p[1], p[2], 1);
+                            shared.world.lock().unwrap().set_block_state(p[0], p[1], p[2], state);
                             mark_dirty(shared, p[0] >> 4, p[2] >> 4);
-                            if let Some(name) = block_name_at(shared, p) {
+                            if let Some(name) = crab_registry::block_name(state) {
                                 queue_sound(shared, crab_audio::break_sound(name));
                             }
                         }
