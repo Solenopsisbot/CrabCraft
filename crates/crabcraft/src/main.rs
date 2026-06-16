@@ -146,6 +146,18 @@ fn load_item_atlas() -> crab_assets::ItemAtlas {
     }
 }
 
+/// Loads the block-breaking destroy-stage overlay atlas (`(rgba, w, h)`) from
+/// `CRABCRAFT_JAR`, or `None` (no crack overlay) if unset/unreadable.
+fn load_destroy_stages() -> Option<(Vec<u8>, u32, u32)> {
+    let jar = std::env::var("CRABCRAFT_JAR").ok()?;
+    let stages = crab_assets::load_destroy_stages(std::path::Path::new(&jar));
+    match &stages {
+        Some((_, w, h)) => tracing::info!("loaded destroy-stage overlay {w}x{h} from {jar}"),
+        None => tracing::warn!("destroy-stage textures not found in {jar}; no break overlay"),
+    }
+    stages
+}
+
 /// Loads the GUI sprite + font atlas from `CRABCRAFT_JAR`, or an empty atlas.
 fn load_gui_atlas() -> crab_assets::GuiAtlas {
     let Ok(jar) = std::env::var("CRABCRAFT_JAR") else {
@@ -270,7 +282,8 @@ fn run_windowed(addr: String, login: LoginMode, deadline: Option<Duration>) -> R
     let item_atlas = load_item_atlas();
     spawn_net_thread(addr, login, Arc::clone(&shared), deadline);
     let gui_atlas = load_gui_atlas();
-    window::run(shared, atlas, entity_atlas, item_atlas, gui_atlas)
+    let crack = load_destroy_stages();
+    window::run(shared, atlas, entity_atlas, item_atlas, gui_atlas, crack)
 }
 
 /// Windowed online: authenticate on the network thread, then connect.
@@ -306,7 +319,8 @@ fn run_windowed_online(addr: String) -> Result<()> {
         });
     });
     let gui_atlas = load_gui_atlas();
-    window::run(shared, atlas, entity_atlas, item_atlas, gui_atlas)
+    let crack = load_destroy_stages();
+    window::run(shared, atlas, entity_atlas, item_atlas, gui_atlas, crack)
 }
 
 fn spawn_net_thread(

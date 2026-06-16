@@ -259,6 +259,10 @@ struct Graphics {
     model_entity_buffer: Option<(wgpu::Buffer, u32)>,
     /// Per-frame dropped-item billboards (item atlas texture).
     item_entity_buffer: Option<(wgpu::Buffer, u32)>,
+    /// Destroy-stage (block-breaking crack) overlay atlas, if loaded.
+    crack_bind_group: Option<wgpu::BindGroup>,
+    /// Per-frame crack overlay cube for the block being mined.
+    crack_buffer: Option<(wgpu::Buffer, u32)>,
 }
 
 impl Graphics {
@@ -268,6 +272,7 @@ impl Graphics {
         entity_atlas: &EntityAtlas,
         item_atlas: &ItemAtlas,
         gui_atlas: &GuiAtlas,
+        crack: Option<&(Vec<u8>, u32, u32)>,
     ) -> Self {
         let size = window.inner_size();
         let width = size.width.max(1);
@@ -371,6 +376,11 @@ impl Graphics {
             gui_atlas.height,
         );
 
+        // Block-breaking crack overlay atlas (drawn with the world pipeline:
+        // crack pixels are opaque, the rest is transparent and discarded).
+        let crack_bind_group =
+            crack.map(|(rgba, w, h)| upload_texture(&device, &queue, &texture_bgl, rgba, *w, *h));
+
         let depth_view = create_depth(&device, width, height);
 
         Self {
@@ -397,6 +407,8 @@ impl Graphics {
             box_entity_buffer: None,
             model_entity_buffer: None,
             item_entity_buffer: None,
+            crack_bind_group,
+            crack_buffer: None,
         }
     }
 
@@ -547,6 +559,14 @@ impl Graphics {
                 pass.set_vertex_buffer(0, buffer.slice(..));
                 pass.draw(0..*count, 0..1);
             }
+            // Block-breaking crack overlay on the block being mined.
+            if let (Some(bind), Some((buffer, count))) =
+                (&self.crack_bind_group, &self.crack_buffer)
+            {
+                pass.set_bind_group(1, bind, &[]);
+                pass.set_vertex_buffer(0, buffer.slice(..));
+                pass.draw(0..*count, 0..1);
+            }
             // HUD overlay: coloured quads, then GUI sprites (gui atlas), item
             // icons (item atlas), and text (gui atlas) — in that order so text
             // sits on top of icons which sit on top of backgrounds.
@@ -621,6 +641,8 @@ struct App {
     entity_anim: HashMap<i32, EntityAnim>,
     /// Smoothed camera eye position (eases toward the player's stepped pos).
     render_eye: Option<Vec3>,
+    /// Destroy-stage overlay atlas (`(rgba, w, h)`), uploaded in `Graphics::new`.
+    crack: Option<(Vec<u8>, u32, u32)>,
 }
 
 /// Smoothed render state for one entity.
@@ -641,6 +663,7 @@ impl App {
         item_atlas: Arc<ItemAtlas>,
         gui_atlas: Arc<GuiAtlas>,
         mesh_rx: Receiver<((i32, i32), Vec<Vertex>)>,
+        crack: Option<(Vec<u8>, u32, u32)>,
     ) -> Self {
         Self {
             shared,
@@ -649,6 +672,7 @@ impl App {
             item_atlas,
             gui_atlas,
             mesh_rx,
+            crack,
             gfx: None,
             yaw: 0.0,
             pitch: 0.0,
@@ -729,6 +753,36 @@ impl App {
             }
         }
         (box_v, model_v, item_v)
+    }
+
+    /// Builds the destroy-stage crack overlay cube for the block currently being
+    /// mined (slightly inflated to sit just outside the block's faces), or an
+    /// empty mesh when not digging / no crack atlas is loaded.
+    fn crack_mesh(&self) -> Vec<Vertex> {
+        if self
+            .gfx
+            .as_ref()
+            .is_none_or(|g| g.crack_bind_group.is_none())
+        {
+            return Vec::new();
+        }
+        let Some(d) = *self.shared.dig.lock().unwrap() else {
+            return Vec::new();
+        };
+        let n = f32::from(d.stage.min(9));
+        let (v0, v1) = (n / 10.0, (n + 1.0) / 10.0);
+        let e = 0.003; // inflate to avoid z-fighting with the block faces
+        let min = [
+            d.block[0] as f32 - e,
+            d.block[1] as f32 - e,
+            d.block[2] as f32 - e,
+        ];
+        let max = [
+            d.block[0] as f32 + 1.0 + e,
+            d.block[1] as f32 + 1.0 + e,
+            d.block[2] as f32 + 1.0 + e,
+        ];
+        box_mesh(min, max, [0.0, v0, 1.0, v1], [1.0, 1.0, 1.0])
     }
 
     /// Hit-tests the cursor against the inventory grid and queues a click on the
@@ -919,6 +973,7 @@ impl ApplicationHandler for App {
             &self.entity_atlas,
             &self.item_atlas,
             &self.gui_atlas,
+            self.crack.as_ref(),
         ));
         self.last_frame = Instant::now();
     }
@@ -939,6 +994,14 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
                 if let Some(gfx) = self.gfx.as_mut() {
+                    gfx.resize(size.width, size.height);
+                }
+            }
+            WindowEvent::ScaleFactorChanged { .. } => {
+                // The framebuffer size changes with the DPI scale; adopt the new
+                // physical inner size so the surface aspect stays correct.
+                if let Some(gfx) = self.gfx.as_mut() {
+                    let size = gfx.window.inner_size();
                     gfx.resize(size.width, size.height);
                 }
             }
@@ -1084,6 +1147,7 @@ impl ApplicationHandler for App {
                 self.process_meshes();
 
                 let (box_v, model_v, item_v) = self.step_entities(dt);
+                let crack_v = self.crack_mesh();
                 let hotbar = hotbar_icons(&self.shared, &self.item_atlas);
                 let inv_icons = self
                     .inventory_open
@@ -1099,11 +1163,25 @@ impl ApplicationHandler for App {
                 };
                 self.render_eye = Some(eye);
                 if let Some(gfx) = self.gfx.as_mut() {
+                    // Reconcile the surface with the window's real drawable size
+                    // every frame. winit/macOS can deliver a stale initial size
+                    // (or miss a scale-factor change), leaving the surface at a
+                    // different aspect than the framebuffer -> a stretched/squished
+                    // HUD and world. Re-configuring when they differ keeps
+                    // `aspect()` matching what's actually on screen.
+                    let real = gfx.window.inner_size();
+                    if real.width != 0
+                        && real.height != 0
+                        && (real.width != gfx.config.width || real.height != gfx.config.height)
+                    {
+                        gfx.resize(real.width, real.height);
+                    }
                     let aspect = gfx.aspect();
                     let camera = first_person_camera(eye, self.yaw, self.pitch, aspect);
                     gfx.box_entity_buffer = gfx.make_vertex_buffer(&box_v);
                     gfx.model_entity_buffer = gfx.make_vertex_buffer(&model_v);
                     gfx.item_entity_buffer = gfx.make_vertex_buffer(&item_v);
+                    gfx.crack_buffer = gfx.make_vertex_buffer(&crack_v);
                     let gui = &self.gui_atlas;
                     if self.menu_open {
                         // Pause menu replaces the HUD; highlight the hovered button.
@@ -1189,6 +1267,7 @@ pub fn run(
     entity_atlas: EntityAtlas,
     item_atlas: ItemAtlas,
     gui_atlas: GuiAtlas,
+    crack: Option<(Vec<u8>, u32, u32)>,
 ) -> anyhow::Result<()> {
     let atlas = Arc::new(atlas);
     let entity_atlas = Arc::new(entity_atlas);
@@ -1203,7 +1282,15 @@ pub fn run(
     }
 
     let event_loop = EventLoop::new()?;
-    let mut app = App::new(shared, atlas, entity_atlas, item_atlas, gui_atlas, mesh_rx);
+    let mut app = App::new(
+        shared,
+        atlas,
+        entity_atlas,
+        item_atlas,
+        gui_atlas,
+        mesh_rx,
+        crack,
+    );
     event_loop.run_app(&mut app)?;
     Ok(())
 }

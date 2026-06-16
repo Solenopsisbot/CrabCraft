@@ -568,6 +568,34 @@ fn load_texture_tile<R: Read + std::io::Seek>(
     Some(out)
 }
 
+/// Loads the 10 block-breaking overlays (`block/destroy_stage_0..9`) from the
+/// jar, stacked into one 16x160 RGBA atlas (stage `n` occupies rows
+/// `n*16 .. n*16+16`, so its V range is `[n/10, (n+1)/10]`). Returns `None` if
+/// none are present.
+pub fn load_destroy_stages(jar_path: &Path) -> Option<(Vec<u8>, u32, u32)> {
+    let file = File::open(jar_path).ok()?;
+    let mut archive = zip::ZipArchive::new(BufReader::new(file)).ok()?;
+    let (w, h) = (TILE, TILE * 10);
+    let mut rgba = vec![0u8; (w * h * 4) as usize];
+    let mut any = false;
+    for stage in 0..10u32 {
+        let Some(tile) = load_texture_tile(&mut archive, &format!("block/destroy_stage_{stage}"))
+        else {
+            continue;
+        };
+        any = true;
+        let oy = stage * TILE;
+        for y in 0..TILE {
+            for x in 0..TILE {
+                let src = ((y * TILE + x) * 4) as usize;
+                let dst = (((oy + y) * w + x) * 4) as usize;
+                rgba[dst..dst + 4].copy_from_slice(&tile[src..src + 4]);
+            }
+        }
+    }
+    any.then_some((rgba, w, h))
+}
+
 fn blit_tile(atlas: &mut [u8], dim: u32, slot: u32, tile: &[u8]) {
     let grid = dim / TILE;
     let (col, row) = (slot % grid, slot / grid);

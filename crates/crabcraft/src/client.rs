@@ -56,6 +56,15 @@ struct DigProgress {
     block: [i32; 3],
     face: i8,
     ticks_left: u32,
+    ticks_total: u32,
+}
+
+/// The block currently being mined and its crack stage (0..=9), published for
+/// the renderer to draw the destroy-stage overlay.
+#[derive(Clone, Copy, Debug)]
+pub struct DigOverlay {
+    pub block: [i32; 3],
+    pub stage: u8,
 }
 
 /// A tracked non-self entity (other player, mob, item, …) for rendering.
@@ -209,6 +218,9 @@ pub struct Shared {
     pub window_state: Mutex<i32>,
     /// Inventory clicks the UI wants performed: `(slot, button)`.
     pub click_outbox: Mutex<Vec<(i16, i8)>>,
+    /// The block currently being mined + its crack stage, for the destroy-stage
+    /// overlay (`None` when not digging).
+    pub dig: Mutex<Option<DigOverlay>>,
     /// Cleared to `false` when the session ends, so readers can stop.
     pub running: AtomicBool,
 }
@@ -228,6 +240,7 @@ impl Shared {
             carried: Mutex::new(None),
             window_state: Mutex::new(0),
             click_outbox: Mutex::new(Vec::new()),
+            dig: Mutex::new(None),
             running: AtomicBool::new(true),
         }
     }
@@ -727,6 +740,7 @@ where
                                             block: target,
                                             face,
                                             ticks_left: ticks,
+                                            ticks_total: ticks,
                                         });
                                     }
                                 }
@@ -736,6 +750,21 @@ where
                             dig = cancel_dig(conn, dig, &mut block_sequence).await?;
                         }
                     }
+
+                    // Publish the destroy-stage overlay (crack 0..=9) for the
+                    // renderer; `None` whenever we're not mid-dig.
+                    *shared.dig.lock().unwrap() = dig.map(|d| {
+                        let done = d.ticks_total.saturating_sub(d.ticks_left);
+                        let stage = if d.ticks_total == 0 {
+                            0
+                        } else {
+                            u8::try_from((done * 10 / d.ticks_total).min(9)).unwrap_or(9)
+                        };
+                        DigOverlay {
+                            block: d.block,
+                            stage,
+                        }
+                    });
 
                     // Place on a fresh right-click — only if the held item is a
                     // block (empty hand / non-block items do nothing).
