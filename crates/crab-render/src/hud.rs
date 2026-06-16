@@ -412,6 +412,56 @@ pub fn hotbar_slot_rect(aspect: f32, i: usize) -> (f32, f32, f32, f32) {
     (lx, by, rx, ty)
 }
 
+/// NDC rect of menu button `i` of `n`, stacked + centred on screen (200x20 px).
+#[must_use]
+pub fn menu_button_rect(aspect: f32, i: usize, n: usize) -> (f32, f32, f32, f32) {
+    let bh = 0.09;
+    let bw = bh * (200.0 / 20.0) / aspect.max(0.01);
+    let gap = bh * 0.5;
+    let total = n as f32 * bh + (n.saturating_sub(1)) as f32 * gap;
+    let y1 = total / 2.0 - i as f32 * (bh + gap);
+    (-bw / 2.0, y1 - bh, bw / 2.0, y1)
+}
+
+/// Builds a centred button menu over a dimming overlay. `hovered` highlights one
+/// button. Returns `(colour, gui_tex, _)`; labels render into the gui stream.
+#[must_use]
+pub fn menu_geometry(
+    gui: &GuiAtlas,
+    labels: &[&str],
+    hovered: Option<usize>,
+    aspect: f32,
+) -> (Vec<ColorVertex>, Vec<TexVertex>, Vec<TexVertex>) {
+    let mut c = Vec::new();
+    let mut g = Vec::new();
+    // Dimming background over the whole screen.
+    push_color_quad(&mut c, -1.0, -1.0, 1.0, 1.0, [0.08, 0.08, 0.10]);
+    for (i, label) in labels.iter().enumerate() {
+        let r = menu_button_rect(aspect, i, labels.len());
+        let sprite = if hovered == Some(i) {
+            gui.sprite("button_hover")
+        } else {
+            gui.sprite("button")
+        };
+        match sprite {
+            Some(uv) => push_tex_quad(&mut g, r.0, r.1, r.2, r.3, uv),
+            None => push_color_quad(&mut c, r.0, r.1, r.2, r.3, [0.35, 0.35, 0.38]),
+        }
+        let th = (r.3 - r.1) * 0.42;
+        let tw = gui.text_width(label) * (th / 8.0) / aspect.max(0.01);
+        push_text(
+            &mut g,
+            gui,
+            label,
+            -tw / 2.0,
+            (r.1 + r.3) / 2.0 + th / 2.0,
+            th,
+            aspect,
+        );
+    }
+    (c, g, Vec::new())
+}
+
 /// Builds the open-inventory panel from the vanilla container background plus
 /// item icons. `items` is indexed by server window slot (0..46). Returns
 /// `(colour, gui_tex, item_tex)`.

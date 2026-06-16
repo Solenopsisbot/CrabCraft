@@ -118,6 +118,8 @@ pub fn load_gui_atlas(jar_path: &Path) -> Result<GuiAtlas, AssetError> {
         blit(&mut rgba, &src, w, h, WIDGETS_AT);
         sprites.insert("hotbar", uv(WIDGETS_AT.0, WIDGETS_AT.1, 182, 22));
         sprites.insert("selection", uv(WIDGETS_AT.0, WIDGETS_AT.1 + 22, 24, 24));
+        sprites.insert("button", uv(WIDGETS_AT.0, WIDGETS_AT.1 + 66, 200, 20));
+        sprites.insert("button_hover", uv(WIDGETS_AT.0, WIDGETS_AT.1 + 86, 200, 20));
     }
     if let Some((src, w, h)) = read_png(
         &mut archive,

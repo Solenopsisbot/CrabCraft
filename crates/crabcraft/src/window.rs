@@ -31,6 +31,8 @@ use crate::client::Shared;
 const REMESH_BUDGET: usize = 4;
 const LOOK_SPEED: f32 = 110.0; // degrees/sec (arrow-key look)
 const EYE_HEIGHT: f32 = 1.62;
+/// Pause-menu button labels (index 0 resumes; the rest match `menu_click`).
+const MENU_BUTTONS: [&str; 2] = ["Back to Game", "Quit"];
 
 /// First-person camera: eye at the player's head, looking along yaw/pitch
 /// (Minecraft convention, degrees). Position comes from the player; this just
@@ -611,8 +613,10 @@ struct App {
     /// Chat input state: open + the line being typed.
     chat_open: bool,
     chat_buffer: String,
-    /// Cursor position in NDC (for inventory slot hit-testing).
+    /// Cursor position in NDC (for inventory/menu hit-testing).
     cursor: (f32, f32),
+    /// Whether the pause menu is open (Esc).
+    menu_open: bool,
     /// Per-entity smoothed render state (interpolation + walk animation).
     entity_anim: HashMap<i32, EntityAnim>,
     /// Smoothed camera eye position (eases toward the player's stepped pos).
@@ -656,6 +660,7 @@ impl App {
             chat_open: false,
             chat_buffer: String::new(),
             cursor: (0.0, 0.0),
+            menu_open: false,
             entity_anim: HashMap::new(),
             render_eye: None,
         }
@@ -745,11 +750,10 @@ impl App {
         }
     }
 
-    /// Opens/closes the inventory, freeing or recapturing the cursor.
-    fn set_inventory_open(&mut self, open: bool) {
-        self.inventory_open = open;
+    /// Frees the cursor (for a UI) or recaptures it (for gameplay).
+    fn set_cursor_free(&self, free: bool) {
         if let Some(gfx) = self.gfx.as_ref() {
-            if open {
+            if free {
                 let _ = gfx.window.set_cursor_grab(CursorGrabMode::None);
                 gfx.window.set_cursor_visible(true);
             } else {
@@ -762,11 +766,36 @@ impl App {
         }
     }
 
+    /// Handles a click in the pause menu: returns true if it should quit.
+    fn menu_click(&mut self, event_loop: &ActiveEventLoop) {
+        let aspect = self.gfx.as_ref().map_or(1.0, Graphics::aspect);
+        let (cx, cy) = self.cursor;
+        for (i, _) in MENU_BUTTONS.iter().enumerate() {
+            let (x0, y0, x1, y1) = crab_render::menu_button_rect(aspect, i, MENU_BUTTONS.len());
+            if cx >= x0 && cx <= x1 && cy >= y0 && cy <= y1 {
+                match i {
+                    0 => {
+                        self.menu_open = false;
+                        self.set_cursor_free(false);
+                    }
+                    _ => event_loop.exit(),
+                }
+                return;
+            }
+        }
+    }
+
+    /// Opens/closes the inventory, freeing or recapturing the cursor.
+    fn set_inventory_open(&mut self, open: bool) {
+        self.inventory_open = open;
+        self.set_cursor_free(open);
+    }
+
     /// Updates look from arrow keys and publishes movement intent to the shared
     /// `Controls` for the network thread to apply via physics.
     fn update_input(&mut self, dt: f32) {
-        // While the inventory or chat is open, freeze movement/look input.
-        if self.inventory_open || self.chat_open {
+        // While a UI is open, freeze movement/look input.
+        if self.inventory_open || self.chat_open || self.menu_open {
             let mut controls = self.shared.controls.lock().unwrap();
             controls.forward = 0.0;
             controls.strafe = 0.0;
@@ -895,7 +924,7 @@ impl ApplicationHandler for App {
     }
 
     fn device_event(&mut self, _event_loop: &ActiveEventLoop, _id: DeviceId, event: DeviceEvent) {
-        if self.inventory_open || self.chat_open {
+        if self.inventory_open || self.chat_open || self.menu_open {
             return; // don't turn the view while a UI is focused
         }
         if let DeviceEvent::MouseMotion { delta } = event {
@@ -956,13 +985,16 @@ impl ApplicationHandler for App {
                     }
                     return;
                 }
-                if code == KeyCode::Escape {
-                    // Esc closes the inventory first, otherwise quits.
+                if code == KeyCode::Escape && pressed && !repeat {
+                    // Esc closes the inventory, else toggles the pause menu.
                     if self.inventory_open {
                         self.set_inventory_open(false);
                     } else {
-                        event_loop.exit();
+                        self.menu_open = !self.menu_open;
+                        self.set_cursor_free(self.menu_open);
                     }
+                } else if code == KeyCode::Escape {
+                    // ignore Esc release / auto-repeat
                 } else if pressed {
                     if !self.inventory_open && !repeat && code == KeyCode::KeyT {
                         self.chat_open = true;
@@ -997,6 +1029,13 @@ impl ApplicationHandler for App {
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 let pressed = state == ElementState::Pressed;
+                // While the pause menu is open, clicks hit buttons.
+                if self.menu_open {
+                    if pressed && button == MouseButton::Left {
+                        self.menu_click(event_loop);
+                    }
+                    return;
+                }
                 // While the inventory is open, clicks move items, not the world.
                 if self.inventory_open {
                     if pressed {
@@ -1066,42 +1105,62 @@ impl ApplicationHandler for App {
                     gfx.model_entity_buffer = gfx.make_vertex_buffer(&model_v);
                     gfx.item_entity_buffer = gfx.make_vertex_buffer(&item_v);
                     let gui = &self.gui_atlas;
-                    let (mut hud_c, mut hud_g, mut hud_i) = hud_geometry(
-                        gui,
-                        player.health,
-                        player.food,
-                        player.xp_bar,
-                        player.xp_level,
-                        selected,
-                        &hotbar,
-                        aspect,
-                    );
-                    let mut hud_text = count_text(&self.shared, gui, aspect, self.inventory_open);
-                    let (chat_c, chat_t) =
-                        chat_geometry(&self.shared, gui, self.chat_open, &self.chat_buffer, aspect);
-                    hud_c.extend(chat_c);
-                    hud_text.extend(chat_t);
-                    if let Some(inv) = &inv_icons {
-                        let (ic, ig, ii) = inventory_geometry(gui, inv, aspect);
-                        hud_c.extend(ic);
-                        hud_g.extend(ig);
-                        hud_i.extend(ii);
-                        // Item held on the cursor, drawn at the mouse position.
-                        if let Some(it) = *self.shared.carried.lock().unwrap() {
-                            if let Some(uv) = u32::try_from(it.item_id)
-                                .ok()
-                                .and_then(crab_registry::item_name)
-                                .and_then(|n| self.item_atlas.icon(n))
-                            {
-                                let (cx, cy) = self.cursor;
-                                let s = 0.055;
-                                let hw = s / aspect;
-                                push_tex2d(&mut hud_i, cx - hw, cy - s, cx + hw, cy + s, uv);
+                    if self.menu_open {
+                        // Pause menu replaces the HUD; highlight the hovered button.
+                        let (cx, cy) = self.cursor;
+                        let hovered = (0..MENU_BUTTONS.len()).find(|&i| {
+                            let (x0, y0, x1, y1) =
+                                crab_render::menu_button_rect(aspect, i, MENU_BUTTONS.len());
+                            cx >= x0 && cx <= x1 && cy >= y0 && cy <= y1
+                        });
+                        let (mc, mg, _) =
+                            crab_render::menu_geometry(gui, &MENU_BUTTONS, hovered, aspect);
+                        gfx.set_hud(&mc, &mg, &[], &[]);
+                        gfx.render(&camera);
+                    } else {
+                        let (mut hud_c, mut hud_g, mut hud_i) = hud_geometry(
+                            gui,
+                            player.health,
+                            player.food,
+                            player.xp_bar,
+                            player.xp_level,
+                            selected,
+                            &hotbar,
+                            aspect,
+                        );
+                        let mut hud_text =
+                            count_text(&self.shared, gui, aspect, self.inventory_open);
+                        let (chat_c, chat_t) = chat_geometry(
+                            &self.shared,
+                            gui,
+                            self.chat_open,
+                            &self.chat_buffer,
+                            aspect,
+                        );
+                        hud_c.extend(chat_c);
+                        hud_text.extend(chat_t);
+                        if let Some(inv) = &inv_icons {
+                            let (ic, ig, ii) = inventory_geometry(gui, inv, aspect);
+                            hud_c.extend(ic);
+                            hud_g.extend(ig);
+                            hud_i.extend(ii);
+                            // Item held on the cursor, drawn at the mouse position.
+                            if let Some(it) = *self.shared.carried.lock().unwrap() {
+                                if let Some(uv) = u32::try_from(it.item_id)
+                                    .ok()
+                                    .and_then(crab_registry::item_name)
+                                    .and_then(|n| self.item_atlas.icon(n))
+                                {
+                                    let (cx, cy) = self.cursor;
+                                    let s = 0.055;
+                                    let hw = s / aspect;
+                                    push_tex2d(&mut hud_i, cx - hw, cy - s, cx + hw, cy + s, uv);
+                                }
                             }
                         }
+                        gfx.set_hud(&hud_c, &hud_g, &hud_i, &hud_text);
+                        gfx.render(&camera);
                     }
-                    gfx.set_hud(&hud_c, &hud_g, &hud_i, &hud_text);
-                    gfx.render(&camera);
                 }
 
                 if !self
