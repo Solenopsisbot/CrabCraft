@@ -28,13 +28,16 @@ Verified end-to-end against a vanilla 1.20.1 server (offline mode unless noted):
   grass/foliage tint); offscreen mode + a live windowed viewer
 - **Player control**: first-person WASD/jump/look in the window, driven through
   the physics sim and sent to the server
-- **Block editing**: raycast-targeted **breaking** and **placing**, reconciled
-  with the server
-- **Entities**: tracks other players/mobs (spawn, relative move, teleport,
-  metadata, destroy) and renders them as **3D models** (Bedrock geometry incl.
-  bone rest rotations + jar textures, falling back to boxes), **smoothly
-  interpolated** with a **procedural walk animation**; slimes/magma cubes scale
-  to their size and **dropped items show their item icon**
+ - **Block editing**: raycast-targeted **breaking** and **placing**, reconciled
+   with the server, with the **destroy-stage crack overlay** animating on the
+   block you're mining
+ - **Entities**: tracks other players/mobs (spawn, relative move + rotation,
+   teleport, metadata, destroy) and renders them as **3D models** (Bedrock
+   geometry incl. bone rest rotations + jar textures, falling back to boxes),
+   **smoothly interpolated** with a **procedural walk animation** and **facing
+   their yaw**; shared-model/variant mobs are aliased to the right geo+skin so
+   far fewer render as boxes; slimes/magma cubes scale to their size and
+   **dropped items show their item icon**
 - **Combat**: **left-click attacks** the mob you're aiming at (within reach) via
   a swing + InteractEntity; verified to damage and kill a mob on a live server
 - **Survival vitals**: tracks **health/food**, and on death sends a respawn
@@ -49,8 +52,10 @@ Verified end-to-end against a vanilla 1.20.1 server (offline mode unless noted):
   (Back to Game / Quit), hover highlight + click
 - **Chat & commands**: **T** to chat, **/** for a command; messages send (chat +
   Chat Command packets) and incoming system chat shows in an on-screen log
-- **Sounds**: break / place / hit / footstep / mining / hurt / attack sounds
-  loaded from your launcher's asset store via `rodio` (set `CRABCRAFT_ASSETS`)
+ - **Sounds**: per-block **break / place / mining-hit / footstep** plus hurt /
+   attack sounds, resolved through the real `sounds.json` events
+   (`block.<group>.<event>`) so each block uses its correct sound group — loaded
+   from your launcher's asset store via `rodio` (set `CRABCRAFT_ASSETS`)
 - **Online mode**: AES-128-CFB8 encryption + the Minecraft server hash + RSA
   handshake, with Microsoft device-code login (see caveats below)
 
@@ -174,13 +179,14 @@ the official server jar:
 - [x] Real GUI textures + bitmap font; stack-size numbers
 - [x] Inventory open + click-to-move/swap items; hotbar slot switching
 - [x] Chat + commands (send/receive, on-screen log)
-- [x] Sounds: break / place / hit / footstep / mining / hurt / attack
-- [x] Crafting (2×2) + armour via the full inventory window; left/right clicks
-- [x] Real HUD (hearts / hunger / XP+level); pause menu with vanilla buttons
-- [x] Player model (humanoid + default skin) for other players
-- [ ] Blockstate variants & multipart (fence/wall connections, rotated stairs), biome tint
-- [ ] Shift-click move; container (chest/furnace) GUIs; in-inventory 3D player
-- [ ] Entity yaw/head facing + per-mob hitbox models; ambient sounds
+ - [x] Sounds: per-block break / place / mining-hit / footstep / hurt / attack via `sounds.json`
+ - [x] Crafting (2×2) + armour via the full inventory window; left/right clicks
+ - [x] Real HUD (hearts / hunger / XP+level); pause menu with vanilla buttons
+ - [x] Player model (humanoid + default skin) for other players
+ - [x] Entity yaw facing; block-breaking crack overlay; aliased mob models
+ - [ ] Blockstate variants & multipart (fence/wall connections, rotated stairs), biome tint
+ - [ ] Shift-click move; container (chest/furnace) GUIs; in-inventory 3D player
+ - [ ] Per-mob head yaw + hitbox models; ambient sounds
 - [ ] Precise per-block collision shapes (slabs/stairs/fluids)
 - [ ] More protocol versions (1.20.2+, 1.21, …) as sibling modules
 - [ ] (Far future, maybe) Forge mod support — see the note below
