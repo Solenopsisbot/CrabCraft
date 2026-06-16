@@ -345,7 +345,14 @@ pub fn entity_mesh(
     let mut verts = Vec::new();
     for bone in &geo.bones {
         let swing = limb_swing_deg(&bone.name, limb_swing, limb_amount);
-        let euler = [bone.rotation[0] + swing, bone.rotation[1], bone.rotation[2]];
+        // Minecraft's bone rotation is the opposite sense to our math rotation,
+        // so negate the rest rotation (e.g. the cow body's 90° tilt connects to
+        // the head/legs). The swing keeps our sign (it's symmetric anyway).
+        let euler = [
+            -bone.rotation[0] + swing,
+            -bone.rotation[1],
+            -bone.rotation[2],
+        ];
         // Bedrock model space -> world: rotate about the bone pivot, then /16,
         // X negated (Bedrock/Java mirror), + feet offset.
         let place = |px: f32, py: f32, pz: f32| {
