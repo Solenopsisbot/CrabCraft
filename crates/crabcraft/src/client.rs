@@ -17,7 +17,7 @@ use crab_protocol::versions::v1_20_1::login::{
 use crab_protocol::versions::v1_20_1::play::{
     ChatCommand, ClickContainer, ClientChatMessage, ClientCommand, ClientInformation,
     ConfirmTeleport, InteractEntity, Interaction, KeepAlive, KeepAliveResponse, PlayDisconnect,
-    PlayerDigging, SetContainerContent, SetContainerSlot, SetCreativeSlot, SetHealth, SetHeldItem,
+    PlayerDigging, SetContainerContent, SetContainerSlot, SetHealth, SetHeldItem,
     SetPlayerPosition, SetPlayerPositionRotation, SlotItem, SwingArm, SynchronizePlayerPosition,
     SystemChat, UseItemOn,
 };
@@ -422,16 +422,6 @@ where
                         if just_spawned {
                             tracing::info!("spawned at ({:.1}, {:.1}, {:.1})", pos.x, pos.y, pos.z);
                             conn.send(&ClientInformation::sensible_defaults()).await?;
-                            // Hold a stack of stone in hotbar slot 0 (creative) so
-                            // right-click placing has something to place.
-                            conn.send(&SetCreativeSlot {
-                                slot: 36,
-                                item: Some(SlotItem {
-                                    item_id: 1,
-                                    count: 64,
-                                }),
-                            })
-                            .await?;
                         }
                         if !greeted {
                             greeted = true;
@@ -535,7 +525,7 @@ where
                             };
                             // Took damage (and not the initial 20->20 sync): hurt sound.
                             if pkt.health < prev && pkt.health > 0.0 {
-                                queue_sound(shared, crab_audio::hurt_sound().to_string());
+                                queue_sound(shared, crab_audio::hurt_event().to_string());
                             }
                             if pkt.health <= 0.0 && !dead {
                                 dead = true;
@@ -677,7 +667,7 @@ where
                                 })
                                 .await?;
                                 attacked_entity = true;
-                                queue_sound(shared, "entity/player/attack/weak1".to_string());
+                                queue_sound(shared, crab_audio::attack_event().to_string());
                                 dig = cancel_dig(conn, dig, &mut block_sequence).await?;
                             }
                         }
@@ -702,11 +692,12 @@ where
                                         block_sequence += 1;
                                         conn.send(&dig_packet(2, b, face, block_sequence)).await?;
                                         dig = None;
-                                        play_break_sound(shared, b);
+                                        play_block_sound(shared, b, crab_audio::break_event);
                                         break_block_local(shared, b);
                                     } else if left % 4 == 0 {
-                                        // Repeated mining "hit" sound while digging.
-                                        play_break_sound(shared, b);
+                                        // Quieter mining "hit" sound while digging
+                                        // (vanilla `block.*.hit`, not the break sound).
+                                        play_block_sound(shared, b, crab_audio::hit_event);
                                     }
                                 }
                             } else {
@@ -729,7 +720,7 @@ where
                                             conn.send(&dig_packet(2, target, face, block_sequence))
                                                 .await?;
                                         }
-                                        play_break_sound(shared, target);
+                                        play_block_sound(shared, target, crab_audio::break_event);
                                         break_block_local(shared, target);
                                     } else {
                                         dig = Some(DigProgress {
@@ -776,7 +767,7 @@ where
                             shared.world.lock().unwrap().set_block_state(p[0], p[1], p[2], state);
                             mark_dirty(shared, p[0] >> 4, p[2] >> 4);
                             if let Some(name) = crab_registry::block_name(state) {
-                                queue_sound(shared, crab_audio::break_sound(name));
+                                queue_sound(shared, crab_audio::place_event(name));
                             }
                         }
                     }
@@ -835,7 +826,7 @@ where
                                     z.floor() as i32,
                                 ];
                                 if let Some(name) = block_name_at(shared, foot) {
-                                    queue_sound(shared, crab_audio::step_sound(name));
+                                    queue_sound(shared, crab_audio::step_event(name));
                                 }
                             }
                         }
@@ -1246,10 +1237,11 @@ fn apply_inventory_click(
     }
 }
 
-/// Queues the block-break sound for `block` (call before it is removed).
-fn play_break_sound(shared: &Arc<Shared>, block: [i32; 3]) {
+/// Queues a block sound for `block` using `event` (e.g. [`crab_audio::break_event`]
+/// or [`crab_audio::hit_event`]). Call before the block is removed.
+fn play_block_sound(shared: &Arc<Shared>, block: [i32; 3], event: fn(&str) -> String) {
     if let Some(name) = block_name_at(shared, block) {
-        queue_sound(shared, crab_audio::break_sound(name));
+        queue_sound(shared, event(name));
     }
 }
 

@@ -238,17 +238,23 @@ fn init_sound(shared: &Arc<Shared>) {
                 return;
             }
         };
+    let sounds = crab_audio::Sounds::load(&assets, &index).unwrap_or_default();
     let (tx, rx) = std::sync::mpsc::channel::<String>();
     *shared.sfx.lock().unwrap() = Some(tx);
     std::thread::spawn(move || {
         let player = crab_audio::SoundPlayer::new();
         tracing::info!(
             objects = index.len(),
+            events = sounds.len(),
             audio = player.available(),
             "sound enabled"
         );
+        // Messages are sound *events* (e.g. `block.stone.break`), resolved to a
+        // concrete file via `sounds.json`; a name with no matching event is
+        // treated as a direct file path (e.g. `random/pop`).
         while let Ok(name) = rx.recv() {
-            if let Some(bytes) = crab_audio::read_sound(&assets, &index, &name) {
+            let file = sounds.pick(&name).unwrap_or(&name);
+            if let Some(bytes) = crab_audio::read_sound(&assets, &index, file) {
                 player.play_ogg(bytes);
             }
         }

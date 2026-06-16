@@ -5,7 +5,10 @@
 
 use std::path::Path;
 
-use crab_audio::{break_sound, ogg_sample_count, read_sound, AssetIndex, SoundPlayer};
+use crab_audio::{
+    break_event, hit_event, ogg_sample_count, place_event, read_sound, sound_group, AssetIndex,
+    SoundPlayer, Sounds,
+};
 
 fn main() {
     let assets = std::env::args()
@@ -16,6 +19,9 @@ fn main() {
     let index =
         AssetIndex::load(&assets.join("indexes").join(format!("{id}.json"))).expect("index");
     println!("asset index {id}.json: {} objects", index.len());
+
+    let sounds = Sounds::load(assets, &index).unwrap_or_default();
+    println!("sounds.json events: {}", sounds.len());
 
     let player = SoundPlayer::new();
     println!("audio output device available: {}", player.available());
@@ -41,11 +47,22 @@ fn main() {
         }
     }
 
+    // Block -> sound group -> event -> resolved file (what vanilla would play).
     for b in [
         "minecraft:grass_block",
         "minecraft:oak_log",
         "minecraft:stone",
+        "minecraft:glass",
+        "minecraft:white_wool",
+        "minecraft:deepslate",
     ] {
-        println!("  break_sound({b}) = {}", break_sound(b));
+        let (brk, hit, place) = (break_event(b), hit_event(b), place_event(b));
+        println!(
+            "  {b}: group={} break={brk}->{:?} hit={hit}->{:?} place={place}->{:?}",
+            sound_group(b),
+            sounds.pick(&brk),
+            sounds.pick(&hit),
+            sounds.pick(&place),
+        );
     }
 }

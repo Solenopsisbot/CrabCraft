@@ -12,6 +12,7 @@
 use std::collections::HashMap;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Errors loading the asset index.
 #[derive(Debug, thiserror::Error)]
@@ -80,6 +81,80 @@ pub fn read_sound(assets_dir: &Path, index: &AssetIndex, name: &str) -> Option<V
     std::fs::read(object_path(assets_dir, hash)).ok()
 }
 
+/// Parsed `sounds.json`: maps a sound **event** (e.g. `block.stone.break`) to
+/// the list of sound-file logical names it can play (e.g. `dig/stone1`). This is
+/// the same indirection vanilla uses, so events resolve to exactly the files the
+/// game would pick (incl. the quieter `*.hit` mining sound = `step/*`).
+#[derive(Default)]
+pub struct Sounds {
+    events: HashMap<String, Vec<String>>,
+}
+
+impl Sounds {
+    /// Loads `minecraft/sounds.json` from the asset store via the index.
+    #[must_use]
+    pub fn load(assets_dir: &Path, index: &AssetIndex) -> Option<Self> {
+        let hash = index.hash("minecraft/sounds.json")?;
+        let bytes = std::fs::read(object_path(assets_dir, hash)).ok()?;
+        let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+        let obj = v.as_object()?;
+        let mut events = HashMap::new();
+        for (event, def) in obj {
+            let Some(list) = def.get("sounds").and_then(serde_json::Value::as_array) else {
+                continue;
+            };
+            let mut files = Vec::new();
+            for s in list {
+                match s {
+                    serde_json::Value::String(name) => files.push(name.clone()),
+                    serde_json::Value::Object(o) => {
+                        // Skip references to *other events* (`type: "event"`); we
+                        // only want concrete sound files here.
+                        if o.get("type").and_then(serde_json::Value::as_str) == Some("event") {
+                            continue;
+                        }
+                        if let Some(name) = o.get("name").and_then(serde_json::Value::as_str) {
+                            files.push(name.to_string());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if !files.is_empty() {
+                events.insert(event.clone(), files);
+            }
+        }
+        Some(Self { events })
+    }
+
+    /// Number of known events.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.events.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.events.is_empty()
+    }
+
+    /// Picks one sound file for an event, cycling through variants like vanilla's
+    /// random choice. Returns `None` for unknown events.
+    #[must_use]
+    pub fn pick(&self, event: &str) -> Option<&str> {
+        let files = self.events.get(event)?;
+        match files.len() {
+            0 => None,
+            1 => Some(files[0].as_str()),
+            n => {
+                static NEXT: AtomicUsize = AtomicUsize::new(0);
+                let i = NEXT.fetch_add(1, Ordering::Relaxed) % n;
+                Some(files[i].as_str())
+            }
+        }
+    }
+}
+
 /// Decodes an OGG to its total sample count (verification; needs no device).
 #[must_use]
 pub fn ogg_sample_count(ogg: &[u8]) -> Option<usize> {
@@ -87,61 +162,288 @@ pub fn ogg_sample_count(ogg: &[u8]) -> Option<usize> {
     Some(decoder.count())
 }
 
-/// The sound-material group for a block (`"grass"`, `"wood"`, `"sand"`,
-/// `"gravel"`, or `"stone"`). A heuristic over names (vanilla uses a sound-type
-/// table we don't carry yet).
+/// The vanilla `SoundType` group for a block, named to match the `sounds.json`
+/// event groups (`block.<group>.{break,step,place,hit}`). A keyword heuristic
+/// over block names covering the common groups; falls back to `"stone"`.
+///
+/// This is the data Minecraft hardcodes in `SoundType` (not present in the
+/// generated data reports), so we approximate it by name. Pairing it with the
+/// real `sounds.json` ([`Sounds`]) yields the exact files the game would play.
 #[must_use]
-pub fn material(block_name: &str) -> &'static str {
+pub fn sound_group(block_name: &str) -> &'static str {
     let n = block_name.strip_prefix("minecraft:").unwrap_or(block_name);
     let has = |kws: &[&str]| kws.iter().any(|k| n.contains(k));
-    if has(&[
-        "log",
-        "planks",
-        "wood",
-        "fence",
-        "sapling",
-        "door",
-        "_sign",
-        "crafting_table",
-        "bookshelf",
-        "chest",
-        "barrel",
-        "ladder",
-        "bamboo",
-    ]) {
-        "wood"
-    } else if has(&[
-        "grass", "leaves", "wool", "moss", "hay", "vine", "fern", "flower", "crop", "wheat",
-        "carpet",
-    ]) {
-        "grass"
-    } else if n.contains("sand") && !n.contains("sandstone") {
-        "sand"
-    } else if has(&[
-        "gravel", "dirt", "clay", "soul", "mud", "podzol", "mycelium", "farmland", "path", "snow",
-    ]) {
-        "gravel"
-    } else {
-        "stone"
+    let wood_shape = |x: &str| {
+        x.contains("planks")
+            || x.contains("log")
+            || x.contains("wood")
+            || x.contains("stem")
+            || x.contains("hyphae")
+            || x.contains("fence")
+            || x.contains("door")
+            || x.contains("sign")
+            || x.contains("stairs")
+            || x.contains("slab")
+            || x.contains("button")
+            || x.contains("pressure_plate")
+            || x.contains("trapdoor")
+    };
+
+    // Glass / wool first (distinctive break sounds).
+    if n.contains("glass") || n.contains("beacon") {
+        return "glass";
     }
+    if n.contains("wool") || n.contains("carpet") {
+        return "wool";
+    }
+
+    // Stone-family specials (before the generic "stone" fallback).
+    if n.contains("amethyst") {
+        return "amethyst_block";
+    }
+    if n.contains("deepslate") {
+        if n.contains("tiles") {
+            return "deepslate_tiles";
+        }
+        if n.contains("brick") {
+            return "deepslate_bricks";
+        }
+        if n.contains("polished") || n.contains("chiseled") {
+            return "polished_deepslate";
+        }
+        return "deepslate";
+    }
+    if n.contains("copper") {
+        return "copper";
+    }
+    if n.contains("calcite") {
+        return "calcite";
+    }
+    if n.contains("tuff") {
+        return "tuff";
+    }
+    if n.contains("basalt") {
+        return "basalt";
+    }
+    if n.contains("netherite_block") {
+        return "netherite_block";
+    }
+    if n.contains("ancient_debris") {
+        return "ancient_debris";
+    }
+    if n.contains("lodestone") {
+        return "lodestone";
+    }
+    if n.contains("nether_brick") {
+        return "nether_bricks";
+    }
+    if n.contains("netherrack") || n.contains("nether_gold_ore") || n.contains("nether_quartz") {
+        return "netherrack";
+    }
+    if n.contains("nylium") {
+        return "nylium";
+    }
+    if n.contains("soul_sand") {
+        return "soul_sand";
+    }
+    if n.contains("soul_soil") {
+        return "soul_soil";
+    }
+    if n.contains("bone_block") {
+        return "bone_block";
+    }
+    if n.contains("honey_block") {
+        return "honey_block";
+    }
+    if n.contains("slime_block") {
+        return "slime_block";
+    }
+    if n.contains("nether_wart_block") || n == "shroomlight" {
+        return "wart_block";
+    }
+    if n.contains("froglight") {
+        return "froglight";
+    }
+    if n.contains("sculk") {
+        return "sculk";
+    }
+
+    // Metal blocks/items.
+    if has(&[
+        "iron_block",
+        "gold_block",
+        "diamond_block",
+        "emerald_block",
+        "raw_iron",
+        "raw_gold",
+        "raw_copper",
+        "iron_door",
+        "iron_trapdoor",
+        "iron_bars",
+        "anvil",
+        "hopper",
+        "cauldron",
+        "bell",
+        "chain",
+        "heavy_weighted",
+        "light_weighted",
+    ]) {
+        return "metal";
+    }
+    if n.contains("lantern") {
+        return "lantern";
+    }
+    if n == "ladder" {
+        return "ladder";
+    }
+    if n.contains("scaffolding") {
+        return "scaffolding";
+    }
+
+    // Plants / organics.
+    if n.contains("bamboo") {
+        return if wood_shape(n) || n.contains("mosaic") {
+            "bamboo_wood"
+        } else {
+            "bamboo"
+        };
+    }
+    if n.contains("moss") {
+        return "moss";
+    }
+    if n.contains("mud_brick") {
+        return "mud_bricks";
+    }
+    if n.contains("packed_mud") {
+        return "packed_mud";
+    }
+    if n == "mud" || n.contains("muddy_mangrove") {
+        return "mud";
+    }
+    if has(&["roots", "weeping_vines", "twisting_vines", "nether_sprouts"]) {
+        return "roots";
+    }
+    if n.contains("fungus") {
+        return "fungus";
+    }
+    if n.contains("sweet_berry") {
+        return "sweet_berry_bush";
+    }
+    if n.contains("nether_wart") {
+        return "nether_wart";
+    }
+    if has(&["wheat", "carrots", "potatoes", "beetroots"]) {
+        return "crop";
+    }
+    if n.ends_with("_stem") {
+        return "stem";
+    }
+    if n.contains("lily_pad") || n.contains("kelp") || n.contains("seagrass") {
+        return "wet_grass";
+    }
+
+    // Wood (catch crimson/warped/cherry first so they get their own events).
+    if (n.contains("crimson") || n.contains("warped")) && wood_shape(n) {
+        return "nether_wood";
+    }
+    if n.contains("cherry") && wood_shape(n) {
+        return "cherry_wood";
+    }
+    if wood_shape(n)
+        || has(&[
+            "crafting_table",
+            "bookshelf",
+            "chest",
+            "barrel",
+            "jukebox",
+            "note_block",
+            "loom",
+            "beehive",
+            "bee_nest",
+            "composter",
+            "cartography",
+            "fletching",
+            "smithing_table",
+            "lectern",
+            "sapling",
+            "bamboo",
+        ])
+    {
+        return "wood";
+    }
+
+    // Loose granular / soft ground.
+    if n.contains("sand") && !n.contains("sandstone") {
+        return "sand";
+    }
+    if has(&[
+        "gravel", "dirt", "clay", "podzol", "mycelium", "farmland", "rooted",
+    ]) {
+        return "gravel";
+    }
+    if n.contains("powder_snow") {
+        return "powder_snow";
+    }
+    if n.contains("snow") {
+        return "snow";
+    }
+
+    // Foliage / grass.
+    if has(&[
+        "grass",
+        "leaves",
+        "fern",
+        "flower",
+        "vine",
+        "mushroom",
+        "azalea",
+        "sugar_cane",
+        "hanging_roots",
+        "spore_blossom",
+        "pink_petals",
+        "hay_block",
+    ]) {
+        return "grass";
+    }
+
+    "stone"
 }
 
-/// The block-break / place (`dig`) sound name, e.g. `"dig/grass1"`.
+/// The block-break sound **event** (e.g. `block.grass.break`).
 #[must_use]
-pub fn break_sound(block_name: &str) -> String {
-    format!("dig/{}1", material(block_name))
+pub fn break_event(block_name: &str) -> String {
+    format!("block.{}.break", sound_group(block_name))
 }
 
-/// The footstep (`step`) sound name for the block walked on, e.g. `"step/grass1"`.
+/// The block-place sound **event** (e.g. `block.grass.place`).
 #[must_use]
-pub fn step_sound(block_name: &str) -> String {
-    format!("step/{}1", material(block_name))
+pub fn place_event(block_name: &str) -> String {
+    format!("block.{}.place", sound_group(block_name))
 }
 
-/// The player-hurt sound name.
+/// The block-mining "hit" sound **event** played repeatedly while digging
+/// (quieter than the break sound — vanilla resolves it to the `step/*` files).
 #[must_use]
-pub fn hurt_sound() -> &'static str {
-    "damage/hit1"
+pub fn hit_event(block_name: &str) -> String {
+    format!("block.{}.hit", sound_group(block_name))
+}
+
+/// The footstep sound **event** for the block walked on (e.g. `block.grass.step`).
+#[must_use]
+pub fn step_event(block_name: &str) -> String {
+    format!("block.{}.step", sound_group(block_name))
+}
+
+/// The player-hurt sound event.
+#[must_use]
+pub fn hurt_event() -> &'static str {
+    "entity.player.hurt"
+}
+
+/// The player melee-attack sound event.
+#[must_use]
+pub fn attack_event() -> &'static str {
+    "entity.player.attack.weak"
 }
 
 /// Fire-and-forget OGG playback. A no-op (but still decode-checkable) when no
@@ -205,15 +507,71 @@ mod tests {
     use super::*;
 
     #[test]
-    fn break_sound_picks_material() {
-        assert_eq!(break_sound("minecraft:grass_block"), "dig/grass1");
-        assert_eq!(break_sound("minecraft:oak_log"), "dig/wood1");
-        assert_eq!(break_sound("minecraft:oak_planks"), "dig/wood1");
-        assert_eq!(break_sound("minecraft:sand"), "dig/sand1");
-        assert_eq!(break_sound("minecraft:sandstone"), "dig/stone1");
-        assert_eq!(break_sound("minecraft:gravel"), "dig/gravel1");
-        assert_eq!(break_sound("minecraft:dirt"), "dig/gravel1");
-        assert_eq!(break_sound("minecraft:stone"), "dig/stone1");
-        assert_eq!(break_sound("minecraft:cobblestone"), "dig/stone1");
+    fn sound_group_picks_material() {
+        assert_eq!(sound_group("minecraft:grass_block"), "grass");
+        assert_eq!(sound_group("minecraft:oak_log"), "wood");
+        assert_eq!(sound_group("minecraft:oak_planks"), "wood");
+        assert_eq!(sound_group("minecraft:crimson_planks"), "nether_wood");
+        assert_eq!(sound_group("minecraft:cherry_fence"), "cherry_wood");
+        assert_eq!(sound_group("minecraft:sand"), "sand");
+        assert_eq!(sound_group("minecraft:red_sand"), "sand");
+        assert_eq!(sound_group("minecraft:sandstone"), "stone");
+        assert_eq!(sound_group("minecraft:gravel"), "gravel");
+        assert_eq!(sound_group("minecraft:dirt"), "gravel");
+        assert_eq!(sound_group("minecraft:stone"), "stone");
+        assert_eq!(sound_group("minecraft:cobblestone"), "stone");
+        assert_eq!(sound_group("minecraft:glass"), "glass");
+        assert_eq!(sound_group("minecraft:white_wool"), "wool");
+        assert_eq!(sound_group("minecraft:iron_block"), "metal");
+        assert_eq!(sound_group("minecraft:deepslate"), "deepslate");
+        assert_eq!(
+            sound_group("minecraft:deepslate_bricks"),
+            "deepslate_bricks"
+        );
+        assert_eq!(sound_group("minecraft:oak_leaves"), "grass");
+    }
+
+    #[test]
+    fn events_are_namespaced() {
+        assert_eq!(break_event("minecraft:stone"), "block.stone.break");
+        assert_eq!(hit_event("minecraft:oak_log"), "block.wood.hit");
+        assert_eq!(place_event("minecraft:sand"), "block.sand.place");
+        assert_eq!(step_event("minecraft:grass_block"), "block.grass.step");
+    }
+
+    #[test]
+    fn sounds_json_resolves_events() {
+        // A tiny inline sounds.json: string + object + event-ref forms.
+        let json = r#"{
+            "block.stone.break": { "sounds": ["dig/stone1", "dig/stone2"] },
+            "block.stone.hit": { "sounds": [ {"name": "step/stone1"}, {"name": "x", "type": "event"} ] }
+        }"#;
+        let v: serde_json::Value = serde_json::from_str(json).unwrap();
+        let mut events = HashMap::new();
+        for (event, def) in v.as_object().unwrap() {
+            let mut files = Vec::new();
+            for s in def["sounds"].as_array().unwrap() {
+                match s {
+                    serde_json::Value::String(name) => files.push(name.clone()),
+                    serde_json::Value::Object(o) => {
+                        if o.get("type").and_then(serde_json::Value::as_str) == Some("event") {
+                            continue;
+                        }
+                        if let Some(name) = o.get("name").and_then(serde_json::Value::as_str) {
+                            files.push(name.to_string());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            events.insert(event.clone(), files);
+        }
+        let sounds = Sounds { events };
+        assert!(sounds
+            .pick("block.stone.break")
+            .is_some_and(|f| f.starts_with("dig/stone")));
+        // The `type: "event"` ref was skipped, leaving exactly one file.
+        assert_eq!(sounds.pick("block.stone.hit"), Some("step/stone1"));
+        assert_eq!(sounds.pick("block.unknown.break"), None);
     }
 }
