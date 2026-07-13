@@ -12,7 +12,8 @@ Crabcraft defaults to protocol 763. Choose another profile with
 | 1.21 / 1.21.1 | 767 | Core path live-tested on 1.21.1 | Tricky Trials registries, VarInt item counts, jukebox component, configuration report/link packets |
 | 1.21.2 / 1.21.3 | 768 | Core path live-tested on 1.21.3 | Bundle-era packet maps, movement flags/velocity corrections, particle preference, split inventory updates, expanded components |
 | 1.21.4 | 769 | Core and component paths live-tested on 1.21.4 | Pale Garden registries, Player Loaded, split pick-item map, direct component slots, revised held-item/particle/player-list/vehicle payloads |
-| 1.21.5+ | 770+ | Not implemented | New registries and incremental packet schemas |
+| 1.21.5 | 770 | Core and component paths live-tested on 1.21.5 | Spring to Life registries, shifted play maps, array heightmaps, chat checksum, reorganized components |
+| Newer than 1.21.5 | 771+ | Not implemented | Requires authoritative registries and packet schemas |
 
 ## Versioning approach
 
@@ -22,7 +23,7 @@ version-specific decoder whenever its payload changed; accepting a shifted ID is
 not considered sufficient support.
 
 Blocks, block states, items, and entities are also numeric wire registries. The
-client selects committed generated 1.20.1, 1.20.2, 1.20.3, 1.20.5, 1.21, 1.21.3, or 1.21.4
+client selects committed generated 1.20.1, 1.20.2, 1.20.3, 1.20.5, 1.21, 1.21.3, 1.21.4, or 1.21.5
 tables before it loads assets or decodes a world. This matters even within
 1.20.x: 1.20.2 changed
 some block-state ranges, while 1.20.3 inserted the crafter, new copper/tuff
@@ -116,6 +117,25 @@ Gold stacks. All three direct inventory updates decoded and the session reached
 its deadline with 57 entities.
 Unresolvable tag-only displays remain safe empty alternatives rather than
 guessing registry membership.
+
+Protocol 770 removes the dedicated experience-orb spawn packet and shifts the
+following clientbound range, adds game-test packets on both bounds, and moves
+the final use-item IDs. Chunk heightmaps are no longer anonymous NBT: the codec
+reads a bounded array of typed long arrays before the section byte array. The
+serverbound chat-message body also appends a checksum byte; Crabcraft's unsigned
+offline-mode message uses the required zero checksum.
+
+The 770 component registry has 96 entries. Its dedicated bounded decoder handles
+the centralized tooltip display, weapon and attack-blocking payloads, revised
+tool/equippable/trim/enchantment layouts, recursively nested stacks, and the new
+entity-variant components without applying 769's IDs by inference.
+
+The 770 validation fixture used Mojang's official vanilla 1.21.5 server jar
+(SHA-1 `e6ec2f64e6080b9b5d9b471b291c33cc7f509733`). The core pass completed
+Login, Configuration, split registries, Join Game, array-heightmap chunks,
+spawn, inventory, entities, movement/keepalive, and checksum-bearing chat. Live
+inventory passes decoded the new Blue Egg, Firefly Bush, and Mace IDs, followed
+by a custom-named enchanted Mace carrying 1.21.5 component patches.
 
 ## Adding a protocol
 
