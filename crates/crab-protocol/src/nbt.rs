@@ -70,6 +70,16 @@ pub fn read_nbt<B: Buf>(buf: &mut B) -> Result<Nbt, ProtoError> {
     read_payload(buf, tag, 0)
 }
 
+/// Reads the unnamed network-NBT form used by protocol 764+ registry data.
+/// Unlike classic NBT, the root tag has no following root-name string.
+pub fn read_anonymous_nbt<B: Buf>(buf: &mut B) -> Result<Nbt, ProtoError> {
+    let tag = buf.read_u8()?;
+    if tag == 0 {
+        return Ok(Nbt::End);
+    }
+    read_payload(buf, tag, 0)
+}
+
 fn read_nbt_string<B: Buf>(buf: &mut B) -> Result<String, ProtoError> {
     let len = buf.read_u16()? as usize;
     let bytes = buf.read_bytes(len)?;
@@ -181,5 +191,13 @@ mod tests {
     fn empty_root_is_end() {
         let mut cur: &[u8] = &[0x00];
         assert_eq!(read_nbt(&mut cur).unwrap(), Nbt::End);
+    }
+
+    #[test]
+    fn anonymous_root_omits_name() {
+        let mut input: &[u8] = &[10, 3, 0, 1, b'x', 0, 0, 0, 5, 0];
+        let nbt = read_anonymous_nbt(&mut input).unwrap();
+        assert_eq!(nbt.get("x"), Some(&Nbt::Int(5)));
+        assert!(input.is_empty());
     }
 }

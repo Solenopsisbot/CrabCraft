@@ -1,0 +1,21 @@
+name: Feature request
+description: Propose a focused vanilla-parity or developer-experience improvement
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: gap
+    attributes:
+      label: Parity gap or use case
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Desired behavior
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Relevant Minecraft versions

@@ -36,6 +36,7 @@ fn main() {
         normal: n,
         uv: [u, v],
         tint: [1.0, 1.0, 1.0],
+        opacity: 1.0,
     };
     let (tl, tr, br, bl) = (
         corner(-1.0, 1.0, u0, v0),

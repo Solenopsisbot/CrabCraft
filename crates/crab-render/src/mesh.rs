@@ -6,7 +6,7 @@
 //! model for fall back to a flat tinted tile.
 
 use crab_assets::Atlas;
-use crab_world::World;
+use crab_world::{TintKind, World};
 
 /// A vertex: position, face normal (lighting), atlas UV, and tint multiplier.
 #[repr(C)]
@@ -16,16 +16,18 @@ pub struct Vertex {
     pub normal: [f32; 3],
     pub uv: [f32; 2],
     pub tint: [f32; 3],
+    pub opacity: f32,
 }
 
 impl Vertex {
     /// wgpu vertex layout matching this struct.
     pub fn layout() -> wgpu::VertexBufferLayout<'static> {
-        const ATTRS: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![
+        const ATTRS: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
             0 => Float32x3, // position
             1 => Float32x3, // normal
             2 => Float32x2, // uv
             3 => Float32x3, // tint
+            4 => Float32, // opacity
         ];
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
@@ -96,6 +98,178 @@ fn occludes(atlas: &Atlas, state: u32) -> bool {
         && crab_registry::block_name(state).is_some_and(|n| atlas.is_cube(n))
 }
 
+fn biome_tint(world: &World, name: &str, cell: [i32; 3], model_tint: [f32; 3]) -> [f32; 3] {
+    if model_tint == [1.0, 1.0, 1.0] {
+        return model_tint;
+    }
+    let bare = name.strip_prefix("minecraft:").unwrap_or(name);
+    let kind = if matches!(bare, "water" | "bubble_column") {
+        TintKind::Water
+    } else if bare.ends_with("_leaves") || bare.contains("vine") {
+        TintKind::Foliage
+    } else {
+        TintKind::Grass
+    };
+    world.biome_tint(cell[0], cell[1], cell[2], kind)
+}
+
+fn door_visual(offset: usize) -> (&'static str, f32) {
+    let facing = (offset / 16).min(3);
+    let upper = (offset % 16) / 8 == 0;
+    let right = (offset % 8) / 4 == 1;
+    let open = (offset % 4) / 2 == 0;
+    let variant = match (upper, right, open) {
+        (false, false, false) => "bottom_left",
+        (false, false, true) => "bottom_left_open",
+        (false, true, false) => "bottom_right",
+        (false, true, true) => "bottom_right_open",
+        (true, false, false) => "top_left",
+        (true, false, true) => "top_left_open",
+        (true, true, false) => "top_right",
+        (true, true, true) => "top_right_open",
+    };
+    let yaw = if open {
+        if right {
+            [180.0, 0.0, 90.0, 270.0][facing]
+        } else {
+            [0.0, 180.0, 270.0, 90.0][facing]
+        }
+    } else {
+        [270.0, 90.0, 180.0, 0.0][facing]
+    };
+    (variant, yaw)
+}
+
+fn trapdoor_visual(offset: usize) -> (&'static str, f32) {
+    let facing = (offset / 16).min(3);
+    let top = (offset % 16) / 8 == 0;
+    let open = (offset % 8) / 4 == 0;
+    if open {
+        ("open", [0.0, 180.0, 270.0, 90.0][facing])
+    } else if top {
+        ("top", 0.0)
+    } else {
+        ("bottom", 0.0)
+    }
+}
+
+fn rail_visual(bare: &str, offset: usize) -> (&'static str, f32) {
+    let (shape, powered) = if bare == "rail" {
+        ((offset / 2).min(9), false)
+    } else {
+        (((offset % 12) / 2).min(5), offset / 12 == 0)
+    };
+    match shape {
+        0 => (if powered { "on" } else { "base" }, 0.0),
+        1 => (if powered { "on" } else { "base" }, 90.0),
+        2 => (if powered { "on_raised_ne" } else { "raised_ne" }, 90.0),
+        3 => (if powered { "on_raised_sw" } else { "raised_sw" }, 90.0),
+        4 => (if powered { "on_raised_ne" } else { "raised_ne" }, 0.0),
+        5 => (if powered { "on_raised_sw" } else { "raised_sw" }, 0.0),
+        6 => ("corner", 0.0),
+        7 => ("corner", 90.0),
+        8 => ("corner", 180.0),
+        9 => ("corner", 270.0),
+        _ => (if powered { "on" } else { "base" }, 0.0),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RedstoneVisual {
+    /// East, north, south, west: 0=up, 1=side, 2=none.
+    connections: [usize; 4],
+    power: usize,
+    dot: bool,
+}
+
+fn redstone_visual(offset: usize) -> RedstoneVisual {
+    let east = offset / 432;
+    let north = (offset % 432) / 144;
+    let power = (offset % 144) / 9;
+    let south = (offset % 9) / 3;
+    let west = offset % 3;
+    let connected = |value: usize| value != 2;
+    let dot = (!connected(east) && !connected(north) && !connected(south) && !connected(west))
+        || (connected(east) && connected(north))
+        || (connected(east) && connected(south))
+        || (connected(south) && connected(west))
+        || (connected(north) && connected(west));
+    RedstoneVisual {
+        connections: [east, north, south, west],
+        power,
+        dot,
+    }
+}
+
+fn redstone_tint(power: usize) -> [f32; 3] {
+    let level = power.min(15) as f32;
+    let f = level / 15.0;
+    let red = if power == 0 { 0.3 } else { f * 0.6 + 0.4 };
+    let green = (f * f * 0.7 - 0.5).max(0.0);
+    let blue = (f * f * 0.6 - 0.7).max(0.0);
+    [red, green, blue]
+}
+
+fn furnace_visual(offset: usize) -> (&'static str, f32) {
+    let facing = (offset / 2).min(3);
+    let lit = offset.is_multiple_of(2);
+    (
+        if lit { "on" } else { "off" },
+        [0.0, 180.0, 270.0, 90.0][facing],
+    )
+}
+
+fn axis_rotation(name: &str, offset: usize) -> Option<[f32; 3]> {
+    let bare = name.strip_prefix("minecraft:").unwrap_or(name);
+    let has_axis = bare.ends_with("_log")
+        || bare.ends_with("_wood")
+        || bare.ends_with("_stem")
+        || bare.ends_with("_hyphae")
+        || bare.ends_with("_pillar")
+        || matches!(
+            bare,
+            "hay_block"
+                | "bone_block"
+                | "basalt"
+                | "polished_basalt"
+                | "deepslate"
+                | "infested_deepslate"
+        );
+    has_axis.then(|| match offset.min(2) {
+        0 => [0.0, 0.0, -90.0], // vertical model axis Y -> world X
+        1 => [0.0, 0.0, 0.0],
+        _ => [90.0, 0.0, 0.0], // vertical model axis Y -> world Z
+    })
+}
+
+fn horizontal_rotation(name: &str, offset: usize) -> Option<[f32; 3]> {
+    let bare = name.strip_prefix("minecraft:").unwrap_or(name);
+    let stride = match bare {
+        "bee_nest" | "beehive" => 6,
+        "lectern" => 4,
+        "ladder" | "end_portal_frame" => 2,
+        "carved_pumpkin" | "jack_o_lantern" | "loom" | "stonecutter" => 1,
+        _ if bare.ends_with("_glazed_terracotta") || bare.ends_with("anvil") => 1,
+        _ => return None,
+    };
+    let facing = (offset / stride).min(3);
+    let yaw = if bare.ends_with("_glazed_terracotta") || bare.ends_with("anvil") {
+        [180.0, 0.0, 90.0, 270.0][facing]
+    } else {
+        [0.0, 180.0, 270.0, 90.0][facing]
+    };
+    Some([0.0, yaw, 0.0])
+}
+
+fn campfire_visual(offset: usize) -> (&'static str, f32) {
+    let facing = (offset / 8).min(3);
+    let lit = (offset % 8) / 4 == 0;
+    (
+        if lit { "on" } else { "off" },
+        [180.0, 0.0, 90.0, 270.0][facing],
+    )
+}
+
 /// Builds a textured mesh for the inclusive world-coordinate box `[min, max]`.
 pub fn mesh_region(world: &World, atlas: &Atlas, min: [i32; 3], max: [i32; 3]) -> Mesh {
     let mut vertices = Vec::new();
@@ -111,18 +285,319 @@ pub fn mesh_region(world: &World, atlas: &Atlas, min: [i32; 3], max: [i32; 3]) -
                 let name = crab_registry::block_name(state).unwrap_or("");
                 let base = [x as f32, y as f32, z as f32];
 
+                if name.ends_with("_wall") {
+                    if let Some(block) = crab_registry::block_for_state(state) {
+                        let offset = (state - block.min_state) as usize;
+                        let levels = [
+                            offset / 108,
+                            (offset % 108) / 36,
+                            (offset % 36) / 12,
+                            offset % 3,
+                        ];
+                        let up = (offset % 12) / 6 == 0;
+                        if up {
+                            if let Some(post) = atlas.block_elements_variant(name, "post") {
+                                emit_elements(
+                                    &mut vertices,
+                                    world,
+                                    atlas,
+                                    base,
+                                    [x, y, z],
+                                    post,
+                                    [0.0, 0.0, 0.0],
+                                );
+                            }
+                        }
+                        for (level, yaw) in levels.into_iter().zip([90.0, 0.0, 180.0, 270.0]) {
+                            let variant = match level {
+                                1 => "side",
+                                2 => "side_tall",
+                                _ => continue,
+                            };
+                            if let Some(side) = atlas.block_elements_variant(name, variant) {
+                                emit_elements(
+                                    &mut vertices,
+                                    world,
+                                    atlas,
+                                    base,
+                                    [x, y, z],
+                                    side,
+                                    [0.0, yaw, 0.0],
+                                );
+                            }
+                        }
+                        continue;
+                    }
+                }
+
+                if name.ends_with("_fence")
+                    || name.ends_with("_pane")
+                    || name == "minecraft:iron_bars"
+                {
+                    if let Some(post) = atlas.block_elements_variant(name, "post") {
+                        emit_elements(
+                            &mut vertices,
+                            world,
+                            atlas,
+                            base,
+                            [x, y, z],
+                            post,
+                            [0.0, 0.0, 0.0],
+                        );
+                        if let Some(side) = atlas.block_elements_variant(name, "side") {
+                            let Some(block) = crab_registry::block_for_state(state) else {
+                                continue;
+                            };
+                            let offset = (state - block.min_state) as usize;
+                            let arms = [
+                                (offset / 16).is_multiple_of(2),
+                                (offset / 8).is_multiple_of(2),
+                                (offset / 4).is_multiple_of(2),
+                                offset.is_multiple_of(2),
+                            ];
+                            for (connected, yaw) in arms.into_iter().zip([90.0, 0.0, 180.0, 270.0])
+                            {
+                                if connected {
+                                    emit_elements(
+                                        &mut vertices,
+                                        world,
+                                        atlas,
+                                        base,
+                                        [x, y, z],
+                                        side,
+                                        [0.0, yaw, 0.0],
+                                    );
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                }
+
+                if name.ends_with("_door") && !name.ends_with("_trapdoor") {
+                    if let Some(block) = crab_registry::block_for_state(state) {
+                        let (variant, yaw) = door_visual((state - block.min_state) as usize);
+                        if let Some(elements) = atlas.block_elements_variant(name, variant) {
+                            emit_elements(
+                                &mut vertices,
+                                world,
+                                atlas,
+                                base,
+                                [x, y, z],
+                                elements,
+                                [0.0, yaw, 0.0],
+                            );
+                            continue;
+                        }
+                    }
+                }
+
+                if name.ends_with("_trapdoor") {
+                    if let Some(block) = crab_registry::block_for_state(state) {
+                        let (variant, yaw) = trapdoor_visual((state - block.min_state) as usize);
+                        if let Some(elements) = atlas.block_elements_variant(name, variant) {
+                            emit_elements(
+                                &mut vertices,
+                                world,
+                                atlas,
+                                base,
+                                [x, y, z],
+                                elements,
+                                [0.0, yaw, 0.0],
+                            );
+                            continue;
+                        }
+                    }
+                }
+
+                if name.ends_with("rail") {
+                    if let Some(block) = crab_registry::block_for_state(state) {
+                        let bare = name.strip_prefix("minecraft:").unwrap_or(name);
+                        let (variant, yaw) = rail_visual(bare, (state - block.min_state) as usize);
+                        let elements = if variant == "base" {
+                            atlas.block_elements(name)
+                        } else {
+                            atlas.block_elements_variant(name, variant)
+                        };
+                        if let Some(elements) = elements {
+                            emit_elements(
+                                &mut vertices,
+                                world,
+                                atlas,
+                                base,
+                                [x, y, z],
+                                elements,
+                                [0.0, yaw, 0.0],
+                            );
+                            continue;
+                        }
+                    }
+                }
+
+                if name == "minecraft:redstone_wire" {
+                    if let Some(block) = crab_registry::block_for_state(state) {
+                        let visual = redstone_visual((state - block.min_state) as usize);
+                        let tint = redstone_tint(visual.power);
+                        if visual.dot {
+                            if let Some(elements) = atlas.block_elements_variant(name, "dot") {
+                                emit_elements_tinted(
+                                    &mut vertices,
+                                    world,
+                                    atlas,
+                                    base,
+                                    [x, y, z],
+                                    elements,
+                                    [0.0, 0.0, 0.0],
+                                    Some(tint),
+                                );
+                            }
+                        }
+                        for ((connection, variant), yaw) in visual
+                            .connections
+                            .into_iter()
+                            .zip(["east", "north", "south", "west"])
+                            .zip([270.0, 0.0, 0.0, 270.0])
+                        {
+                            if connection == 2 {
+                                continue;
+                            }
+                            if let Some(elements) = atlas.block_elements_variant(name, variant) {
+                                emit_elements_tinted(
+                                    &mut vertices,
+                                    world,
+                                    atlas,
+                                    base,
+                                    [x, y, z],
+                                    elements,
+                                    [0.0, yaw, 0.0],
+                                    Some(tint),
+                                );
+                            }
+                            if connection == 0 {
+                                if let Some(elements) = atlas.block_elements_variant(name, "up") {
+                                    let up_yaw = match variant {
+                                        "east" => 90.0,
+                                        "south" => 180.0,
+                                        "west" => 270.0,
+                                        _ => 0.0,
+                                    };
+                                    emit_elements_tinted(
+                                        &mut vertices,
+                                        world,
+                                        atlas,
+                                        base,
+                                        [x, y, z],
+                                        elements,
+                                        [0.0, up_yaw, 0.0],
+                                        Some(tint),
+                                    );
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                }
+
+                if matches!(
+                    name,
+                    "minecraft:furnace" | "minecraft:blast_furnace" | "minecraft:smoker"
+                ) {
+                    if let Some(block) = crab_registry::block_for_state(state) {
+                        let (variant, yaw) = furnace_visual((state - block.min_state) as usize);
+                        if let Some(elements) = atlas.block_elements_variant(name, variant) {
+                            emit_elements(
+                                &mut vertices,
+                                world,
+                                atlas,
+                                base,
+                                [x, y, z],
+                                elements,
+                                [0.0, yaw, 0.0],
+                            );
+                            continue;
+                        }
+                    }
+                }
+
+                if matches!(name, "minecraft:campfire" | "minecraft:soul_campfire") {
+                    if let Some(block) = crab_registry::block_for_state(state) {
+                        let (variant, yaw) = campfire_visual((state - block.min_state) as usize);
+                        if let Some(elements) = atlas.block_elements_variant(name, variant) {
+                            emit_elements(
+                                &mut vertices,
+                                world,
+                                atlas,
+                                base,
+                                [x, y, z],
+                                elements,
+                                [0.0, yaw, 0.0],
+                            );
+                            continue;
+                        }
+                    }
+                }
+
                 // Non-cube blocks (slabs, stairs, fences, plants, …) emit their
                 // model's element geometry.
-                if let Some(elements) = atlas.block_elements(name) {
-                    emit_elements(&mut vertices, world, atlas, base, [x, y, z], elements);
+                if let Some(default_elements) = atlas.block_elements(name) {
+                    let mut elements = default_elements;
+                    let mut model_rotation = crab_registry::block_for_state(state)
+                        .and_then(|block| {
+                            horizontal_rotation(name, (state - block.min_state) as usize)
+                        })
+                        .unwrap_or([0.0, 0.0, 0.0]);
+                    if name.ends_with("_stairs") {
+                        if let Some(block) = crab_registry::block_for_state(state) {
+                            let offset = (state - block.min_state) as usize;
+                            let facing = offset / 20;
+                            let half = (offset % 20) / 10;
+                            let shape = (offset % 10) / 2;
+                            let variant = match shape {
+                                1 | 2 => "inner",
+                                3 | 4 => "outer",
+                                _ => "straight",
+                            };
+                            if variant != "straight" {
+                                elements = atlas
+                                    .block_elements_variant(name, variant)
+                                    .unwrap_or(default_elements);
+                            }
+                            model_rotation = [
+                                if half == 0 { 180.0 } else { 0.0 },
+                                [270.0, 90.0, 180.0, 0.0][facing.min(3)],
+                                0.0,
+                            ];
+                        }
+                    }
+                    emit_elements(
+                        &mut vertices,
+                        world,
+                        atlas,
+                        base,
+                        [x, y, z],
+                        elements,
+                        model_rotation,
+                    );
                     continue;
                 }
 
                 // Full cube (or flat fallback): one quad per non-occluded face.
                 let model = atlas.model(name);
+                let rotation = crab_registry::block_for_state(state)
+                    .and_then(|block| {
+                        let offset = (state - block.min_state) as usize;
+                        axis_rotation(name, offset).or_else(|| horizontal_rotation(name, offset))
+                    })
+                    .unwrap_or([0.0, 0.0, 0.0]);
                 for (fi, face) in FACES.iter().enumerate() {
+                    let normal = rotate_model(face.normal, rotation, false);
+                    let direction = [
+                        normal[0].round() as i32,
+                        normal[1].round() as i32,
+                        normal[2].round() as i32,
+                    ];
                     let neighbor =
-                        world.block_state(x + face.dir[0], y + face.dir[1], z + face.dir[2]);
+                        world.block_state(x + direction[0], y + direction[1], z + direction[2]);
                     if neighbor.is_some_and(|s| occludes(atlas, s)) {
                         continue;
                     }
@@ -130,13 +605,20 @@ pub fn mesh_region(world: &World, atlas: &Atlas, min: [i32; 3], max: [i32; 3]) -
                     let [u0, v0, u1, v1] = tex.uv;
                     // two triangles: (0,1,2) and (0,2,3)
                     for &ci in &[0usize, 1, 2, 0, 2, 3] {
-                        let c = face.corners[ci];
+                        let c = rotate_model(face.corners[ci], rotation, true);
                         let [cu, cv] = face.uvs[ci];
                         vertices.push(Vertex {
                             position: [base[0] + c[0], base[1] + c[1], base[2] + c[2]],
-                            normal: face.normal,
+                            normal,
                             uv: [u0 + cu * (u1 - u0), v0 + cv * (v1 - v0)],
-                            tint: tex.tint,
+                            tint: biome_tint(world, name, [x, y, z], tex.tint),
+                            opacity: if name == "minecraft:water" {
+                                0.58
+                            } else if name == "minecraft:lava" {
+                                0.88
+                            } else {
+                                1.0
+                            },
                         });
                     }
                 }
@@ -185,7 +667,35 @@ fn emit_elements(
     base: [f32; 3],
     cell: [i32; 3],
     elements: &[crab_assets::ElementData],
+    model_rotation: [f32; 3],
 ) {
+    emit_elements_tinted(
+        verts,
+        world,
+        atlas,
+        base,
+        cell,
+        elements,
+        model_rotation,
+        None,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_elements_tinted(
+    verts: &mut Vec<Vertex>,
+    world: &World,
+    atlas: &Atlas,
+    base: [f32; 3],
+    cell: [i32; 3],
+    elements: &[crab_assets::ElementData],
+    model_rotation: [f32; 3],
+    tint_override: Option<[f32; 3]>,
+) {
+    let block_name = world
+        .block_state(cell[0], cell[1], cell[2])
+        .and_then(crab_registry::block_name)
+        .unwrap_or("minecraft:air");
     for el in elements {
         let from_n = [el.from[0] / 16.0, el.from[1] / 16.0, el.from[2] / 16.0];
         let to_n = [el.to[0] / 16.0, el.to[1] / 16.0, el.to[2] / 16.0];
@@ -212,16 +722,42 @@ fn emit_elements(
                 if let Some(rot) = &el.rotation {
                     p = rotate_point(p, rot);
                 }
+                p = rotate_model(p, model_rotation, true);
                 let [cu, cv] = face.uvs[ci];
                 verts.push(Vertex {
                     position: [base[0] + p[0], base[1] + p[1], base[2] + p[2]],
-                    normal: face.normal,
+                    normal: rotate_model(face.normal, model_rotation, false),
                     uv: [su0 + cu * (su1 - su0), sv0 + cv * (sv1 - sv0)],
-                    tint: ef.tint,
+                    tint: tint_override
+                        .unwrap_or_else(|| biome_tint(world, block_name, cell, ef.tint)),
+                    opacity: 1.0,
                 });
             }
         }
     }
+}
+
+fn rotate_model(mut point: [f32; 3], rotation: [f32; 3], around_center: bool) -> [f32; 3] {
+    let center = if around_center { 0.5 } else { 0.0 };
+    point[0] -= center;
+    point[1] -= center;
+    point[2] -= center;
+    let (sx, cx) = rotation[0].to_radians().sin_cos();
+    let (y, z) = (point[1], point[2]);
+    point[1] = y * cx - z * sx;
+    point[2] = y * sx + z * cx;
+    let (sy, cy) = rotation[1].to_radians().sin_cos();
+    let (x, z) = (point[0], point[2]);
+    point[0] = x * cy + z * sy;
+    point[2] = -x * sy + z * cy;
+    let (sz, cz) = rotation[2].to_radians().sin_cos();
+    let (x, y) = (point[0], point[1]);
+    point[0] = x * cz - y * sz;
+    point[1] = x * sz + y * cz;
+    point[0] += center;
+    point[1] += center;
+    point[2] += center;
+    point
 }
 
 /// Builds a 36-vertex box spanning `[min, max]`, textured with `uv` (an atlas
@@ -242,10 +778,104 @@ pub fn box_mesh(min: [f32; 3], max: [f32; 3], uv: [f32; 4], tint: [f32; 3]) -> V
                 normal: face.normal,
                 uv: [u0 + cu * (u1 - u0), v0 + cv * (v1 - v0)],
                 tint,
+                opacity: 1.0,
             });
         }
     }
     verts
+}
+
+/// Builds a miniature six-face block model for dropped block items.
+#[must_use]
+pub fn block_item_mesh(
+    atlas: &Atlas,
+    block_name: &str,
+    center: [f32; 3],
+    size: f32,
+    yaw_degrees: f32,
+) -> Vec<Vertex> {
+    let (sin_yaw, cos_yaw) = yaw_degrees.to_radians().sin_cos();
+    if let Some(elements) = atlas.block_elements(block_name) {
+        let mut vertices = Vec::new();
+        for element in elements {
+            let from = [
+                element.from[0] / 16.0,
+                element.from[1] / 16.0,
+                element.from[2] / 16.0,
+            ];
+            let to = [
+                element.to[0] / 16.0,
+                element.to[1] / 16.0,
+                element.to[2] / 16.0,
+            ];
+            for (face_index, face) in FACES.iter().enumerate() {
+                let Some(texture) = element.faces[face_index] else {
+                    continue;
+                };
+                let [u0, v0, u1, v1] = texture.uv;
+                for &corner_index in &[0usize, 1, 2, 0, 2, 3] {
+                    let corner = face.corners[corner_index];
+                    let mut point = [
+                        if corner[0] == 0.0 { from[0] } else { to[0] },
+                        if corner[1] == 0.0 { from[1] } else { to[1] },
+                        if corner[2] == 0.0 { from[2] } else { to[2] },
+                    ];
+                    if let Some(rotation) = &element.rotation {
+                        point = rotate_point(point, rotation);
+                    }
+                    let local_x = (point[0] - 0.5) * size;
+                    let local_y = (point[1] - 0.5) * size;
+                    let local_z = (point[2] - 0.5) * size;
+                    let [u, v] = face.uvs[corner_index];
+                    vertices.push(Vertex {
+                        position: [
+                            center[0] + local_x * cos_yaw + local_z * sin_yaw,
+                            center[1] + local_y,
+                            center[2] - local_x * sin_yaw + local_z * cos_yaw,
+                        ],
+                        normal: [
+                            face.normal[0] * cos_yaw + face.normal[2] * sin_yaw,
+                            face.normal[1],
+                            -face.normal[0] * sin_yaw + face.normal[2] * cos_yaw,
+                        ],
+                        uv: [u0 + u * (u1 - u0), v0 + v * (v1 - v0)],
+                        tint: texture.tint,
+                        opacity: 1.0,
+                    });
+                }
+            }
+        }
+        return vertices;
+    }
+    let model = atlas.model(block_name);
+    let mut vertices = Vec::with_capacity(36);
+    for (face_index, face) in FACES.iter().enumerate() {
+        let texture = model.faces[face_index];
+        let [u0, v0, u1, v1] = texture.uv;
+        for &corner_index in &[0usize, 1, 2, 0, 2, 3] {
+            let corner = face.corners[corner_index];
+            let [u, v] = face.uvs[corner_index];
+            let local_x = (corner[0] - 0.5) * size;
+            let local_y = (corner[1] - 0.5) * size;
+            let local_z = (corner[2] - 0.5) * size;
+            vertices.push(Vertex {
+                position: [
+                    center[0] + local_x * cos_yaw + local_z * sin_yaw,
+                    center[1] + local_y,
+                    center[2] - local_x * sin_yaw + local_z * cos_yaw,
+                ],
+                normal: [
+                    face.normal[0] * cos_yaw + face.normal[2] * sin_yaw,
+                    face.normal[1],
+                    -face.normal[0] * sin_yaw + face.normal[2] * cos_yaw,
+                ],
+                uv: [u0 + u * (u1 - u0), v0 + v * (v1 - v0)],
+                tint: texture.tint,
+                opacity: 1.0,
+            });
+        }
+    }
+    vertices
 }
 
 fn push_quad(verts: &mut Vec<Vertex>, c: [[f32; 3]; 4], normal: [f32; 3], uv: [[f32; 2]; 4]) {
@@ -255,6 +885,7 @@ fn push_quad(verts: &mut Vec<Vertex>, c: [[f32; 3]; 4], normal: [f32; 3], uv: [[
             normal,
             uv: uv[i],
             tint: [1.0, 1.0, 1.0],
+            opacity: 1.0,
         });
     }
 }
@@ -315,9 +946,9 @@ fn limb_swing_deg(name: &str, swing: f32, amount: f32) -> f32 {
     (swing.sin() * amount * sign).to_degrees() * 1.2
 }
 
-/// Builds a 3D mesh for a Bedrock entity geometry, feet at `offset`. Each bone's
-/// rest rotation (e.g. the cow body's 90° tilt) is applied about its pivot, plus
-/// a procedural limb swing (`limb_swing` radians; 0 = rest pose).
+/// Builds a standing 3D mesh for a Bedrock entity geometry. This compatibility
+/// entry point is used by examples and previews; live entities use
+/// [`entity_mesh_with_pose`] with their server metadata pose.
 ///
 /// The entity's texture occupies the rectangle at `uv_origin` (pixels) within a
 /// texture of size `uv_size` (pixels) — pass `([0,0], [tex_w, tex_h])` for a
@@ -332,6 +963,41 @@ pub fn entity_mesh(
     limb_amount: f32,
     scale: f32,
     yaw_deg: f32,
+    head_yaw_deg: f32,
+    attack_progress: f32,
+) -> Vec<Vertex> {
+    entity_mesh_with_pose(
+        geo,
+        offset,
+        uv_origin,
+        uv_size,
+        limb_swing,
+        limb_amount,
+        scale,
+        yaw_deg,
+        head_yaw_deg,
+        attack_progress,
+        0,
+    )
+}
+
+/// Builds a posed 3D entity mesh, feet at `offset`. Each bone's rest rotation
+/// is combined with procedural walking/attacking and the authoritative Pose
+/// metadata value. Pose IDs follow Java's stable enum ordering: fall-flying 1,
+/// sleeping 2, swimming 3, spin attack 4, crouching 5, dying 7, sitting 10.
+#[allow(clippy::too_many_arguments)]
+pub fn entity_mesh_with_pose(
+    geo: &crab_assets::EntityGeometry,
+    offset: [f32; 3],
+    uv_origin: [f32; 2],
+    uv_size: [f32; 2],
+    limb_swing: f32,
+    limb_amount: f32,
+    scale: f32,
+    yaw_deg: f32,
+    head_yaw_deg: f32,
+    attack_progress: f32,
+    pose: i32,
 ) -> Vec<Vertex> {
     // Whole-model facing: Minecraft yaw 0 = south (+Z) and increases clockwise
     // (90 = west/-X). Our model's front (head) is at -Z and we mirror X, so the
@@ -353,16 +1019,32 @@ pub fn entity_mesh(
         // Minecraft's bone rotation is the opposite sense to our math rotation,
         // so negate the rest rotation (e.g. the cow body's 90° tilt connects to
         // the head/legs). The swing keeps our sign (it's symmetric anyway).
+        let head_turn = if bone.name.to_ascii_lowercase().contains("head") {
+            head_yaw_deg - yaw_deg
+        } else {
+            0.0
+        };
+        let lower_name = bone.name.to_ascii_lowercase();
+        let attack_swing = if lower_name.contains("arm")
+            && (lower_name.contains("right") || lower_name.ends_with('2'))
+        {
+            -((1.0 - attack_progress.clamp(0.0, 1.0)) * std::f32::consts::PI).sin() * 85.0
+        } else {
+            0.0
+        };
+        let pose_rotation = pose_bone_rotation(&bone.name, pose);
         let euler = [
-            -bone.rotation[0] + swing,
-            -bone.rotation[1],
-            -bone.rotation[2],
+            -bone.rotation[0] + swing + attack_swing + pose_rotation[0],
+            -bone.rotation[1] + head_turn + pose_rotation[1],
+            -bone.rotation[2] + pose_rotation[2],
         ];
+        let whole_rotation = whole_pose_rotation(pose);
         // Bedrock model space -> world: rotate about the bone pivot, then /16,
         // X negated (Bedrock/Java mirror), spin by the entity yaw about the
         // vertical axis, then translate to the feet offset.
         let place = |px: f32, py: f32, pz: f32| {
             let r = rotate_euler([px, py, pz], bone.pivot, euler);
+            let r = rotate_euler(r, [0.0, 14.4, 0.0], whole_rotation);
             let (lx, ly, lz) = (
                 -r[0] / 16.0 * scale,
                 r[1] / 16.0 * scale,
@@ -376,6 +1058,7 @@ pub fn entity_mesh(
         };
         let nrm = |n: [f32; 3]| {
             let r = rotate_euler(n, [0.0, 0.0, 0.0], euler);
+            let r = rotate_euler(r, [0.0, 0.0, 0.0], whole_rotation);
             // Match `place`: mirror X, then apply the yaw spin.
             let (lx, lz) = (-r[0], r[2]);
             [
@@ -475,10 +1158,38 @@ pub fn entity_mesh(
     verts
 }
 
+fn whole_pose_rotation(pose: i32) -> [f32; 3] {
+    match pose {
+        1 | 3 | 4 => [-90.0, 0.0, 0.0],
+        2 => [0.0, 0.0, 90.0],
+        6 => [-25.0, 0.0, 0.0],
+        7 => [0.0, 0.0, -90.0],
+        _ => [0.0; 3],
+    }
+}
+
+fn pose_bone_rotation(name: &str, pose: i32) -> [f32; 3] {
+    let name = name.to_ascii_lowercase();
+    let is_head = name.contains("head");
+    let is_body = name.contains("body") || name.contains("torso");
+    let is_arm = name.contains("arm");
+    let is_leg = name.contains("leg");
+    match pose {
+        5 if is_body => [22.0, 0.0, 0.0],
+        5 if is_head => [-12.0, 0.0, 0.0],
+        5 if is_arm => [18.0, 0.0, 0.0],
+        5 if is_leg => [-12.0, 0.0, 0.0],
+        10 if is_body => [12.0, 0.0, 0.0],
+        10 if is_arm => [-15.0, 0.0, 0.0],
+        10 if is_leg => [-75.0, 0.0, 0.0],
+        _ => [0.0; 3],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crab_world::{BlockStates, Chunk, Section, World};
+    use crab_world::{Biomes, BlockStates, Chunk, Section, World};
 
     const STONE: u32 = 1;
 
@@ -488,6 +1199,7 @@ mod tests {
             .map(|_| Section {
                 block_count: 0,
                 blocks: BlockStates::Uniform(0),
+                biomes: Biomes::Uniform(0),
             })
             .collect();
         world.load_chunk(Chunk {
@@ -508,6 +1220,14 @@ mod tests {
     }
 
     #[test]
+    fn dropped_block_item_emits_textured_cube_faces() {
+        let atlas = Atlas::debug_uniform();
+        let vertices = block_item_mesh(&atlas, "minecraft:stone", [0.0, 0.0, 0.0], 0.36, 45.0);
+        assert_eq!(vertices.len(), 36);
+        assert!(vertices.iter().all(|vertex| vertex.opacity == 1.0));
+    }
+
+    #[test]
     fn limb_swing_alternates_and_skips_body() {
         use std::f32::consts::FRAC_PI_2;
         // Non-limb bones never swing.
@@ -523,6 +1243,77 @@ mod tests {
         assert!(leg * arm < 0.0);
         // No movement -> no swing.
         assert_eq!(limb_swing_deg("leg0", FRAC_PI_2, 0.0), 0.0);
+    }
+
+    #[test]
+    fn attack_progress_moves_player_arm_vertices() {
+        let geometry = crab_assets::player_geometry();
+        let rest = entity_mesh(
+            &geometry,
+            [0.0; 3],
+            [0.0; 2],
+            [64.0, 64.0],
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+        );
+        let attack = entity_mesh(
+            &geometry,
+            [0.0; 3],
+            [0.0; 2],
+            [64.0, 64.0],
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.5,
+        );
+        assert_eq!(rest.len(), attack.len());
+        assert!(rest
+            .iter()
+            .zip(&attack)
+            .any(|(before, after)| before.position != after.position));
+    }
+
+    #[test]
+    fn metadata_poses_transform_humanoid_bones_and_whole_model() {
+        let geometry = crab_assets::player_geometry();
+        let mesh = |pose| {
+            entity_mesh_with_pose(
+                &geometry,
+                [0.0; 3],
+                [0.0; 2],
+                [64.0, 64.0],
+                0.0,
+                0.0,
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                pose,
+            )
+        };
+        let standing = mesh(0);
+        let crouching = mesh(5);
+        let swimming = mesh(3);
+        assert_eq!(standing.len(), crouching.len());
+        assert_eq!(standing.len(), swimming.len());
+        assert!(standing
+            .iter()
+            .zip(&crouching)
+            .any(|(before, after)| before.position != after.position));
+        assert!(standing
+            .iter()
+            .zip(&swimming)
+            .any(|(before, after)| before.position != after.position));
+        assert_eq!(whole_pose_rotation(3), [-90.0, 0.0, 0.0]);
+        assert_eq!(whole_pose_rotation(0), [0.0; 3]);
+        assert_eq!(pose_bone_rotation("body", 5), [22.0, 0.0, 0.0]);
+        assert_eq!(pose_bone_rotation("body", 0), [0.0; 3]);
     }
 
     #[test]
@@ -550,5 +1341,70 @@ mod tests {
         let atlas = Atlas::debug_uniform();
         let mesh = mesh_region(&world, &atlas, [5, -60, 5], [5, -60, 5]);
         assert!(mesh.vertices.is_empty());
+    }
+
+    #[test]
+    fn door_and_trapdoor_state_radices_select_vanilla_models() {
+        assert_eq!(door_visual(0), ("top_left_open", 0.0));
+        assert_eq!(door_visual(62), ("bottom_right", 0.0));
+        assert_eq!(trapdoor_visual(0), ("open", 0.0));
+        assert_eq!(trapdoor_visual(28), ("bottom", 0.0));
+    }
+
+    #[test]
+    fn rail_state_radices_include_waterlogging_power_and_corners() {
+        assert_eq!(rail_visual("rail", 0), ("base", 0.0));
+        assert_eq!(rail_visual("rail", 5), ("raised_ne", 90.0));
+        assert_eq!(rail_visual("rail", 12), ("corner", 0.0));
+        assert_eq!(rail_visual("powered_rail", 4), ("on_raised_ne", 90.0));
+        assert_eq!(rail_visual("powered_rail", 14), ("base", 90.0));
+    }
+
+    #[test]
+    fn redstone_state_radices_drive_connections_dot_and_power_color() {
+        let isolated = redstone_visual(1_160);
+        assert_eq!(isolated.connections, [2, 2, 2, 2]);
+        assert!(isolated.dot);
+        assert_eq!(isolated.power, 0);
+
+        let line = redstone_visual(863);
+        assert_eq!(line.connections, [1, 2, 2, 2]);
+        assert!(!line.dot);
+        assert_eq!(line.power, 15);
+
+        assert!(redstone_visual(584).dot);
+        assert!(redstone_tint(15)[0] > redstone_tint(0)[0]);
+        assert_eq!(redstone_tint(0), [0.3, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn axis_and_furnace_states_rotate_models_from_vanilla_ordering() {
+        assert_eq!(
+            axis_rotation("minecraft:oak_log", 0),
+            Some([0.0, 0.0, -90.0])
+        );
+        assert_eq!(axis_rotation("minecraft:oak_log", 1), Some([0.0, 0.0, 0.0]));
+        assert_eq!(
+            axis_rotation("minecraft:oak_log", 2),
+            Some([90.0, 0.0, 0.0])
+        );
+        assert_eq!(axis_rotation("minecraft:stone", 0), None);
+        assert_eq!(furnace_visual(0), ("on", 0.0));
+        assert_eq!(furnace_visual(3), ("off", 180.0));
+        assert_eq!(furnace_visual(6), ("on", 90.0));
+        assert_eq!(
+            horizontal_rotation("minecraft:loom", 3),
+            Some([0.0, 90.0, 0.0])
+        );
+        assert_eq!(
+            horizontal_rotation("minecraft:white_glazed_terracotta", 0),
+            Some([0.0, 180.0, 0.0])
+        );
+        assert_eq!(
+            horizontal_rotation("minecraft:ladder", 7),
+            Some([0.0, 90.0, 0.0])
+        );
+        assert_eq!(campfire_visual(0), ("on", 180.0));
+        assert_eq!(campfire_visual(12), ("off", 0.0));
     }
 }

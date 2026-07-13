@@ -26,6 +26,8 @@ pub struct Connection<S> {
     encryptor: Option<Aes128Cfb8>,
     /// Inbound AES-128-CFB8 stream (online mode only).
     decryptor: Option<Aes128Cfb8>,
+    /// Optional version profile translating canonical packet ids at send time.
+    packet_id_mapper: Option<fn(State, i32) -> i32>,
 }
 
 impl<S> Connection<S> {
@@ -38,6 +40,7 @@ impl<S> Connection<S> {
             threshold: NO_COMPRESSION,
             encryptor: None,
             decryptor: None,
+            packet_id_mapper: None,
         }
     }
 
@@ -65,6 +68,12 @@ impl<S> Connection<S> {
         self.state = state;
     }
 
+    /// Installs a protocol-version packet-id mapping. The payload codec remains
+    /// unchanged; this is used for versions whose packet order shifted.
+    pub fn set_packet_id_mapper(&mut self, mapper: fn(State, i32) -> i32) {
+        self.packet_id_mapper = Some(mapper);
+    }
+
     /// Enables (or, with a negative value, disables) compression at `threshold`
     /// bytes, as instructed by the server's `SetCompression` packet.
     pub fn set_compression(&mut self, threshold: i32) {
@@ -83,6 +92,30 @@ where
 {
     /// Encodes, frames, (optionally) compresses, and writes a packet.
     pub async fn send<P: Packet>(&mut self, packet: &P) -> Result<(), NetError> {
+        let packet_id = self
+            .packet_id_mapper
+            .map_or(P::ID, |mapper| mapper(self.state, P::ID));
+        self.send_with_id(packet, packet_id).await
+    }
+
+    /// Sends a version-specific packet whose declared id is already the final
+    /// wire id, bypassing the canonical-version mapper.
+    pub async fn send_unmapped<P: Packet>(&mut self, packet: &P) -> Result<(), NetError> {
+        self.send_with_id(packet, P::ID).await
+    }
+
+    async fn send_with_id<P: Packet>(
+        &mut self,
+        packet: &P,
+        packet_id: i32,
+    ) -> Result<(), NetError> {
+        tracing::trace!(
+            packet = std::any::type_name::<P>(),
+            state = ?self.state,
+            canonical_id = P::ID,
+            wire_id = packet_id,
+            "sending packet"
+        );
         debug_assert_eq!(
             P::BOUND,
             Bound::Serverbound,
@@ -91,7 +124,7 @@ where
 
         // body = VarInt(id) ++ packet body
         let mut body = Vec::new();
-        body.put_varint(P::ID);
+        body.put_varint(packet_id);
         packet.encode(&mut body)?;
 
         let mut out = Vec::new();
@@ -115,7 +148,7 @@ where
         }
 
         tracing::trace!(
-            id = format_args!("{:#04x}", P::ID),
+            id = format_args!("{packet_id:#04x}"),
             body_len = body.len(),
             wire_len = out.len(),
             compressed = self.compression_enabled(),
@@ -213,6 +246,7 @@ impl Connection<tokio::net::TcpStream> {
 mod tests {
     use super::*;
     use crab_protocol::versions::v1_20_1::handshake::{Handshake, NextState};
+    use crab_protocol::versions::v1_20_1::play::PlayerCommand;
     use crab_protocol::versions::PROTOCOL_1_20_1;
 
     fn sample_handshake(addr: &str) -> Handshake {
@@ -303,5 +337,26 @@ mod tests {
         client.send(&pkt).await.unwrap();
         let raw = server.read_packet().await.unwrap();
         assert_eq!(raw.decode::<Handshake>().unwrap(), pkt);
+    }
+
+    #[tokio::test]
+    async fn outbound_version_mapper_and_unmapped_send_choose_wire_ids() {
+        let (a, b) = tokio::io::duplex(4096);
+        let mut client = Connection::new(a);
+        let mut server = Connection::new(b);
+        client.set_state(State::Play);
+        client.set_packet_id_mapper(|state, id| if state == State::Play { id + 3 } else { id });
+        let packet = PlayerCommand {
+            entity_id: 1,
+            action: 3,
+            jump_boost: 0,
+        };
+        client.send(&packet).await.unwrap();
+        assert_eq!(
+            server.read_packet().await.unwrap().id,
+            PlayerCommand::ID + 3
+        );
+        client.send_unmapped(&packet).await.unwrap();
+        assert_eq!(server.read_packet().await.unwrap().id, PlayerCommand::ID);
     }
 }

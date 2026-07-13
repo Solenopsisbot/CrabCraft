@@ -21,10 +21,146 @@ use crate::packet::{Bound, Packet, State};
 // Clientbound
 // ===========================================================================
 
+/// `0x30` — opens a server-owned menu such as a chest or furnace.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OpenScreen {
+    pub window_id: i32,
+    pub menu_type: i32,
+    /// JSON chat component in 1.20.1.
+    pub title: String,
+}
+
+impl Packet for OpenScreen {
+    const ID: i32 = 0x30;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Clientbound;
+
+    fn encode<B: BufMut>(&self, dst: &mut B) -> Result<(), ProtoError> {
+        dst.put_varint(self.window_id);
+        dst.put_varint(self.menu_type);
+        dst.put_string(&self.title);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(src: &mut B) -> Result<Self, ProtoError> {
+        Ok(Self {
+            window_id: src.read_varint()?,
+            menu_type: src.read_varint()?,
+            title: src.read_string(262_144)?,
+        })
+    }
+}
+
+/// `0x11` — the server closes the currently open container.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClientboundCloseContainer {
+    pub window_id: u8,
+}
+
+/// `0x13` — updates one numeric property of an open container. Furnaces use
+/// properties 0..=3 for remaining burn time, total burn time, cook progress,
+/// and total cook time respectively.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SetContainerData {
+    pub window_id: u8,
+    pub property: i16,
+    pub value: i16,
+}
+
+/// `0x34` — server-authoritative player ability flags and movement speeds.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ClientboundPlayerAbilities {
+    pub flags: i8,
+    pub flying_speed: f32,
+    pub walking_speed: f32,
+}
+
+impl Packet for ClientboundPlayerAbilities {
+    const ID: i32 = 0x34;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Clientbound;
+
+    fn encode<B: BufMut>(&self, dst: &mut B) -> Result<(), ProtoError> {
+        dst.put_i8(self.flags);
+        dst.put_f32(self.flying_speed);
+        dst.put_f32(self.walking_speed);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(src: &mut B) -> Result<Self, ProtoError> {
+        Ok(Self {
+            flags: src.read_i8()?,
+            flying_speed: src.read_f32()?,
+            walking_speed: src.read_f32()?,
+        })
+    }
+}
+
+impl Packet for SetContainerData {
+    const ID: i32 = 0x13;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Clientbound;
+
+    fn encode<B: BufMut>(&self, dst: &mut B) -> Result<(), ProtoError> {
+        dst.put_u8(self.window_id);
+        dst.put_i16(self.property);
+        dst.put_i16(self.value);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(src: &mut B) -> Result<Self, ProtoError> {
+        Ok(Self {
+            window_id: src.read_u8()?,
+            property: src.read_i16()?,
+            value: src.read_i16()?,
+        })
+    }
+}
+
+impl Packet for ClientboundCloseContainer {
+    const ID: i32 = 0x11;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Clientbound;
+
+    fn encode<B: BufMut>(&self, dst: &mut B) -> Result<(), ProtoError> {
+        dst.put_u8(self.window_id);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(src: &mut B) -> Result<Self, ProtoError> {
+        Ok(Self {
+            window_id: src.read_u8()?,
+        })
+    }
+}
+
 /// `0x23` — server pings; we must echo the same id back promptly or get kicked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct KeepAlive {
     pub id: i64,
+}
+
+/// `0x32` — play-state latency probe; echo with [`Pong`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Ping {
+    pub id: i32,
+}
+
+impl Packet for Ping {
+    const ID: i32 = 0x32;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Clientbound;
+
+    fn encode<B: BufMut>(&self, dst: &mut B) -> Result<(), ProtoError> {
+        dst.put_i32(self.id);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(src: &mut B) -> Result<Self, ProtoError> {
+        Ok(Self {
+            id: src.read_i32()?,
+        })
+    }
 }
 
 impl Packet for KeepAlive {
@@ -139,6 +275,296 @@ impl Packet for PlayDisconnect {
 // ===========================================================================
 // Serverbound
 // ===========================================================================
+
+/// `0x20` — response to a play-state [`Ping`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Pong {
+    pub id: i32,
+}
+
+impl Packet for Pong {
+    const ID: i32 = 0x20;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Serverbound;
+
+    fn encode<B: BufMut>(&self, dst: &mut B) -> Result<(), ProtoError> {
+        dst.put_i32(self.id);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(src: &mut B) -> Result<Self, ProtoError> {
+        Ok(Self {
+            id: src.read_i32()?,
+        })
+    }
+}
+
+/// `0x0c` — acknowledges that the client closed a server-owned container.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CloseContainer {
+    pub window_id: u8,
+}
+
+/// `0x0e` — replaces the pages of a writable book, optionally signing it with
+/// the supplied title. The slot is the selected hotbar index (0..8).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EditBook {
+    pub slot: i32,
+    pub pages: Vec<String>,
+    pub title: Option<String>,
+}
+
+/// `0x1b` — asks the server to place a known recipe into a crafting grid.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlaceRecipe {
+    pub window_id: i8,
+    pub recipe: String,
+    pub make_all: bool,
+}
+
+impl Packet for PlaceRecipe {
+    const ID: i32 = 0x1b;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Serverbound;
+
+    fn encode<B: BufMut>(&self, dst: &mut B) -> Result<(), ProtoError> {
+        dst.put_i8(self.window_id);
+        dst.put_string(&self.recipe);
+        dst.put_bool(self.make_all);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(src: &mut B) -> Result<Self, ProtoError> {
+        Ok(Self {
+            window_id: src.read_i8()?,
+            recipe: src.read_string(32_767)?,
+            make_all: src.read_bool()?,
+        })
+    }
+}
+
+impl Packet for EditBook {
+    const ID: i32 = 0x0e;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Serverbound;
+
+    fn encode<B: BufMut>(&self, dst: &mut B) -> Result<(), ProtoError> {
+        dst.put_varint(self.slot);
+        dst.put_varint(self.pages.len() as i32);
+        for page in &self.pages {
+            dst.put_string(page);
+        }
+        dst.put_bool(self.title.is_some());
+        if let Some(title) = &self.title {
+            dst.put_string(title);
+        }
+        Ok(())
+    }
+
+    fn decode<B: Buf>(src: &mut B) -> Result<Self, ProtoError> {
+        let slot = src.read_varint()?;
+        let page_count = src.read_varint()?;
+        if !(0..=100).contains(&page_count) {
+            return Err(ProtoError::InvalidEnum {
+                type_name: "EditBook.page_count",
+                value: i64::from(page_count),
+            });
+        }
+        let pages = (0..page_count)
+            .map(|_| src.read_string(8_192))
+            .collect::<Result<_, _>>()?;
+        let title = src.read_bool()?.then(|| src.read_string(128)).transpose()?;
+        Ok(Self { slot, pages, title })
+    }
+}
+
+/// `0x1e` — changes a player action state. Action ids used here are 0/1 for
+/// start/stop sneaking and 3/4 for start/stop sprinting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlayerCommand {
+    pub entity_id: i32,
+    pub action: i32,
+    pub jump_boost: i32,
+}
+
+/// `0x32` — uses the held item without targeting a block (food, bows, buckets,
+/// shields, throwable items, etc.).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UseItem {
+    pub hand: i32,
+    pub sequence: i32,
+}
+
+/// `0x1c` — toggles the client's flying ability state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ServerboundPlayerAbilities {
+    pub flags: i8,
+}
+
+/// `0x18` — moves the root vehicle currently controlled by the player.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VehicleMove {
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+    pub yaw: f32,
+    pub pitch: f32,
+}
+
+/// `0x19` — controls the two paddles of a boat or chest boat.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SteerBoat {
+    pub left_paddle: bool,
+    pub right_paddle: bool,
+}
+
+/// `0x1f` — forwards movement input to a ridden entity. Flag bit 0 jumps and
+/// bit 1 requests dismounting.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SteerVehicle {
+    pub sideways: f32,
+    pub forward: f32,
+    pub flags: u8,
+}
+
+impl Packet for VehicleMove {
+    const ID: i32 = 0x18;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Serverbound;
+
+    fn encode<B: BufMut>(&self, dst: &mut B) -> Result<(), ProtoError> {
+        dst.put_f64(self.x);
+        dst.put_f64(self.y);
+        dst.put_f64(self.z);
+        dst.put_f32(self.yaw);
+        dst.put_f32(self.pitch);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(src: &mut B) -> Result<Self, ProtoError> {
+        Ok(Self {
+            x: src.read_f64()?,
+            y: src.read_f64()?,
+            z: src.read_f64()?,
+            yaw: src.read_f32()?,
+            pitch: src.read_f32()?,
+        })
+    }
+}
+
+impl Packet for SteerBoat {
+    const ID: i32 = 0x19;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Serverbound;
+
+    fn encode<B: BufMut>(&self, dst: &mut B) -> Result<(), ProtoError> {
+        dst.put_bool(self.left_paddle);
+        dst.put_bool(self.right_paddle);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(src: &mut B) -> Result<Self, ProtoError> {
+        Ok(Self {
+            left_paddle: src.read_bool()?,
+            right_paddle: src.read_bool()?,
+        })
+    }
+}
+
+impl Packet for SteerVehicle {
+    const ID: i32 = 0x1f;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Serverbound;
+
+    fn encode<B: BufMut>(&self, dst: &mut B) -> Result<(), ProtoError> {
+        dst.put_f32(self.sideways);
+        dst.put_f32(self.forward);
+        dst.put_u8(self.flags);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(src: &mut B) -> Result<Self, ProtoError> {
+        Ok(Self {
+            sideways: src.read_f32()?,
+            forward: src.read_f32()?,
+            flags: src.read_u8()?,
+        })
+    }
+}
+
+impl Packet for ServerboundPlayerAbilities {
+    const ID: i32 = 0x1c;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Serverbound;
+
+    fn encode<B: BufMut>(&self, dst: &mut B) -> Result<(), ProtoError> {
+        dst.put_i8(self.flags);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(src: &mut B) -> Result<Self, ProtoError> {
+        Ok(Self {
+            flags: src.read_i8()?,
+        })
+    }
+}
+
+impl Packet for UseItem {
+    const ID: i32 = 0x32;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Serverbound;
+
+    fn encode<B: BufMut>(&self, dst: &mut B) -> Result<(), ProtoError> {
+        dst.put_varint(self.hand);
+        dst.put_varint(self.sequence);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(src: &mut B) -> Result<Self, ProtoError> {
+        Ok(Self {
+            hand: src.read_varint()?,
+            sequence: src.read_varint()?,
+        })
+    }
+}
+
+impl Packet for PlayerCommand {
+    const ID: i32 = 0x1e;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Serverbound;
+
+    fn encode<B: BufMut>(&self, dst: &mut B) -> Result<(), ProtoError> {
+        dst.put_varint(self.entity_id);
+        dst.put_varint(self.action);
+        dst.put_varint(self.jump_boost);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(src: &mut B) -> Result<Self, ProtoError> {
+        Ok(Self {
+            entity_id: src.read_varint()?,
+            action: src.read_varint()?,
+            jump_boost: src.read_varint()?,
+        })
+    }
+}
+
+impl Packet for CloseContainer {
+    const ID: i32 = 0x0c;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Serverbound;
+
+    fn encode<B: BufMut>(&self, dst: &mut B) -> Result<(), ProtoError> {
+        dst.put_u8(self.window_id);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(src: &mut B) -> Result<Self, ProtoError> {
+        Ok(Self {
+            window_id: src.read_u8()?,
+        })
+    }
+}
 
 /// `0x12` — our reply to [`KeepAlive`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -731,6 +1157,106 @@ pub struct SetHeldItem {
     pub slot: i16,
 }
 
+/// `0x0a` — selects one of the three enchanting-table offers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EnchantItem {
+    pub window_id: i8,
+    pub enchantment: i8,
+}
+
+/// `0x0a` — presses a numeric button in the current menu. Enchanting offers,
+/// loom patterns, and stonecutter recipes all use this packet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ContainerButtonClick {
+    pub window_id: i8,
+    pub button_id: i8,
+}
+
+/// `0x23` — updates the text field in an open anvil menu.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RenameItem {
+    pub name: String,
+}
+
+/// `0x24` — reports progress for a server-requested resource pack. Vanilla
+/// status ids: 0 loaded, 1 declined, 2 failed download, 3 accepted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResourcePackStatus {
+    pub status: i32,
+}
+
+impl Packet for ResourcePackStatus {
+    const ID: i32 = 0x24;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Serverbound;
+
+    fn encode<B: BufMut>(&self, dst: &mut B) -> Result<(), ProtoError> {
+        dst.put_varint(self.status);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(src: &mut B) -> Result<Self, ProtoError> {
+        Ok(Self {
+            status: src.read_varint()?,
+        })
+    }
+}
+
+impl Packet for RenameItem {
+    const ID: i32 = 0x23;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Serverbound;
+
+    fn encode<B: BufMut>(&self, dst: &mut B) -> Result<(), ProtoError> {
+        dst.put_string(&self.name);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(src: &mut B) -> Result<Self, ProtoError> {
+        Ok(Self {
+            name: src.read_string(50)?,
+        })
+    }
+}
+
+impl Packet for EnchantItem {
+    const ID: i32 = 0x0a;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Serverbound;
+
+    fn encode<B: BufMut>(&self, dst: &mut B) -> Result<(), ProtoError> {
+        dst.put_i8(self.window_id);
+        dst.put_i8(self.enchantment);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(src: &mut B) -> Result<Self, ProtoError> {
+        Ok(Self {
+            window_id: src.read_i8()?,
+            enchantment: src.read_i8()?,
+        })
+    }
+}
+
+impl Packet for ContainerButtonClick {
+    const ID: i32 = 0x0a;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Serverbound;
+
+    fn encode<B: BufMut>(&self, dst: &mut B) -> Result<(), ProtoError> {
+        dst.put_i8(self.window_id);
+        dst.put_i8(self.button_id);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(src: &mut B) -> Result<Self, ProtoError> {
+        Ok(Self {
+            window_id: src.read_i8()?,
+            button_id: src.read_i8()?,
+        })
+    }
+}
+
 impl Packet for SetHeldItem {
     const ID: i32 = 0x28;
     const STATE: State = State::Play;
@@ -937,6 +1463,8 @@ mod tests {
     fn keepalive_roundtrips() {
         roundtrip(&KeepAlive { id: -42 });
         roundtrip(&KeepAliveResponse { id: 9_000_000_000 });
+        roundtrip(&Ping { id: -123 });
+        roundtrip(&Pong { id: -123 });
     }
 
     #[test]
@@ -968,6 +1496,26 @@ mod tests {
             yaw: 45.0,
             pitch: 0.0,
             on_ground: false,
+        });
+    }
+
+    #[test]
+    fn vehicle_control_packets_roundtrip() {
+        roundtrip(&VehicleMove {
+            x: 12.5,
+            y: 63.0,
+            z: -4.25,
+            yaw: 135.0,
+            pitch: 0.0,
+        });
+        roundtrip(&SteerBoat {
+            left_paddle: true,
+            right_paddle: false,
+        });
+        roundtrip(&SteerVehicle {
+            sideways: -1.0,
+            forward: 0.75,
+            flags: 1,
         });
     }
 
@@ -1037,6 +1585,16 @@ mod tests {
             inside_block: false,
             sequence: 7,
         });
+        roundtrip(&EditBook {
+            slot: 4,
+            pages: vec!["first page".to_string(), "second page".to_string()],
+            title: Some("Crabcraft".to_string()),
+        });
+        roundtrip(&PlaceRecipe {
+            window_id: 2,
+            recipe: "minecraft:oak_planks".to_string(),
+            make_all: true,
+        });
     }
 
     #[test]
@@ -1052,6 +1610,18 @@ mod tests {
     #[test]
     fn set_held_item_roundtrips() {
         roundtrip(&SetHeldItem { slot: 4 });
+        roundtrip(&EnchantItem {
+            window_id: 3,
+            enchantment: 2,
+        });
+        roundtrip(&ContainerButtonClick {
+            window_id: 4,
+            button_id: 17,
+        });
+        roundtrip(&RenameItem {
+            name: "Ferris's Pickaxe".into(),
+        });
+        roundtrip(&ResourcePackStatus { status: 3 });
     }
 
     #[test]
@@ -1134,6 +1704,37 @@ mod tests {
             slot: -1,
             item: None,
         });
+    }
+
+    #[test]
+    fn container_lifecycle_packets_roundtrip() {
+        roundtrip(&OpenScreen {
+            window_id: 4,
+            menu_type: 2,
+            title: r#"{"translate":"container.chest"}"#.to_string(),
+        });
+        roundtrip(&ClientboundCloseContainer { window_id: 4 });
+        roundtrip(&CloseContainer { window_id: 4 });
+        roundtrip(&SetContainerData {
+            window_id: 4,
+            property: 2,
+            value: 117,
+        });
+        roundtrip(&PlayerCommand {
+            entity_id: 42,
+            action: 3,
+            jump_boost: 0,
+        });
+        roundtrip(&UseItem {
+            hand: 0,
+            sequence: 19,
+        });
+        roundtrip(&ClientboundPlayerAbilities {
+            flags: 0x06,
+            flying_speed: 0.05,
+            walking_speed: 0.1,
+        });
+        roundtrip(&ServerboundPlayerAbilities { flags: 0x02 });
     }
 
     #[test]

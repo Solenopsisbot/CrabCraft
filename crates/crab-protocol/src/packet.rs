@@ -10,14 +10,14 @@ use crate::error::ProtoError;
 /// [`State::Login`]. After a successful login the connection moves to
 /// [`State::Play`].
 ///
-/// > **Version note:** protocol 764+ (1.20.2 and later) inserts a
-/// > `Configuration` state between `Login` and `Play`. 1.20.1 (763) does not
-/// > have it, so we omit it here and will add it when we add those versions.
+/// Protocol 764+ (1.20.2 and later) inserts [`State::Configuration`] between
+/// Login and Play; 763 transitions directly from Login to Play.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum State {
     Handshaking,
     Status,
     Login,
+    Configuration,
     Play,
 }
 

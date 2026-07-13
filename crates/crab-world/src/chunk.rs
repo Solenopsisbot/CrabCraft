@@ -34,12 +34,20 @@ pub enum BlockStates {
     Array(Box<[u32; SECTION_VOLUME]>),
 }
 
+/// Biome ids for the 4×4×4 quart-resolution cells in a section.
+#[derive(Clone, Debug)]
+pub enum Biomes {
+    Uniform(u32),
+    Array(Box<[u32; SECTION_BIOMES]>),
+}
+
 /// A single 16^3 chunk section.
 #[derive(Clone, Debug)]
 pub struct Section {
     /// Server-reported count of non-air blocks (used to skip empty sections).
     pub block_count: i16,
     pub blocks: BlockStates,
+    pub biomes: Biomes,
 }
 
 impl Section {
@@ -60,6 +68,14 @@ impl Section {
         match &self.blocks {
             BlockStates::Uniform(v) => *v,
             BlockStates::Array(a) => a[Self::index(x, y, z)],
+        }
+    }
+
+    pub fn biome(&self, x: usize, y: usize, z: usize) -> u32 {
+        let index = ((y >> 2) << 4) | ((z >> 2) << 2) | (x >> 2);
+        match &self.biomes {
+            Biomes::Uniform(value) => *value,
+            Biomes::Array(values) => values[index],
         }
     }
 
@@ -96,10 +112,28 @@ impl Chunk {
     /// Parsing "until the buffer is empty" is wrong: the buffer can carry
     /// trailing padding that would be misread as extra (corrupt) sections.
     pub fn parse<B: Buf>(buf: &mut B, section_count: usize) -> Result<Self, ProtoError> {
+        Self::parse_with_nbt(buf, section_count, false)
+    }
+
+    /// Decodes the 1.20.2+ packet form, whose heightmap uses unnamed network
+    /// NBT rather than classic named-root NBT.
+    pub fn parse_network<B: Buf>(buf: &mut B, section_count: usize) -> Result<Self, ProtoError> {
+        Self::parse_with_nbt(buf, section_count, true)
+    }
+
+    fn parse_with_nbt<B: Buf>(
+        buf: &mut B,
+        section_count: usize,
+        anonymous_nbt: bool,
+    ) -> Result<Self, ProtoError> {
         let x = buf.read_i32()?;
         let z = buf.read_i32()?;
         // Heightmaps NBT — read it purely to stay aligned with the buffer.
-        let _heightmaps = nbt::read_nbt(buf)?;
+        let _heightmaps = if anonymous_nbt {
+            nbt::read_anonymous_nbt(buf)?
+        } else {
+            nbt::read_nbt(buf)?
+        };
 
         let data = buf.read_byte_array()?;
         let mut cursor: &[u8] = &data;
@@ -126,10 +160,19 @@ fn parse_section<B: Buf>(buf: &mut B) -> Result<Section, ProtoError> {
     };
     // Biomes share the format (over 64 entries, indirect up to 3 bits). We must
     // decode them to advance the cursor, but don't retain them yet.
-    let _ = read_paletted(buf, SECTION_BIOMES, 3)?;
+    let biomes = match read_paletted(buf, SECTION_BIOMES, 3)? {
+        Paletted::Single(value) => Biomes::Uniform(value),
+        Paletted::Values(values) => Biomes::Array(
+            values
+                .into_boxed_slice()
+                .try_into()
+                .map_err(|_| ProtoError::UnexpectedEof { needed: 0 })?,
+        ),
+    };
     Ok(Section {
         block_count,
         blocks,
+        biomes,
     })
 }
 
@@ -276,6 +319,7 @@ mod tests {
         let mut s = Section {
             block_count: 0,
             blocks: BlockStates::Uniform(0),
+            biomes: Biomes::Uniform(0),
         };
         s.set_block_state(1, 2, 3, 42);
         assert_eq!(s.block_state(1, 2, 3), 42);

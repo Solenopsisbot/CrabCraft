@@ -462,6 +462,63 @@ pub fn menu_geometry(
     (c, g, Vec::new())
 }
 
+/// Draws active vanilla status-effect icons down the top-right of the HUD.
+#[must_use]
+pub fn status_effect_geometry(gui: &GuiAtlas, effect_ids: &[i32], aspect: f32) -> Vec<TexVertex> {
+    const NAMES: [&str; 33] = [
+        "speed",
+        "slowness",
+        "haste",
+        "mining_fatigue",
+        "strength",
+        "instant_health",
+        "instant_damage",
+        "jump_boost",
+        "nausea",
+        "regeneration",
+        "resistance",
+        "fire_resistance",
+        "water_breathing",
+        "invisibility",
+        "blindness",
+        "night_vision",
+        "hunger",
+        "weakness",
+        "poison",
+        "wither",
+        "health_boost",
+        "absorption",
+        "saturation",
+        "glowing",
+        "levitation",
+        "luck",
+        "unluck",
+        "slow_falling",
+        "conduit_power",
+        "dolphins_grace",
+        "bad_omen",
+        "hero_of_the_village",
+        "darkness",
+    ];
+    let mut vertices = Vec::new();
+    let size = 0.09;
+    let width = size / aspect.max(0.01);
+    for (visible, &id) in effect_ids.iter().enumerate() {
+        let Some(name) = usize::try_from(id - 1).ok().and_then(|i| NAMES.get(i)) else {
+            continue;
+        };
+        let Some(uv) = gui.sprite(name) else {
+            continue;
+        };
+        let column = visible / 8;
+        let row = visible % 8;
+        let x1 = 0.97 - column as f32 * (width + 0.02);
+        let y1 = 0.97 - row as f32 * (size + 0.02);
+        push_tex_quad(&mut vertices, x1 - width, y1 - size, x1, y1, uv);
+    }
+    vertices
+}
+
 /// Builds the open-inventory panel from the vanilla container background plus
 /// item icons. `items` is indexed by server window slot (0..46). Returns
 /// `(colour, gui_tex, item_tex)`.
@@ -488,6 +545,354 @@ pub fn inventory_geometry(
         }
     }
     (c, g, t)
+}
+
+/// NDC bounds for a generic 9-column container with `rows` storage rows.
+#[must_use]
+pub fn container_rect(rows: usize, aspect: f32) -> (f32, f32, f32, f32) {
+    let height = 114.0 + rows.clamp(1, 6) as f32 * 18.0;
+    sprite_rect(
+        0.0,
+        0.0,
+        0.78 * height / 166.0,
+        176.0,
+        height,
+        aspect.max(0.01),
+    )
+}
+
+/// NDC bounds of a slot in a generic 9-column container. Container slots come
+/// first, followed by the player's 27 main slots and 9 hotbar slots.
+#[must_use]
+pub fn container_slot_rect(
+    rect: (f32, f32, f32, f32),
+    rows: usize,
+    slot: usize,
+) -> (f32, f32, f32, f32) {
+    let rows = rows.clamp(1, 6);
+    let storage = rows * 9;
+    let (px, py) = if slot < storage {
+        (
+            8.0 + (slot % 9) as f32 * 18.0,
+            18.0 + (slot / 9) as f32 * 18.0,
+        )
+    } else {
+        let i = slot - storage;
+        if i < 27 {
+            (
+                8.0 + (i % 9) as f32 * 18.0,
+                32.0 + rows as f32 * 18.0 + (i / 9) as f32 * 18.0,
+            )
+        } else {
+            (
+                8.0 + (i.min(35) - 27) as f32 * 18.0,
+                90.0 + rows as f32 * 18.0,
+            )
+        }
+    };
+    let height = 114.0 + rows as f32 * 18.0;
+    let (lx, ty) = px_to_ndc(rect, 176.0, height, px + 1.0, py + 1.0);
+    let (rx, by) = px_to_ndc(rect, 176.0, height, px + 17.0, py + 17.0);
+    (lx, by, rx, ty)
+}
+
+fn crop_uv_dims(
+    uv: [f32; 4],
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    source_w: f32,
+    source_h: f32,
+) -> [f32; 4] {
+    let du = uv[2] - uv[0];
+    let dv = uv[3] - uv[1];
+    [
+        uv[0] + du * x / source_w,
+        uv[1] + dv * y / source_h,
+        uv[0] + du * (x + w) / source_w,
+        uv[1] + dv * (y + h) / source_h,
+    ]
+}
+
+fn crop_uv(uv: [f32; 4], x: f32, y: f32, w: f32, h: f32) -> [f32; 4] {
+    crop_uv_dims(uv, x, y, w, h, 176.0, 222.0)
+}
+
+/// Builds a vanilla generic-container panel (chests, barrels, ender chests and
+/// shulker boxes) and its item icons.
+#[must_use]
+pub fn container_geometry(
+    gui: &GuiAtlas,
+    items: &[Option<[f32; 4]>],
+    rows: usize,
+    aspect: f32,
+) -> (Vec<ColorVertex>, Vec<TexVertex>, Vec<TexVertex>) {
+    let rows = rows.clamp(1, 6);
+    let mut c = Vec::new();
+    let mut g = Vec::new();
+    let mut t = Vec::new();
+    let rect = container_rect(rows, aspect);
+    let height = 114.0 + rows as f32 * 18.0;
+    let top_h = rows as f32 * 18.0 + 17.0;
+
+    if let Some(uv) = gui.sprite("generic_54") {
+        let (_, split_y) = px_to_ndc(rect, 176.0, height, 0.0, top_h);
+        push_tex_quad(
+            &mut g,
+            rect.0,
+            split_y,
+            rect.2,
+            rect.3,
+            crop_uv(uv, 0.0, 0.0, 176.0, top_h),
+        );
+        let bottom_h = 96.0;
+        let (_, bottom_y) = px_to_ndc(rect, 176.0, height, 0.0, top_h + bottom_h);
+        push_tex_quad(
+            &mut g,
+            rect.0,
+            bottom_y,
+            rect.2,
+            split_y,
+            crop_uv(uv, 0.0, 126.0, 176.0, bottom_h),
+        );
+    } else {
+        push_color_quad(&mut c, rect.0, rect.1, rect.2, rect.3, [0.14, 0.14, 0.17]);
+    }
+    for (slot, uv) in items.iter().enumerate().take(rows * 9 + 36) {
+        if let Some(uv) = uv {
+            let (x0, y0, x1, y1) = container_slot_rect(rect, rows, slot);
+            push_tex_quad(&mut t, x0, y0, x1, y1, *uv);
+        }
+    }
+    (c, g, t)
+}
+
+/// NDC bounds of a furnace-family menu slot. Slots 0/1/2 are input, fuel and
+/// output; slots 3..29 are the player main inventory and 30..38 the hotbar.
+#[must_use]
+pub fn furnace_slot_rect(rect: (f32, f32, f32, f32), slot: usize) -> (f32, f32, f32, f32) {
+    let (px, py) = match slot {
+        0 => (56.0, 17.0),
+        1 => (56.0, 53.0),
+        2 => (116.0, 35.0),
+        3..=29 => {
+            let i = slot - 3;
+            (8.0 + (i % 9) as f32 * 18.0, 84.0 + (i / 9) as f32 * 18.0)
+        }
+        _ => (8.0 + (slot.min(38) - 30) as f32 * 18.0, 142.0),
+    };
+    let (lx, ty) = px_to_ndc(rect, 176.0, 166.0, px + 1.0, py + 1.0);
+    let (rx, by) = px_to_ndc(rect, 176.0, 166.0, px + 17.0, py + 17.0);
+    (lx, by, rx, ty)
+}
+
+/// NDC bounds for dispenser/dropper, brewing-stand and hopper menus.
+#[must_use]
+pub fn simple_container_rect(texture: &str, aspect: f32) -> (f32, f32, f32, f32) {
+    let height = if texture == "hopper" { 133.0 } else { 166.0 };
+    sprite_rect(
+        0.0,
+        0.0,
+        0.78 * height / 166.0,
+        176.0,
+        height,
+        aspect.max(0.01),
+    )
+}
+
+/// Slot bounds for the simple workstation/container families.
+#[must_use]
+pub fn simple_container_slot_rect(
+    rect: (f32, f32, f32, f32),
+    texture: &str,
+    slot: usize,
+) -> (f32, f32, f32, f32) {
+    let (container_slots, panel_h, main_y, hotbar_y) = match texture {
+        "dispenser" => (9, 166.0, 84.0, 142.0),
+        "crafting_table" => (10, 166.0, 84.0, 142.0),
+        "enchanting_table" => (2, 166.0, 84.0, 142.0),
+        "anvil" | "grindstone" | "cartography_table" => (3, 166.0, 84.0, 142.0),
+        "smithing" => (4, 166.0, 84.0, 142.0),
+        "loom" => (4, 166.0, 84.0, 142.0),
+        "stonecutter" => (2, 166.0, 84.0, 142.0),
+        "hopper" => (5, 133.0, 51.0, 109.0),
+        _ => (5, 166.0, 84.0, 142.0),
+    };
+    let (px, py) = if slot < container_slots {
+        match texture {
+            "dispenser" => (
+                62.0 + (slot % 3) as f32 * 18.0,
+                17.0 + (slot / 3) as f32 * 18.0,
+            ),
+            "hopper" => (44.0 + slot as f32 * 18.0, 20.0),
+            "brewing_stand" => {
+                const BREWING: [(f32, f32); 5] = [
+                    (56.0, 51.0),
+                    (79.0, 58.0),
+                    (102.0, 51.0),
+                    (79.0, 17.0),
+                    (17.0, 17.0),
+                ];
+                BREWING[slot]
+            }
+            "crafting_table" => {
+                if slot == 0 {
+                    (124.0, 35.0)
+                } else {
+                    let grid = slot - 1;
+                    (
+                        30.0 + (grid % 3) as f32 * 18.0,
+                        17.0 + (grid / 3) as f32 * 18.0,
+                    )
+                }
+            }
+            "enchanting_table" => [(15.0, 47.0), (35.0, 47.0)][slot],
+            "anvil" => [(27.0, 47.0), (76.0, 47.0), (134.0, 47.0)][slot],
+            "grindstone" => [(49.0, 19.0), (49.0, 40.0), (129.0, 34.0)][slot],
+            "smithing" => [(8.0, 48.0), (26.0, 48.0), (44.0, 48.0), (98.0, 48.0)][slot],
+            "cartography_table" => [(15.0, 15.0), (15.0, 52.0), (145.0, 39.0)][slot],
+            "loom" => [(13.0, 26.0), (33.0, 26.0), (23.0, 45.0), (143.0, 57.0)][slot],
+            "stonecutter" => [(20.0, 33.0), (143.0, 33.0)][slot],
+            _ => (8.0, 8.0),
+        }
+    } else {
+        let player = slot - container_slots;
+        if player < 27 {
+            (
+                8.0 + (player % 9) as f32 * 18.0,
+                main_y + (player / 9) as f32 * 18.0,
+            )
+        } else {
+            (8.0 + (player.min(35) - 27) as f32 * 18.0, hotbar_y)
+        }
+    };
+    panel_pixel_rect(rect, 176.0, panel_h, px + 1.0, py + 1.0, 16.0, 16.0)
+}
+
+/// Clickable bounds of enchanting offer `0..=2`.
+#[must_use]
+pub fn enchantment_option_rect(rect: (f32, f32, f32, f32), option: usize) -> (f32, f32, f32, f32) {
+    panel_pixel_rect(
+        rect,
+        176.0,
+        166.0,
+        60.0,
+        14.0 + option.min(2) as f32 * 19.0,
+        108.0,
+        19.0,
+    )
+}
+
+/// Builds dispenser/dropper, brewing-stand, or hopper menu geometry.
+#[must_use]
+pub fn simple_container_geometry(
+    gui: &GuiAtlas,
+    items: &[Option<[f32; 4]>],
+    texture: &str,
+    aspect: f32,
+) -> (Vec<ColorVertex>, Vec<TexVertex>, Vec<TexVertex>) {
+    let mut color = Vec::new();
+    let mut gui_vertices = Vec::new();
+    let mut item_vertices = Vec::new();
+    let rect = simple_container_rect(texture, aspect);
+    if let Some(uv) = gui.sprite(texture) {
+        push_tex_quad(&mut gui_vertices, rect.0, rect.1, rect.2, rect.3, uv);
+    } else {
+        push_color_quad(
+            &mut color,
+            rect.0,
+            rect.1,
+            rect.2,
+            rect.3,
+            [0.14, 0.14, 0.17],
+        );
+    }
+    for (slot, uv) in items.iter().enumerate() {
+        if let Some(uv) = uv {
+            let (x0, y0, x1, y1) = simple_container_slot_rect(rect, texture, slot);
+            push_tex_quad(&mut item_vertices, x0, y0, x1, y1, *uv);
+        }
+    }
+    (color, gui_vertices, item_vertices)
+}
+
+fn panel_pixel_rect(
+    rect: (f32, f32, f32, f32),
+    panel_w: f32,
+    panel_h: f32,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+) -> (f32, f32, f32, f32) {
+    let (x0, y1) = px_to_ndc(rect, panel_w, panel_h, x, y);
+    let (x1, y0) = px_to_ndc(rect, panel_w, panel_h, x + w, y + h);
+    (x0, y0, x1, y1)
+}
+
+/// Builds a furnace, blast-furnace or smoker panel with server-driven flame and
+/// cook-arrow progress. `properties` are remaining burn, total burn, cook, total cook.
+#[must_use]
+pub fn furnace_geometry(
+    gui: &GuiAtlas,
+    items: &[Option<[f32; 4]>],
+    texture: &str,
+    properties: [i16; 4],
+    aspect: f32,
+) -> (Vec<ColorVertex>, Vec<TexVertex>, Vec<TexVertex>) {
+    let mut c = Vec::new();
+    let mut g = Vec::new();
+    let mut t = Vec::new();
+    let rect = inventory_rect(aspect);
+    if let Some(uv) = gui.sprite(texture) {
+        push_tex_quad(&mut g, rect.0, rect.1, rect.2, rect.3, uv);
+    } else {
+        push_color_quad(&mut c, rect.0, rect.1, rect.2, rect.3, [0.14, 0.14, 0.17]);
+    }
+
+    let full_name = format!("{texture}_full");
+    if let Some(full) = gui.sprite(&full_name) {
+        let (lit_pixels, arrow_pixels) = furnace_progress_pixels(properties);
+        if lit_pixels > 0 {
+            let lit = lit_pixels as f32;
+            let dest =
+                panel_pixel_rect(rect, 176.0, 166.0, 56.0, 36.0 + 13.0 - lit, 14.0, lit + 1.0);
+            let uv = crop_uv_dims(full, 176.0, 13.0 - lit, 14.0, lit + 1.0, 256.0, 256.0);
+            push_tex_quad(&mut g, dest.0, dest.1, dest.2, dest.3, uv);
+        }
+        if arrow_pixels > 0 {
+            let width = arrow_pixels as f32;
+            let dest = panel_pixel_rect(rect, 176.0, 166.0, 79.0, 34.0, width, 16.0);
+            let uv = crop_uv_dims(full, 176.0, 14.0, width, 16.0, 256.0, 256.0);
+            push_tex_quad(&mut g, dest.0, dest.1, dest.2, dest.3, uv);
+        }
+    }
+    for (slot, uv) in items.iter().enumerate().take(39) {
+        if let Some(uv) = uv {
+            let (x0, y0, x1, y1) = furnace_slot_rect(rect, slot);
+            push_tex_quad(&mut t, x0, y0, x1, y1, *uv);
+        }
+    }
+    (c, g, t)
+}
+
+fn furnace_progress_pixels(properties: [i16; 4]) -> (u8, u8) {
+    let burn = f32::from(properties[0].max(0));
+    let burn_total = f32::from(properties[1].max(0));
+    let lit = if burn > 0.0 && burn_total > 0.0 {
+        ((burn * 13.0 / burn_total).ceil() as i32).clamp(1, 13) as u8
+    } else {
+        0
+    };
+    let cook = f32::from(properties[2].max(0));
+    let cook_total = f32::from(properties[3].max(0));
+    let arrow = if cook > 0.0 && cook_total > 0.0 {
+        (((cook * 24.0 / cook_total).floor() as i32).clamp(0, 24) + 1) as u8
+    } else {
+        0
+    };
+    (lit, arrow)
 }
 
 /// All vertex streams for one HUD frame: flat-coloured quads, GUI-atlas sprites
@@ -742,5 +1147,77 @@ mod tests {
         assert_eq!([t[0][2], t[0][3]], [0.1, 0.2]);
         // Third vertex is bottom-right -> (u1, v1).
         assert_eq!([t[2][2], t[2][3]], [0.3, 0.4]);
+    }
+
+    #[test]
+    fn generic_container_geometry_places_all_slot_groups() {
+        let gui = crab_assets::GuiAtlas::empty();
+        let uv = [0.1, 0.2, 0.3, 0.4];
+        let mut items = vec![None; 27 + 36];
+        items[0] = Some(uv);
+        items[27] = Some(uv);
+        items[62] = Some(uv);
+        let (_color, _gui, item) = container_geometry(&gui, &items, 3, 1.0);
+        assert_eq!(item.len(), 18);
+
+        let panel = container_rect(3, 1.0);
+        for slot in [0, 26, 27, 53, 54, 62] {
+            let rect = container_slot_rect(panel, 3, slot);
+            assert!(rect.0 >= panel.0 && rect.2 <= panel.2);
+            assert!(rect.1 >= panel.1 && rect.3 <= panel.3);
+        }
+    }
+
+    #[test]
+    fn furnace_layout_and_progress_are_vanilla_scaled() {
+        let panel = inventory_rect(1.0);
+        for slot in [0, 1, 2, 3, 29, 30, 38] {
+            let rect = furnace_slot_rect(panel, slot);
+            assert!(rect.0 >= panel.0 && rect.2 <= panel.2);
+            assert!(rect.1 >= panel.1 && rect.3 <= panel.3);
+        }
+        assert_eq!(furnace_progress_pixels([100, 200, 50, 200]), (7, 7));
+        assert_eq!(furnace_progress_pixels([0, 200, 0, 200]), (0, 0));
+
+        let gui = crab_assets::GuiAtlas::empty();
+        let mut items = vec![None; 39];
+        items[0] = Some([0.0, 0.0, 1.0, 1.0]);
+        items[38] = Some([0.0, 0.0, 1.0, 1.0]);
+        let (_, _, item) = furnace_geometry(&gui, &items, "furnace", [0; 4], 1.0);
+        assert_eq!(item.len(), 12);
+    }
+
+    #[test]
+    fn simple_container_layouts_include_workstation_and_player_slots() {
+        let gui = GuiAtlas::empty();
+        for (texture, slots) in [
+            ("dispenser", 45),
+            ("brewing_stand", 41),
+            ("crafting_table", 46),
+            ("enchanting_table", 38),
+            ("anvil", 39),
+            ("grindstone", 39),
+            ("smithing", 40),
+            ("cartography_table", 39),
+            ("loom", 40),
+            ("stonecutter", 38),
+            ("hopper", 41),
+        ] {
+            let items = vec![Some([0.0, 0.0, 1.0, 1.0]); slots];
+            let (_, _, item) = simple_container_geometry(&gui, &items, texture, 1.0);
+            assert_eq!(item.len(), slots * 6);
+            let rect = simple_container_rect(texture, 1.0);
+            let first = simple_container_slot_rect(rect, texture, 0);
+            let last = simple_container_slot_rect(rect, texture, slots - 1);
+            assert!(
+                first.1 > last.1,
+                "container slots should be above the hotbar"
+            );
+        }
+    }
+
+    #[test]
+    fn status_effect_hud_skips_icons_missing_from_the_atlas() {
+        assert!(status_effect_geometry(&GuiAtlas::empty(), &[1, 2, 33], 1.0).is_empty());
     }
 }

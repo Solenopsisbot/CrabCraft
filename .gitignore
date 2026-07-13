@@ -6,6 +6,10 @@
 # local dev server / assets we must never commit (not ours to redistribute)
 /run
 /assets-cache
+/1.20.1.jar
+*.jar
+*.zip
+*.mcpack
 
 # user-provided Mojang assets (EULA) — not ours to commit
 /bedrock-samples

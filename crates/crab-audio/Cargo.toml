@@ -9,5 +9,5 @@ repository.workspace = true
 [dependencies]
 thiserror.workspace = true
 tracing.workspace = true
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
 rodio = "0.19"

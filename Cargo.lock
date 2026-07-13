@@ -648,6 +648,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "bytemuck",
+ "bytes",
  "crab-assets",
  "crab-audio",
  "crab-auth",
@@ -658,12 +659,18 @@ dependencies = [
  "crab-render",
  "crab-world",
  "glam",
+ "md5",
  "pollster",
+ "reqwest",
+ "serde_json",
+ "sha1",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
  "wgpu",
  "winit",
+ "zip",
 ]
 
 [[package]]
@@ -1640,6 +1647,12 @@ checksum = "d1525a2a28c7f4fa0fc98bb91ae755d1e2d1505079e05539e35bc876b5d65ae9"
 dependencies = [
  "regex-automata",
 ]
+
+[[package]]
+name = "md5"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "490cc448043f947bae3cbee9c203358d62dbee0db12107a74be5c30ccfd09771"
 
 [[package]]
 name = "memchr"
@@ -2823,6 +2836,7 @@ version = "1.0.150"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e8014e44b4736ed0538adeecded0fce2a272f22dc9578a7eb6b2d9993c74cfb9"
 dependencies = [
+ "indexmap",
  "itoa",
  "memchr",
  "serde",

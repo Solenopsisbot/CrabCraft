@@ -47,6 +47,8 @@ fn main() {
             1.0,
             scale,
             yaw,
+            yaw,
+            0.0,
         ),
     };
 
