@@ -6,7 +6,7 @@ use std::io::{Read, Seek};
 
 use serde::Deserialize;
 
-use crate::{read_model, ModelJson};
+use crate::{read_model, DisplayTransform, ModelJson};
 
 /// A cuboid element with per-face textures and an optional rotation.
 #[derive(Deserialize, Clone, Debug)]
@@ -41,6 +41,9 @@ pub struct FaceJson {
     pub cullface: Option<String>,
     #[serde(default)]
     pub tintindex: Option<i32>,
+    /// Clockwise texture rotation (0/90/180/270 degrees).
+    #[serde(default)]
+    pub rotation: i32,
 }
 
 /// A model with its parent chain fully merged.
@@ -48,6 +51,7 @@ pub struct FaceJson {
 pub struct Resolved {
     pub textures: HashMap<String, String>,
     pub elements: Vec<ElementJson>,
+    pub display: HashMap<String, DisplayTransform>,
 }
 
 /// Resolves a model by name (e.g. `"block/stone"`), merging parents. Results
@@ -81,6 +85,9 @@ fn resolve_depth<R: Read + Seek>(
         };
         for (key, value) in json.textures {
             resolved.textures.insert(key, value);
+        }
+        for (key, value) in json.display {
+            resolved.display.insert(key, value);
         }
         if let Some(elements) = json.elements {
             resolved.elements = elements;

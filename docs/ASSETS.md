@@ -17,6 +17,28 @@ The entity-model path may point at the sample repository root, its
 `resource_pack` directory, or the final `models/entity` directory. The loader
 locates the model directory without copying it into the project.
 
+## Blockstate and model resolution
+
+For every loaded block, the asset pipeline reads the vanilla
+`blockstates/<name>.json` definition and matches its `variants` and `multipart`
+conditions against the active protocol registry's generated property schema.
+This preserves the registry's property order and values instead of inferring
+state radices from block names. Multipart `OR`/`AND` conditions, pipe-separated
+values, weighted alternatives, model rotations, per-face UV rotations, and
+`uvlock` are carried into chunk meshing. The model loader then follows parent
+chains and texture variables before adding the resolved textures to the atlas.
+
+Legacy family-specific model lookups remain a non-fatal fallback for incomplete
+or custom packs. A missing blockstate, model, or texture never causes a client
+jar to be copied or extracted into the repository.
+
+Item models use the same parent-chain resolver. Items with resolved element
+geometry retain their inherited `ground` display rotation, translation, and
+scale when rendered as dropped entities; generated flat-layer items remain
+camera-facing sprites. Falling-block entities are different from dropped items:
+their Spawn Entity data is an exact global block-state ID, so they select that
+state's variant/multipart geometry rather than an inventory item model.
+
 ## Entity model resolution
 
 Java entity models are code-defined and are not present in a client jar. The
@@ -31,6 +53,19 @@ important because IDs move between releases even when the asset names do not.
 Missing geometry or textures are non-fatal: the entity retains its generated
 registry dimensions and renders as a coloured bounds box. Dropped items and
 falling blocks use their item/block rendering paths rather than mob geometry.
+Humanoid equipment uses inflated copies of the matching model bones, so armour
+follows movement and authoritative pose metadata instead of remaining as
+axis-aligned boxes around the entity.
+
+The resolver covers every ordinary entity in the supported registry through a
+direct Mojang sample filename or an explicit tested alias. Java texture aliases
+also cover climate variants and relocated projectile/family textures while
+retaining older direct-path fallbacks. Because the Bedrock sample pack does not
+publish boats, Crabcraft supplies a small Java-style hull/raft geometry and
+still reads each wood/chest texture from the user's jar. Item-shaped projectiles
+use item-atlas sprites, primed TNT uses its block model, and entity bones named
+as wings, fins, tails, or paddles receive continuous procedural motion in
+addition to walk, attack, hurt, and pose animation.
 
 When adding an alias:
 

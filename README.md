@@ -1,6 +1,6 @@
 # Crabcraft
 
-A Minecraft **Java Edition 1.20.1–1.21.4** client written from scratch in **pure Rust**.
+A Minecraft **Java Edition 1.20.1–1.21.5** client written from scratch in **pure Rust**.
 
 [![CI](https://github.com/Solenopsisbot/CrabCraft/actions/workflows/ci.yml/badge.svg)](https://github.com/Solenopsisbot/CrabCraft/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
@@ -12,8 +12,8 @@ connection like a real player, simulates physics, renders the world, and
 connection.
 
 Protocol 763 (1.20/1.20.1) is the default. Set `CRABCRAFT_PROTOCOL=764`, `765`,
-`766`, `767`, `768`, `769`, or a matching version string (`1.20.2` through
-`1.21.4`) for newer servers. Protocol 764+ includes the Configuration state, registry transfer,
+`766`, `767`, `768`, `769`, `770`, or a matching version string (`1.20.2` through
+`1.21.5`) for newer servers. Protocol 764+ includes the Configuration state, registry transfer,
 network-NBT chunk data, chunk-batch acknowledgement, and versioned packet-ID
 profiles. Protocol 765 additionally handles NBT text components, UUID-addressed
 resource packs and removal, score reset/format packets, and play-to-configuration
@@ -36,6 +36,10 @@ Protocol 769 adds the 1.21.4 Pale Garden block/item/entity registries, the
 slot updates, revised player-list/particle fields, and changed held-item and
 vehicle payloads.
 
+Protocol 770 adds the 1.21.5 Spring to Life registries, the revised chunk
+heightmap array, chat checksum, shifted game-test/play packet maps, and the
+reorganized 96-type item-component registry.
+
 Crabcraft is under active development. The feature inventory below distinguishes
 implemented behavior from the remaining parity work; it is not yet a drop-in
 replacement for Mojang's client.
@@ -43,7 +47,7 @@ replacement for Mojang's client.
 ## What works today
 
 The core path is verified end-to-end against vanilla 1.20.1, 1.20.4, 1.20.6,
-1.21.1, 1.21.3, and 1.21.4 servers (offline mode unless noted), with protocol codecs and mappings
+1.21.1, 1.21.3, 1.21.4, and 1.21.5 servers (offline mode unless noted), with protocol codecs and mappings
 tested for every supported profile:
 
 - TCP connection, handshake, and **login** (with packet compression)
@@ -65,6 +69,10 @@ tested for every supported profile:
   **Shift sneak** (including crouched speed, eye height, and server pose state),
   plus reliable vanilla-style **double-Space Creative/Spectator flight**,
   Spectator noclip, and **F main/offhand swapping** with local prediction
+- **Camera perspectives**: **F5** cycles first person, third-person rear, and
+  third-person front views; third person renders the local animated player and
+  hides first-person hand overlays, with camera distance pulled forward by
+  nearby blocks to avoid wall clipping
 - **Advanced movement**: sprint-swimming with low pose/eye height and
   equipped-Elytra fall-flying initiation with reduced glide gravity
 - **Vehicles**: local mount/dismount tracking, camera/seat synchronization,
@@ -142,9 +150,9 @@ tested for every supported profile:
   applied to local movement, mining, and gravity, plus vanilla HUD icons
 - **Item/block use**: empty-hand interactions, doors/buttons/containers while
   holding blocks, air-use for food/bows/buckets/shields, and release-use packets
-- **Pause menu**: **Esc** opens a menu with the vanilla button sprites
-  (Back to Game / Controls / Quit), hover highlight + click, and an in-game
-  controls reference
+- **Pause/options menus**: **Esc** opens a menu with the vanilla button sprites,
+  an in-game controls reference, and live FOV, mouse-sensitivity, and fullscreen
+  settings
 - **Chat & commands**: **T** to chat, **/** for a command; messages send (chat +
   Chat Command packets) and incoming system chat shows in an on-screen log
 - **Server overlays**: action-bar text, timed titles/subtitles, stacked boss
@@ -292,15 +300,23 @@ Microsoft account. Using the official server jar:
  - [x] Entity bone rest rotations + interpolation + procedural walk animation
  - [x] Version-correct entity pose metadata with crouch/swim/glide/sleep/death transforms
 - [x] Entity metadata: slime/magma-cube size scaling, dropped-item icons
+- [x] Dropped 3D item models use inherited vanilla `ground` transforms; falling
+  blocks retain their exact blockstate model
 - [x] Real GUI textures + bitmap font; stack-size numbers
 - [x] Inventory open + click-to-move/swap items; hotbar slot switching
 - [x] Chat + commands (send/receive, on-screen log)
  - [x] Sounds: per-block break / place / mining-hit / footstep / hurt / attack via `sounds.json`
  - [x] Crafting (2×2) + armour via the full inventory window; left/right clicks
  - [x] Real HUD (hearts / hunger / XP+level); pause menu with vanilla buttons
+ - [x] In-game options for FOV, mouse sensitivity, and fullscreen mode
+ - [x] F5 first/rear/front camera cycling with an animated local-player model
  - [x] Player model (humanoid + default skin) for other players
  - [x] Entity body/head yaw facing; block-breaking crack overlay; aliased mob models
- - [ ] Blockstate variants, multipart models, and biome tint
+ - [x] Bone-following armour layers inherit entity animation and pose transforms
+ - [x] Registry-driven blockstate variants, multipart models, weighted choices,
+   model/face rotations, UV locking, and biome tint
+   - [x] Vanilla blockstate JSON is matched against generated state-property
+     schemas for every supported registry profile
    - [x] State-aware top/bottom, facing, straight/inner/outer stair models
    - [x] Multipart connected fence, pane/bar, and low/tall wall models
    - [x] Open/hinged doors and trapdoors; straight, corner, ascending, and powered rails
@@ -317,14 +333,15 @@ Microsoft account. Using the official server jar:
  - [x] Cursor-facing 3D player preview in the inventory screen
  - [x] Server-driven spatial mob ambient sounds with range/volume attenuation
  - [x] Java-family texture aliases plus shared projectile and minecart geometry
- - [ ] Remaining per-mob geometry and hitbox models
-- [ ] Precise per-block collision shapes
+ - [x] Registry-complete mob/vehicle geometry resolution with generated hitbox
+   dimensions, built-in textured boats/rafts, and item/block-shaped entities
+- [x] Precise generated per-state collision shapes for every supported registry
   - [x] Empty shapes: fluids, plants, rails, torches, redstone, signs, and similar blocks
   - [x] State-aware top/bottom/double slabs and full stair variants + 0.6-block auto-step
   - [x] Connected fences/walls/panes, gates, doors/trapdoors, snow layers, chests, beds, pots, and common low blocks
   - [x] Specialized cauldron/composter, hopper, anvil, bell, head/skull, and candle shapes
   - [x] Rare utility/decorative shapes (grindstones, lecterns, chains, sea pickles, brewing stands, lanterns)
-  - [ ] Exhaustive generated voxel shapes for every remaining block state
+  - [x] Exhaustive deduplicated vanilla voxel shapes for every global block state
 - [x] Protocol 764 / 1.20.2 login + Configuration state, registry transfer,
   configuration keepalive/ping/resource packs, chunk batching, and shifted play IDs
 - [x] Protocol 765 / 1.20.3–1.20.4 login, configuration, packet mappings,
@@ -341,7 +358,10 @@ Microsoft account. Using the official server jar:
   - [x] Bundle contents, scroll selection, tooltip feedback, and selection packets
 - [x] Protocol 769 / 1.21.4 Pale Garden registries, Player Loaded, packet-map and
   changed-payload codecs, component inventory, and official-server live validation
-- [ ] Protocol 770+ (1.21.5 and newer) registries and incremental packet schemas
+- [x] Protocol 770 / 1.21.5 Spring to Life registries, shifted packet maps,
+  chunk heightmap arrays, chat checksum, reorganized components, and official-server
+  core/component live validation
+- [ ] Protocol 771+ (newer than 1.21.5) registries and packet schemas
 - [ ] (Far future, maybe) Forge mod support — see the note below
 
 ### On Forge mods

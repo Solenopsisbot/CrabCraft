@@ -45,6 +45,18 @@ uniform and a viewport derived from the vanilla inventory texture's pixel
 bounds. This keeps world depth from clipping the player and keeps slot icons and
 tooltips above the model.
 
+Window-local presentation preferences stay outside authoritative game state.
+The pause/options UI updates camera FOV, mouse sensitivity, and the winit
+fullscreen mode immediately; none of those settings mutate network-owned
+`Shared` data or packet behavior.
+
+Camera perspective is also window-local. F5 cycles first person and two
+third-person orbit directions; third-person views append the local humanoid to
+the model vertex stream using the same pose/walk/swing transforms as remote
+players while suppressing first-person hand quads.
+The camera arm is ray-tested against the world and shortened before projection,
+so both third-person directions stay on the player side of nearby solid blocks.
+
 Recipe UI state normalizes versioned declarations into the same crafting and
 stonecutter records. Protocols through 767 use namespaced recipe IDs; protocol
 768 recursively decodes slot/recipe displays, stores numeric display IDs as the
@@ -63,13 +75,24 @@ the 768 map; packets with new bodies or semantic timing use dedicated codecs and
 unmapped sends. This keeps older packet structs honest and makes the next-version
 diff auditable.
 
+Protocol 770 has its own allow-listed clientbound and serverbound maps because
+the experience-orb removal and game-test insertions shift separate numeric
+ranges. Changed bodies stay at explicit version boundaries: chunk decoding owns
+the typed heightmap-array prefix, the chat codec owns its checksum trailer, and
+the item codec owns the reorganized 96-entry component registry. Generated
+1.21.5 block/state, item, and entity tables are selected before either world or
+presentation code resolves numeric IDs.
+
 ## Crate boundaries
 
 - `crab-protocol`: byte codecs, classic/network NBT, packet traits, per-version packets.
 - `crab-net`: async transport, framing, zlib, AES-CFB8, protocol-state tracking.
 - `crab-world`: section palettes, chunks, block updates, biomes and dimension data.
 - `crab-registry`: generated block/item/entity tables and state interpretation.
-- `crab-physics`: collision, ray casting, movement and fluid forces.
+- `crab-physics`: collision, ray casting, movement and fluid forces. Collision
+  consumes deduplicated per-state voxel boxes selected by `crab-registry` for
+  the active protocol profile; the committed tables are generated from
+  minecraft-data's vanilla voxel-shape extraction and contain no game assets.
 - `crab-assets`: jar/resource-pack models, textures, GUI and entity atlas loading.
 - `crab-render`: mesh generation, shaders, GPU state, HUD geometry.
 - `crab-audio`: sound-event resolution and playback.
