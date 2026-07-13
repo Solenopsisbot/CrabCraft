@@ -2530,11 +2530,13 @@ where
                     // renderer; `None` whenever we're not mid-dig.
                     *shared.dig.lock().unwrap() = dig.map(|d| {
                         let done = d.ticks_total.saturating_sub(d.ticks_left);
-                        let stage = if d.ticks_total == 0 {
-                            0
-                        } else {
-                            u8::try_from((done * 10 / d.ticks_total).min(9)).unwrap_or(9)
-                        };
+                        let stage = u8::try_from(
+                            (done * 10)
+                                .checked_div(d.ticks_total)
+                                .unwrap_or(0)
+                                .min(9),
+                        )
+                        .unwrap_or(9);
                         DigOverlay {
                             block: d.block,
                             stage,

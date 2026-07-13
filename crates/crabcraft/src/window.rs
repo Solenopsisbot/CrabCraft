@@ -2302,10 +2302,9 @@ impl App {
                 crab_render::container_rect(rows, aspect)
             } else if container.furnace_texture().is_some() {
                 crab_render::inventory_rect(aspect)
-            } else if let Some(texture) = container.simple_container_texture() {
-                crab_render::simple_container_rect(texture, aspect)
             } else {
-                return None;
+                let texture = container.simple_container_texture()?;
+                crab_render::simple_container_rect(texture, aspect)
             };
             for (slot, item) in container.slots.iter().enumerate() {
                 let bounds = if let Some(rows) = rows {
