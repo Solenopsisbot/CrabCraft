@@ -20,6 +20,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install Linux audio build dependencies
+        run: sudo apt-get update && sudo apt-get install --yes libasound2-dev pkg-config
+
       - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
         with:

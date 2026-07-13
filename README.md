@@ -2,7 +2,7 @@
 
 A Minecraft **Java Edition 1.20.1–1.20.4** client written from scratch in **pure Rust**.
 
-[![CI](https://github.com/Solenopsisbot/Crabcraft/actions/workflows/ci.yml/badge.svg)](https://github.com/Solenopsisbot/Crabcraft/actions/workflows/ci.yml)
+[![CI](https://github.com/Solenopsisbot/CrabCraft/actions/workflows/ci.yml/badge.svg)](https://github.com/Solenopsisbot/CrabCraft/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
 The long-term goal is a full, expandable, multi-version client that can join
