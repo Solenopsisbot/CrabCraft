@@ -56,6 +56,13 @@ component decoder projects nested IDs/counts into that metadata; the window laye
 uses it for tooltip selection while the network layer owns the version-specific
 selection packet.
 
+Protocol 769 reuses 768's allow-listed clientbound ID map because the numeric IDs
+are stable, but branches at the payload boundary for changed fields. Its
+serverbound mapper layers the split Pick Item and Player Loaded insertions over
+the 768 map; packets with new bodies or semantic timing use dedicated codecs and
+unmapped sends. This keeps older packet structs honest and makes the next-version
+diff auditable.
+
 ## Crate boundaries
 
 - `crab-protocol`: byte codecs, classic/network NBT, packet traits, per-version packets.

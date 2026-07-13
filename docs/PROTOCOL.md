@@ -11,7 +11,8 @@ Crabcraft defaults to protocol 763. Choose another profile with
 | 1.20.5 / 1.20.6 | 766 | Core path live-tested on 1.20.6 | Split configuration registries, revised packet maps, data-component item stacks |
 | 1.21 / 1.21.1 | 767 | Core path live-tested on 1.21.1 | Tricky Trials registries, VarInt item counts, jukebox component, configuration report/link packets |
 | 1.21.2 / 1.21.3 | 768 | Core path live-tested on 1.21.3 | Bundle-era packet maps, movement flags/velocity corrections, particle preference, split inventory updates, expanded components |
-| 1.21.4+ | 769+ | Not implemented | New registries and incremental packet schemas |
+| 1.21.4 | 769 | Core and component paths live-tested on 1.21.4 | Pale Garden registries, Player Loaded, split pick-item map, direct component slots, revised held-item/particle/player-list/vehicle payloads |
+| 1.21.5+ | 770+ | Not implemented | New registries and incremental packet schemas |
 
 ## Versioning approach
 
@@ -21,7 +22,7 @@ version-specific decoder whenever its payload changed; accepting a shifted ID is
 not considered sufficient support.
 
 Blocks, block states, items, and entities are also numeric wire registries. The
-client selects committed generated 1.20.1, 1.20.2, 1.20.3, 1.20.5, 1.21, or 1.21.3
+client selects committed generated 1.20.1, 1.20.2, 1.20.3, 1.20.5, 1.21, 1.21.3, or 1.21.4
 tables before it loads assets or decodes a world. This matters even within
 1.20.x: 1.20.2 changed
 some block-state ranges, while 1.20.3 inserted the crafter, new copper/tuff
@@ -96,6 +97,23 @@ Bundle-content components retain their nested item IDs and counts as safe client
 metadata. When the inventory cursor is over a non-empty bundle, wheel input cycles
 that list, updates the tooltip, and sends protocol 768's two-VarInt
 `Select Bundle Item` packet using the visible window slot ID.
+
+Protocol 769 retains 768's clientbound packet IDs but changes several payloads.
+The client reads the held hotbar slot as a VarInt, consumes the new player-list
+hat flag after list priority, decodes cursor/player-inventory updates as direct
+component Slots, and handles `alwaysShow` in the modern particle header. The
+serverbound map splits Pick Item, inserts the empty `Player Loaded` packet after
+input, and shifts subsequent IDs; explicit 769 codecs cover Player Input,
+numeric recipe placement, bundle selection, block/air use, and the vehicle
+on-ground flag. Air-use rotation was also corrected for protocol 768.
+
+The 769 validation fixture used Mojang's official vanilla 1.21.4 server jar
+(SHA-1 `4707d00eb834b446575d89a61a11b5d548d8c001`). The core pass completed
+Login, Configuration, split registries, Join Game, teleport and Player Loaded,
+chunks, inventory, movement/keepalive, chat, and a 46-entity stream. A second
+pass injected a Mace, eight Resin Clumps, and a Bundle containing Diamond and
+Gold stacks. All three direct inventory updates decoded and the session reached
+its deadline with 57 entities.
 Unresolvable tag-only displays remain safe empty alternatives rather than
 guessing registry membership.
 

@@ -78,6 +78,38 @@ pub struct PlayerInput {
     pub flags: u8,
 }
 
+/// `0x3b` — uses the held item with the view rotation added in protocol 768.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct UseItem {
+    pub hand: i32,
+    pub sequence: i32,
+    pub yaw: f32,
+    pub pitch: f32,
+}
+
+impl Packet for UseItem {
+    const ID: i32 = 0x3b;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Serverbound;
+
+    fn encode<B: BufMut>(&self, dst: &mut B) -> Result<(), ProtoError> {
+        dst.put_varint(self.hand);
+        dst.put_varint(self.sequence);
+        dst.put_f32(self.yaw);
+        dst.put_f32(self.pitch);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(src: &mut B) -> Result<Self, ProtoError> {
+        Ok(Self {
+            hand: src.read_varint()?,
+            sequence: src.read_varint()?,
+            yaw: src.read_f32()?,
+            pitch: src.read_f32()?,
+        })
+    }
+}
+
 /// Chunk-batch acknowledgement shifted by the new Select Bundle Item packet.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ChunkBatchReceived {
@@ -257,6 +289,16 @@ mod tests {
         let mut bytes = Vec::new();
         input.encode(&mut bytes).unwrap();
         assert_eq!(input, PlayerInput::decode(&mut bytes.as_slice()).unwrap());
+
+        let use_item = UseItem {
+            hand: 0,
+            sequence: 4,
+            yaw: 30.0,
+            pitch: -8.0,
+        };
+        bytes.clear();
+        use_item.encode(&mut bytes).unwrap();
+        assert_eq!(use_item, UseItem::decode(&mut bytes.as_slice()).unwrap());
 
         let use_on = UseItemOn {
             hand: 0,

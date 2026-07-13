@@ -23,7 +23,7 @@ remains the detailed source of truth.
   split inventory updates, all 67 item components, and official 1.21.3 live
   core/component validation.
 - Version-selected generated block/state, item, and entity registries for the
-  763 through 768 wire profiles.
+  763 through 769 wire profiles.
 - Protocol-aware entity metadata components and scoreboard teams, including
   team prefixes/suffixes in sidebar and Tab-list names.
 - UUID-addressed server resource-pack stacks that can remove and rebuild any
@@ -54,3 +54,10 @@ remains the detailed source of truth.
 - Protocol 768 bundle contents are retained across inventory synchronization;
   scrolling over a bundle selects nested stacks, updates its tooltip, and sends
   the vanilla bundle-selection packet.
+- Protocol 769 for Java Edition 1.21.4, with generated Pale Garden registries,
+  Player Loaded, split pick-item mapping, direct component slots, revised
+  held-item/particle/player-list/vehicle payloads, and official-server core plus
+  component live validation.
+- Protocol 768/769 held-item use now includes the required camera rotation, and
+  modern component-era particle packets decode their particle ID after the fixed
+  header instead of using the legacy prefix order.
