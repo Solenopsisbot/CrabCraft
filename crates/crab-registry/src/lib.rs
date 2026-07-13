@@ -8,16 +8,70 @@
 //! derived from the vanilla data-generator reports. Regenerate with
 //! `scripts/generate_blocks.py`.
 //!
-//! Multi-version note: today we ship the 1.20.1 (protocol 763) table. New
-//! versions become sibling generated modules selected by protocol number.
+//! The active 1.20.x tables are selected once at client startup from the wire
+//! protocol. This keeps numeric IDs coherent across world, physics, assets and
+//! rendering without leaking protocol concerns through every lookup call.
+
+use std::sync::atomic::{AtomicU8, Ordering};
 
 mod blocks_1_20_1;
+mod blocks_1_20_2;
+mod blocks_1_20_3;
 mod entities_1_20_1;
+mod entities_1_20_3;
 mod items_1_20_1;
+mod items_1_20_3;
 
 pub use blocks_1_20_1::BLOCKS_1_20_1;
+pub use blocks_1_20_2::BLOCKS_1_20_2;
+pub use blocks_1_20_3::BLOCKS_1_20_3;
 pub use entities_1_20_1::ENTITIES_1_20_1;
+pub use entities_1_20_3::ENTITIES_1_20_3;
 pub use items_1_20_1::ITEMS_1_20_1;
+pub use items_1_20_3::ITEMS_1_20_3;
+
+static REGISTRY_PROFILE: AtomicU8 = AtomicU8::new(0);
+
+/// Selects numeric registry tables for a supported protocol. Call this before
+/// loading assets or decoding packets; unknown protocols retain the 763 tables.
+pub fn set_protocol(protocol: i32) {
+    REGISTRY_PROFILE.store(
+        match protocol {
+            764 => 1,
+            765 => 2,
+            _ => 0,
+        },
+        Ordering::Relaxed,
+    );
+}
+
+/// Active block registry for this process's selected server protocol.
+#[must_use]
+pub fn blocks() -> &'static [BlockDef] {
+    match REGISTRY_PROFILE.load(Ordering::Relaxed) {
+        1 => BLOCKS_1_20_2,
+        2 => BLOCKS_1_20_3,
+        _ => BLOCKS_1_20_1,
+    }
+}
+
+/// Active item registry for this process's selected server protocol.
+#[must_use]
+pub fn items() -> &'static [ItemDef] {
+    match REGISTRY_PROFILE.load(Ordering::Relaxed) {
+        2 => ITEMS_1_20_3,
+        _ => ITEMS_1_20_1,
+    }
+}
+
+/// Active entity registry for this process's selected server protocol.
+#[must_use]
+pub fn entities() -> &'static [EntityDef] {
+    match REGISTRY_PROFILE.load(Ordering::Relaxed) {
+        2 => ENTITIES_1_20_3,
+        _ => ENTITIES_1_20_1,
+    }
+}
 
 /// An entity type and its default hitbox size.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -31,10 +85,11 @@ pub struct EntityDef {
 /// Looks up an entity type by its registry id.
 #[must_use]
 pub fn entity_def(id: u32) -> Option<&'static EntityDef> {
-    ENTITIES_1_20_1
+    let entities = entities();
+    entities
         .binary_search_by_key(&id, |e| e.id)
         .ok()
-        .map(|i| &ENTITIES_1_20_1[i])
+        .map(|i| &entities[i])
 }
 
 /// Entity name (e.g. `"cow"`) for a type id.
@@ -54,10 +109,11 @@ pub struct ItemDef {
 /// Looks up an item by its registry id.
 #[must_use]
 pub fn item_def(id: u32) -> Option<&'static ItemDef> {
-    ITEMS_1_20_1
+    let items = items();
+    items
         .binary_search_by_key(&id, |e| e.id)
         .ok()
-        .map(|i| &ITEMS_1_20_1[i])
+        .map(|i| &items[i])
 }
 
 /// Item name (e.g. `"diamond"`) for an item id.
@@ -635,7 +691,7 @@ pub fn break_ticks(state: u32) -> Option<u32> {
 /// State-ID ranges are contiguous and disjoint, so this is exact.
 #[must_use]
 pub fn block_for_state(state: u32) -> Option<&'static BlockDef> {
-    let blocks = BLOCKS_1_20_1;
+    let blocks = blocks();
     let (mut lo, mut hi) = (0usize, blocks.len());
     while lo < hi {
         let mid = lo + (hi - lo) / 2;
@@ -661,7 +717,7 @@ pub fn block_name(state: u32) -> Option<&'static str> {
 #[must_use]
 pub fn block_by_name(name: &str) -> Option<&'static BlockDef> {
     let bare = name.strip_prefix("minecraft:").unwrap_or(name);
-    BLOCKS_1_20_1
+    blocks()
         .iter()
         .find(|b| b.name.strip_prefix("minecraft:") == Some(bare))
 }
@@ -963,5 +1019,34 @@ mod tests {
             );
             prev_max = Some(b.max_state);
         }
+    }
+
+    #[test]
+    fn later_1_20_tables_preserve_their_distinct_wire_ids() {
+        let crafter_item = ITEMS_1_20_3
+            .iter()
+            .find(|item| item.name == "crafter")
+            .unwrap();
+        assert_eq!(crafter_item.id, 978);
+        let diamond_sword = ITEMS_1_20_3
+            .iter()
+            .find(|item| item.name == "diamond_sword")
+            .unwrap();
+        assert_eq!(diamond_sword.id, 834);
+
+        let crafter = BLOCKS_1_20_3
+            .iter()
+            .find(|block| block.name == "minecraft:crafter")
+            .unwrap();
+        assert_eq!(crafter.default_state, 26_635);
+        assert!(BLOCKS_1_20_2
+            .iter()
+            .all(|block| block.name != "minecraft:crafter"));
+
+        let breeze = ENTITIES_1_20_3
+            .iter()
+            .find(|entity| entity.name == "breeze")
+            .unwrap();
+        assert_eq!(breeze.id, 10);
     }
 }

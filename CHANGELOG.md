@@ -11,6 +11,8 @@ remains the detailed source of truth.
   Configuration state, registry data, chunk batches, NBT components, and
   versioned resource-pack packets. The 1.20.4 core path is live-tested against
   an official vanilla server.
+- Version-selected generated block/state, item, and entity registries for the
+  763, 764, and 765 wire profiles.
 - Live validated resource-pack layering and renderer atlas replacement.
 - Signs, editable/readable books, maps, recipe books, biome tinting, transparent
   fluids, sky rendering, particles, expanded menus, vehicles, swimming/Elytra,

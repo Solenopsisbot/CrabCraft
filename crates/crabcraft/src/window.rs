@@ -2510,11 +2510,11 @@ impl App {
         self.applied_resource_pack = Some(path.clone());
 
         let result = (|| -> anyhow::Result<()> {
-            let block_names: Vec<String> = crab_registry::BLOCKS_1_20_1
+            let block_names: Vec<String> = crab_registry::blocks()
                 .iter()
                 .map(|block| block.name.to_owned())
                 .collect();
-            let item_names: Vec<String> = crab_registry::ITEMS_1_20_1
+            let item_names: Vec<String> = crab_registry::items()
                 .iter()
                 .map(|item| item.name.to_owned())
                 .collect();
@@ -2575,7 +2575,7 @@ fn load_resource_entity_atlas(path: &std::path::Path) -> Option<EntityAtlas> {
             }
         }
     }
-    let types: Vec<(i32, String)> = crab_registry::ENTITIES_1_20_1
+    let types: Vec<(i32, String)> = crab_registry::entities()
         .iter()
         .map(|entity| (entity.id as i32, entity.name.to_owned()))
         .collect();

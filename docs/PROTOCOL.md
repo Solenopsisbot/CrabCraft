@@ -18,6 +18,12 @@ translate inbound and outbound IDs at known insertion points. A packet receives 
 version-specific decoder whenever its payload changed; accepting a shifted ID is
 not considered sufficient support.
 
+Blocks, block states, items, and entities are also numeric wire registries. The
+client selects committed generated 1.20.1, 1.20.2, or 1.20.3 tables before it
+loads assets or decodes a world. This matters even within 1.20.x: 1.20.2 changed
+some block-state ranges, while 1.20.3 inserted the crafter, new copper/tuff
+families, the breeze, and wind charge, shifting most later IDs.
+
 Protocol 764+ spends time in `State::Configuration` after Login Success. Registry
 data is retained for Join Game dimension and biome interpretation. Protocol 765
 can transition from Play back into Configuration and acknowledges that transition

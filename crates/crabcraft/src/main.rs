@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use client::{connect_and_play, LoginMode, Shared};
+use client::{configured_protocol_number, connect_and_play, LoginMode, Shared};
 use tracing_subscriber::EnvFilter;
 
 fn main() -> Result<()> {
@@ -26,6 +26,8 @@ fn main() -> Result<()> {
         )
         .with_target(false)
         .init();
+
+    crab_registry::set_protocol(configured_protocol_number()?);
 
     // Leading flags (any order): `render`, `online`.
     let mut args: Vec<String> = std::env::args().skip(1).collect();
@@ -100,7 +102,7 @@ fn run_headless(addr: String, login: LoginMode, deadline: Option<Duration>) -> R
 fn load_atlas() -> crab_assets::Atlas {
     match std::env::var("CRABCRAFT_JAR") {
         Ok(jar) => {
-            let names: Vec<String> = crab_registry::BLOCKS_1_20_1
+            let names: Vec<String> = crab_registry::blocks()
                 .iter()
                 .map(|b| b.name.to_string())
                 .collect();
@@ -130,7 +132,7 @@ fn load_item_atlas() -> crab_assets::ItemAtlas {
     let Ok(jar) = std::env::var("CRABCRAFT_JAR") else {
         return crab_assets::ItemAtlas::empty();
     };
-    let names: Vec<String> = crab_registry::ITEMS_1_20_1
+    let names: Vec<String> = crab_registry::items()
         .iter()
         .map(|i| i.name.to_string())
         .collect();
@@ -214,7 +216,7 @@ fn load_entity_atlas() -> crab_assets::EntityAtlas {
         })
         .unwrap_or(0);
 
-    let types: Vec<(i32, String)> = crab_registry::ENTITIES_1_20_1
+    let types: Vec<(i32, String)> = crab_registry::entities()
         .iter()
         .map(|e| (e.id as i32, e.name.to_string()))
         .collect();

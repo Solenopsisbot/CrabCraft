@@ -836,6 +836,12 @@ impl ProtocolVersion {
     }
 }
 
+/// Resolves the configured wire protocol for startup-time registry and asset
+/// selection. Connection setup performs the same validation again.
+pub fn configured_protocol_number() -> Result<i32> {
+    Ok(ProtocolVersion::configured()?.number())
+}
+
 fn offline_uuid(name: &str) -> uuid::Uuid {
     let mut bytes = md5::compute(format!("OfflinePlayer:{name}")).0;
     bytes[6] = (bytes[6] & 0x0f) | 0x30;
@@ -1057,6 +1063,7 @@ async fn run_inner(
     deadline: Option<Duration>,
 ) -> Result<()> {
     let protocol = ProtocolVersion::configured()?;
+    crab_registry::set_protocol(protocol.number());
     let (host, port) = split_host_port(addr);
     let (name, uuid) = match login {
         LoginMode::Offline { username } => (username.clone(), None),
