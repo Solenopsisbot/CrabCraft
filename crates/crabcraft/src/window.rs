@@ -2556,11 +2556,17 @@ impl App {
                 2
             }
         };
-        self.shared
-            .resource_pack_status_outbox
-            .lock()
-            .unwrap()
-            .push(status);
+        if self
+            .shared
+            .resource_pack_reload_ack
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            self.shared
+                .resource_pack_status_outbox
+                .lock()
+                .unwrap()
+                .push(status);
+        }
     }
 }
 

@@ -15,6 +15,8 @@ remains the detailed source of truth.
   763, 764, and 765 wire profiles.
 - Protocol-aware entity metadata components and scoreboard teams, including
   team prefixes/suffixes in sidebar and Tab-list names.
+- UUID-addressed server resource-pack stacks that can remove and rebuild any
+  active layer while retaining vanilla fallback assets.
 - Live validated resource-pack layering and renderer atlas replacement.
 - Signs, editable/readable books, maps, recipe books, biome tinting, transparent
   fluids, sky rendering, particles, expanded menus, vehicles, swimming/Elytra,

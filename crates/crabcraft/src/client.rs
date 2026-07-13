@@ -369,6 +369,12 @@ pub struct ResourcePackRequest {
     pub prompt: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResourcePackLayer {
+    pub uuid: Option<uuid::Uuid>,
+    pub archive: PathBuf,
+}
+
 /// Text stored by a sign or hanging-sign block entity. Both sides are retained
 /// because 1.20 signs can be edited and read independently.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -700,11 +706,16 @@ pub struct Shared {
     pub resource_pack_prompt_open: Mutex<bool>,
     pub resource_pack_outbox: Mutex<Vec<bool>>,
     pub cached_resource_pack: Mutex<Option<PathBuf>>,
+    /// Validated raw server packs in lowest-to-highest priority order.
+    pub resource_pack_layers: Mutex<Vec<ResourcePackLayer>>,
     /// Base client resources used beneath server-pack overrides.
     pub base_resource_jar: Mutex<Option<PathBuf>>,
     /// True for the windowed client, which acknowledges a pack only after its
     /// CPU/GPU atlases have actually been replaced.
     pub renderer_active: AtomicBool,
+    /// Whether the next renderer reload is an Add Pack that needs a terminal
+    /// status. Remove Pack reloads are intentionally unacknowledged.
+    pub resource_pack_reload_ack: AtomicBool,
     /// Resource-pack terminal statuses produced by the renderer (0/2).
     pub resource_pack_status_outbox: Mutex<Vec<i32>>,
     /// Player input intent (written by the renderer).
@@ -775,8 +786,10 @@ impl Shared {
             resource_pack_prompt_open: Mutex::new(false),
             resource_pack_outbox: Mutex::new(Vec::new()),
             cached_resource_pack: Mutex::new(None),
+            resource_pack_layers: Mutex::new(Vec::new()),
             base_resource_jar: Mutex::new(None),
             renderer_active: AtomicBool::new(false),
+            resource_pack_reload_ack: AtomicBool::new(false),
             resource_pack_status_outbox: Mutex::new(Vec::new()),
             controls: Mutex::new(Controls::default()),
             dirty_chunks: Mutex::new(HashSet::new()),
@@ -1006,17 +1019,24 @@ where
                     let request = shared.resource_pack_request.lock().unwrap().clone();
                     let base = shared.base_resource_jar.lock().unwrap().clone();
                     match request {
-                        Some(request) => match download_resource_pack(
-                            &request,
-                            base.as_deref(),
-                            shared.renderer_active.load(Ordering::SeqCst),
-                        ).await {
-                            Ok(path) => {
-                                *shared.cached_resource_pack.lock().unwrap() = Some(path);
-                                if !shared.renderer_active.load(Ordering::SeqCst) {
-                                    send_configuration_pack_status(conn, shared, protocol, 0).await?;
+                        Some(request) => match download_resource_pack(&request).await {
+                            Ok(archive) => match activate_resource_pack(
+                                shared,
+                                request.uuid,
+                                archive,
+                                base.as_deref(),
+                            ) {
+                                Ok(path) => {
+                                    *shared.cached_resource_pack.lock().unwrap() = Some(path);
+                                    if !shared.renderer_active.load(Ordering::SeqCst) {
+                                        send_configuration_pack_status(conn, shared, protocol, 0).await?;
+                                    }
                                 }
-                            }
+                                Err(error) => {
+                                    tracing::warn!(%error, "configuration resource-pack activation failed");
+                                    send_configuration_pack_status(conn, shared, protocol, 2).await?;
+                                }
+                            },
                             Err(error) => {
                                 tracing::warn!(%error, "configuration resource-pack download failed");
                                 send_configuration_pack_status(conn, shared, protocol, 2).await?;
@@ -2260,19 +2280,24 @@ where
                     let request = shared.resource_pack_request.lock().unwrap().clone();
                     let base_jar = shared.base_resource_jar.lock().unwrap().clone();
                     match request {
-                        Some(request) => match download_resource_pack(
-                            &request,
-                            base_jar.as_deref(),
-                            shared.renderer_active.load(Ordering::SeqCst),
-                        )
-                        .await
-                        {
-                            Ok(path) => {
-                                *shared.cached_resource_pack.lock().unwrap() = Some(path);
-                                if !shared.renderer_active.load(Ordering::SeqCst) {
-                                    send_play_pack_status(conn, shared, protocol, 0).await?;
+                        Some(request) => match download_resource_pack(&request).await {
+                            Ok(archive) => match activate_resource_pack(
+                                shared,
+                                request.uuid,
+                                archive,
+                                base_jar.as_deref(),
+                            ) {
+                                Ok(path) => {
+                                    *shared.cached_resource_pack.lock().unwrap() = Some(path);
+                                    if !shared.renderer_active.load(Ordering::SeqCst) {
+                                        send_play_pack_status(conn, shared, protocol, 0).await?;
+                                    }
                                 }
-                            }
+                                Err(error) => {
+                                    tracing::warn!(%error, "resource-pack activation failed");
+                                    send_play_pack_status(conn, shared, protocol, 2).await?;
+                                }
+                            },
                             Err(error) => {
                                 tracing::warn!(%error, "resource-pack download failed");
                                 send_play_pack_status(conn, shared, protocol, 2).await?;
@@ -3561,20 +3586,32 @@ fn handle_resource_pack_request_765(raw: &crab_net::RawPacket, shared: &Arc<Shar
 fn handle_remove_resource_pack_765(raw: &crab_net::RawPacket, shared: &Arc<Shared>) -> Result<()> {
     let mut body = raw.body.clone();
     let removed = body.read_bool()?.then(|| body.read_uuid()).transpose()?;
-    let should_restore = {
-        let request = shared.resource_pack_request.lock().unwrap();
-        removed.is_none()
-            || request
-                .as_ref()
-                .and_then(|request| request.uuid)
-                .is_some_and(|active| Some(active) == removed)
-    };
-    if should_restore {
+    {
+        let mut layers = shared.resource_pack_layers.lock().unwrap();
+        if let Some(uuid) = removed {
+            layers.retain(|layer| layer.uuid != Some(uuid));
+        } else {
+            layers.clear();
+        }
+    }
+    if removed.is_none()
+        || shared
+            .resource_pack_request
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|request| request.uuid)
+            == removed
+    {
         *shared.resource_pack_request.lock().unwrap() = None;
         *shared.resource_pack_prompt_open.lock().unwrap() = false;
-        let base = shared.base_resource_jar.lock().unwrap().clone();
-        *shared.cached_resource_pack.lock().unwrap() = base;
     }
+    let base = shared.base_resource_jar.lock().unwrap().clone();
+    let rebuilt = rebuild_resource_pack_stack(shared, base.as_deref())?;
+    shared
+        .resource_pack_reload_ack
+        .store(false, Ordering::SeqCst);
+    *shared.cached_resource_pack.lock().unwrap() = rebuilt;
     Ok(())
 }
 
@@ -3596,11 +3633,7 @@ fn set_resource_pack_request(
     *shared.resource_pack_prompt_open.lock().unwrap() = true;
 }
 
-async fn download_resource_pack(
-    request: &ResourcePackRequest,
-    base_jar: Option<&Path>,
-    renderer_active: bool,
-) -> Result<PathBuf> {
+async fn download_resource_pack(request: &ResourcePackRequest) -> Result<PathBuf> {
     const MAX_PACK_BYTES: u64 = 100 * 1024 * 1024;
     let url = reqwest::Url::parse(&request.url).context("invalid resource-pack URL")?;
     if !matches!(url.scheme(), "http" | "https") {
@@ -3633,17 +3666,72 @@ async fn download_resource_pack(
     std::fs::create_dir_all(&directory)?;
     let path = directory.join(format!("{digest}.zip"));
     std::fs::write(&path, &bytes)?;
-    match base_jar {
-        Some(base) => layer_resource_pack(
-            base,
-            &path,
-            &directory.join(format!("{digest}-layered.zip")),
-        ),
-        None if renderer_active => bail!(
-            "a windowed server resource pack requires CRABCRAFT_JAR for vanilla fallback assets"
-        ),
-        None => Ok(path),
+    Ok(path)
+}
+
+fn activate_resource_pack(
+    shared: &Arc<Shared>,
+    uuid: Option<uuid::Uuid>,
+    archive: PathBuf,
+    base_jar: Option<&Path>,
+) -> Result<PathBuf> {
+    let previous = {
+        let mut layers = shared.resource_pack_layers.lock().unwrap();
+        let previous = layers.clone();
+        if let Some(uuid) = uuid {
+            layers.retain(|layer| layer.uuid != Some(uuid));
+        } else {
+            layers.clear();
+        }
+        layers.push(ResourcePackLayer { uuid, archive });
+        previous
+    };
+    match rebuild_resource_pack_stack(shared, base_jar) {
+        Ok(Some(path)) => {
+            shared
+                .resource_pack_reload_ack
+                .store(true, Ordering::SeqCst);
+            Ok(path)
+        }
+        Ok(None) => {
+            *shared.resource_pack_layers.lock().unwrap() = previous;
+            bail!("activated pack stack is empty")
+        }
+        Err(error) => {
+            *shared.resource_pack_layers.lock().unwrap() = previous;
+            Err(error)
+        }
     }
+}
+
+fn rebuild_resource_pack_stack(
+    shared: &Arc<Shared>,
+    base_jar: Option<&Path>,
+) -> Result<Option<PathBuf>> {
+    let layers = shared.resource_pack_layers.lock().unwrap().clone();
+    if layers.is_empty() {
+        return Ok(base_jar.map(Path::to_path_buf));
+    }
+    let Some(base) = base_jar else {
+        if shared.renderer_active.load(Ordering::SeqCst) {
+            bail!("a windowed server resource pack requires CRABCRAFT_JAR for vanilla fallback assets");
+        }
+        return Ok(layers.last().map(|layer| layer.archive.clone()));
+    };
+
+    let directory = std::env::temp_dir().join("crabcraft-resource-packs");
+    std::fs::create_dir_all(&directory)?;
+    let mut digest = Sha1::new();
+    for layer in &layers {
+        digest.update(layer.archive.to_string_lossy().as_bytes());
+    }
+    let key = format!("{:x}", digest.finalize());
+    let mut current = base.to_path_buf();
+    for (index, layer) in layers.iter().enumerate() {
+        let output = directory.join(format!("stack-{key}-{index}.zip"));
+        current = layer_resource_pack(&current, &layer.archive, &output)?;
+    }
+    Ok(Some(current))
 }
 
 /// Ensures the download is a real vanilla resource-pack archive before it is
@@ -5398,6 +5486,74 @@ mod tests {
             b"pack-apple"
         );
         assert!(archive.by_name("com/example/ignored.class").is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn uuid_resource_pack_stack_rebuilds_after_middle_layer_removal() {
+        let root = std::env::temp_dir().join(format!(
+            "crabcraft-pack-stack-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let base = root.join("base.zip");
+        let first = root.join("first.zip");
+        let second = root.join("second.zip");
+        std::fs::write(
+            &base,
+            zip_bytes(&[
+                ("assets/minecraft/a.txt", b"base-a"),
+                ("assets/minecraft/b.txt", b"base-b"),
+            ]),
+        )
+        .unwrap();
+        std::fs::write(&first, zip_bytes(&[("assets/minecraft/a.txt", b"first-a")])).unwrap();
+        std::fs::write(
+            &second,
+            zip_bytes(&[("assets/minecraft/b.txt", b"second-b")]),
+        )
+        .unwrap();
+
+        let shared = Arc::new(Shared::new());
+        *shared.base_resource_jar.lock().unwrap() = Some(base.clone());
+        let first_uuid = uuid::Uuid::new_v4();
+        let second_uuid = uuid::Uuid::new_v4();
+        activate_resource_pack(&shared, Some(first_uuid), first, Some(&base)).unwrap();
+        let stacked =
+            activate_resource_pack(&shared, Some(second_uuid), second, Some(&base)).unwrap();
+        let mut archive = zip::ZipArchive::new(File::open(stacked).unwrap()).unwrap();
+        assert_eq!(
+            zip_entry(&mut archive, "assets/minecraft/a.txt"),
+            b"first-a"
+        );
+        assert_eq!(
+            zip_entry(&mut archive, "assets/minecraft/b.txt"),
+            b"second-b"
+        );
+
+        let mut remove = Vec::new();
+        remove.put_bool(true);
+        remove.put_uuid(first_uuid);
+        handle_remove_resource_pack_765(
+            &crab_net::RawPacket {
+                id: 0x43,
+                body: remove.into(),
+            },
+            &shared,
+        )
+        .unwrap();
+        let rebuilt = shared.cached_resource_pack.lock().unwrap().clone().unwrap();
+        let mut archive = zip::ZipArchive::new(File::open(rebuilt).unwrap()).unwrap();
+        assert_eq!(zip_entry(&mut archive, "assets/minecraft/a.txt"), b"base-a");
+        assert_eq!(
+            zip_entry(&mut archive, "assets/minecraft/b.txt"),
+            b"second-b"
+        );
+        assert_eq!(shared.resource_pack_layers.lock().unwrap().len(), 1);
         std::fs::remove_dir_all(root).unwrap();
     }
 

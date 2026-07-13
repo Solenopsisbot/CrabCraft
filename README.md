@@ -80,8 +80,9 @@ supported 1.20.x profile:
   shading when a map is held
 - **Server resource packs**: optional/forced prompt UI, accept/decline protocol
   statuses, bounded HTTPS download, SHA-1 and `pack.mcmeta` validation,
-  vanilla-fallback asset layering, and live block/item/GUI/entity/crack atlas
-  replacement with loaded-chunk remeshing before success is acknowledged
+  vanilla-fallback asset layering, UUID-addressed multi-pack priority stacks and
+  removal, and live block/item/GUI/entity/crack atlas replacement with
+  loaded-chunk remeshing before success is acknowledged
 - **Signs and books**: chunk and incremental block-entity sign text (both 1.20
   sides) rendered in-world; held written books are readable, while writable
   books support editing, pagination, saving, title entry, and signing through
