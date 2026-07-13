@@ -308,6 +308,23 @@ fn armour_color(item_name: &str) -> [f32; 3] {
     }
 }
 
+fn entity_item_sprite(entity_name: &str) -> Option<&'static str> {
+    Some(match entity_name {
+        "egg" => "egg",
+        "ender_pearl" => "ender_pearl",
+        "experience_bottle" => "experience_bottle",
+        "eye_of_ender" => "ender_eye",
+        "fireball" | "small_fireball" => "fire_charge",
+        "firework_rocket" => "firework_rocket",
+        "item_frame" => "item_frame",
+        "glow_item_frame" => "glow_item_frame",
+        "lingering_potion" => "lingering_potion",
+        "snowball" => "snowball",
+        "splash_potion" => "splash_potion",
+        _ => return None,
+    })
+}
+
 fn pretty_item_name(name: &str) -> String {
     name.split('_')
         .map(|word| {
@@ -2044,7 +2061,9 @@ impl App {
             }
             let (dx, dz) = (a.pos[0] - before[0], a.pos[2] - before[2]);
             let moved = (dx * dx + dz * dz).sqrt();
-            a.phase += moved * 2.2;
+            // Keep an animation clock running for wings, fins, tails, and
+            // vehicle paddles; horizontal distance adds walk-cycle cadence.
+            a.phase += dt * 4.0 + moved * 2.2;
             let target_amount = (moved / dt.max(1e-3) * 0.10).min(0.7);
             a.amount += (target_amount - a.amount) * ease;
             // Ease the facing yaw along the shortest arc (wrap at +-180).
@@ -2120,6 +2139,28 @@ impl App {
                         continue;
                     }
                 }
+            }
+            let entity_name = u32::try_from(e.type_id)
+                .ok()
+                .and_then(crab_registry::entity_name);
+            if entity_name == Some("tnt") {
+                if let Some(tnt) = crab_registry::block_by_name("tnt") {
+                    box_v.extend(block_state_item_mesh(
+                        &self.atlas,
+                        tnt.default_state,
+                        [a.pos[0], a.pos[1] + 0.5, a.pos[2]],
+                        1.0,
+                        0.0,
+                    ));
+                }
+                continue;
+            }
+            if let Some(uv) = entity_name
+                .and_then(entity_item_sprite)
+                .and_then(|item| self.item_atlas.icon(item))
+            {
+                push_item_billboard(&mut item_v, a.pos, uv, self.yaw);
+                continue;
             }
             if !e.invisible || e.glowing {
                 if let Some(m) = self.entity_atlas.models.get(&e.type_id) {
@@ -4619,6 +4660,14 @@ mod tests {
         );
         assert_eq!(vertices.len(), 12);
         assert!(vertices.iter().all(|vertex| vertex[0].is_finite()));
+    }
+
+    #[test]
+    fn item_shaped_entities_use_their_vanilla_item_sprite() {
+        assert_eq!(entity_item_sprite("ender_pearl"), Some("ender_pearl"));
+        assert_eq!(entity_item_sprite("eye_of_ender"), Some("ender_eye"));
+        assert_eq!(entity_item_sprite("small_fireball"), Some("fire_charge"));
+        assert_eq!(entity_item_sprite("zombie"), None);
     }
 
     #[test]

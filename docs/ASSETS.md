@@ -57,6 +57,16 @@ Humanoid equipment uses inflated copies of the matching model bones, so armour
 follows movement and authoritative pose metadata instead of remaining as
 axis-aligned boxes around the entity.
 
+The resolver covers every ordinary entity in the supported registry through a
+direct Mojang sample filename or an explicit tested alias. Java texture aliases
+also cover climate variants and relocated projectile/family textures while
+retaining older direct-path fallbacks. Because the Bedrock sample pack does not
+publish boats, Crabcraft supplies a small Java-style hull/raft geometry and
+still reads each wood/chest texture from the user's jar. Item-shaped projectiles
+use item-atlas sprites, primed TNT uses its block model, and entity bones named
+as wings, fins, tails, or paddles receive continuous procedural motion in
+addition to walk, attack, hurt, and pose animation.
+
 When adding an alias:
 
 1. Confirm the entity name and ID in the matching generated registry.

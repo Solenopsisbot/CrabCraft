@@ -1221,6 +1221,30 @@ fn limb_swing_deg(name: &str, swing: f32, amount: f32) -> f32 {
     (swing.sin() * amount * sign).to_degrees() * 1.2
 }
 
+fn ambient_bone_rotation(name: &str, phase: f32, amount: f32) -> [f32; 3] {
+    let name = name.to_ascii_lowercase();
+    let side = if name.contains("left") || name.ends_with('1') {
+        -1.0
+    } else {
+        1.0
+    };
+    if name.contains("wing") {
+        [0.0, 0.0, phase.sin() * 32.0 * side]
+    } else if name.contains("fin") {
+        [0.0, 0.0, phase.sin() * 18.0 * side]
+    } else if name.contains("tail") {
+        [0.0, phase.sin() * 12.0, 0.0]
+    } else if name.contains("paddle") {
+        [
+            phase.sin() * amount * 45.0,
+            phase.cos() * amount * 25.0 * side,
+            0.0,
+        ]
+    } else {
+        [0.0; 3]
+    }
+}
+
 /// Builds a standing 3D mesh for a Bedrock entity geometry. This compatibility
 /// entry point is used by examples and previews; live entities use
 /// [`entity_mesh_with_pose`] with their server metadata pose.
@@ -1308,10 +1332,11 @@ pub fn entity_mesh_with_pose(
             0.0
         };
         let pose_rotation = pose_bone_rotation(&bone.name, pose);
+        let ambient_rotation = ambient_bone_rotation(&bone.name, limb_swing, limb_amount);
         let euler = [
-            -bone.rotation[0] + swing + attack_swing + pose_rotation[0],
-            -bone.rotation[1] + head_turn + pose_rotation[1],
-            -bone.rotation[2] + pose_rotation[2],
+            -bone.rotation[0] + swing + attack_swing + pose_rotation[0] + ambient_rotation[0],
+            -bone.rotation[1] + head_turn + pose_rotation[1] + ambient_rotation[1],
+            -bone.rotation[2] + pose_rotation[2] + ambient_rotation[2],
         ];
         let whole_rotation = whole_pose_rotation(pose);
         // Bedrock model space -> world: rotate about the bone pivot, then /16,
@@ -1596,6 +1621,22 @@ mod tests {
         assert!(leg * arm < 0.0);
         // No movement -> no swing.
         assert_eq!(limb_swing_deg("leg0", FRAC_PI_2, 0.0), 0.0);
+    }
+
+    #[test]
+    fn ambient_entity_bones_flap_wag_and_paddle() {
+        use std::f32::consts::FRAC_PI_2;
+
+        let left = ambient_bone_rotation("left_wing", FRAC_PI_2, 0.0);
+        let right = ambient_bone_rotation("right_wing", FRAC_PI_2, 0.0);
+        assert!(left[2] < 0.0 && right[2] > 0.0);
+        assert!(ambient_bone_rotation("tail", FRAC_PI_2, 0.0)[1] > 0.0);
+        assert_eq!(ambient_bone_rotation("body", FRAC_PI_2, 1.0), [0.0; 3]);
+        assert!(ambient_bone_rotation("left_paddle", FRAC_PI_2, 0.8)[0] > 0.0);
+        assert_eq!(
+            ambient_bone_rotation("left_paddle", FRAC_PI_2, 0.0),
+            [0.0; 3]
+        );
     }
 
     #[test]
