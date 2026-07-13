@@ -45,6 +45,16 @@ uniform and a viewport derived from the vanilla inventory texture's pixel
 bounds. This keeps world depth from clipping the player and keeps slot icons and
 tooltips above the model.
 
+Window-local presentation preferences stay outside authoritative game state.
+The pause/options UI updates camera FOV, mouse sensitivity, and the winit
+fullscreen mode immediately; none of those settings mutate network-owned
+`Shared` data or packet behavior.
+
+Camera perspective is also window-local. F5 cycles first person and two
+third-person orbit directions; third-person views append the local humanoid to
+the model vertex stream using the same pose/walk/swing transforms as remote
+players while suppressing first-person hand quads.
+
 Recipe UI state normalizes versioned declarations into the same crafting and
 stonecutter records. Protocols through 767 use namespaced recipe IDs; protocol
 768 recursively decodes slot/recipe displays, stores numeric display IDs as the
