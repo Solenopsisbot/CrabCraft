@@ -42,3 +42,6 @@ remains the detailed source of truth.
   substantially reducing generic-box fallbacks with the documented asset setup.
 - Falling-block entities retain their Spawn Entity block-state ID and render as
   full-scale textured block models instead of anonymous bounds boxes.
+- Entity Pose metadata now uses the correct serializer on component-era
+  protocols and drives crouching, swimming/fall-flying, sleeping, dying,
+  long-jump, and sitting model transforms.

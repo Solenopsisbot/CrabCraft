@@ -16,9 +16,9 @@ use crab_assets::{Atlas, EntityAtlas, GuiAtlas, ItemAtlas};
 use crab_protocol::versions::v1_20_1::play::PlaceRecipe;
 use crab_render::{
     block_item_mesh, box_mesh, build_block_pipeline, build_hud_pipelines, container_geometry,
-    entity_mesh, furnace_geometry, hud_geometry, inventory_geometry, mesh_region,
-    simple_container_geometry, status_effect_geometry, upload_atlas, upload_texture, CameraUniform,
-    HudPipelines, Vertex, DEPTH_FORMAT,
+    entity_mesh, entity_mesh_with_pose, furnace_geometry, hud_geometry, inventory_geometry,
+    mesh_region, simple_container_geometry, status_effect_geometry, upload_atlas, upload_texture,
+    CameraUniform, HudPipelines, Vertex, DEPTH_FORMAT,
 };
 use glam::Vec3;
 use wgpu::util::DeviceExt;
@@ -1996,7 +1996,7 @@ impl App {
                     } else {
                         0.0
                     };
-                    model_v.extend(entity_mesh(
+                    model_v.extend(entity_mesh_with_pose(
                         &m.geo,
                         a.pos,
                         [m.atlas_x, m.atlas_y],
@@ -2007,6 +2007,7 @@ impl App {
                         a.yaw + hurt_wobble,
                         a.head_yaw,
                         (a.swing_time / 0.35).clamp(0.0, 1.0),
+                        e.pose,
                     ));
                 } else {
                     let hw = e.half_width;

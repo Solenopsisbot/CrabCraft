@@ -946,9 +946,9 @@ fn limb_swing_deg(name: &str, swing: f32, amount: f32) -> f32 {
     (swing.sin() * amount * sign).to_degrees() * 1.2
 }
 
-/// Builds a 3D mesh for a Bedrock entity geometry, feet at `offset`. Each bone's
-/// rest rotation (e.g. the cow body's 90° tilt) is applied about its pivot, plus
-/// a procedural limb swing (`limb_swing` radians; 0 = rest pose).
+/// Builds a standing 3D mesh for a Bedrock entity geometry. This compatibility
+/// entry point is used by examples and previews; live entities use
+/// [`entity_mesh_with_pose`] with their server metadata pose.
 ///
 /// The entity's texture occupies the rectangle at `uv_origin` (pixels) within a
 /// texture of size `uv_size` (pixels) — pass `([0,0], [tex_w, tex_h])` for a
@@ -965,6 +965,39 @@ pub fn entity_mesh(
     yaw_deg: f32,
     head_yaw_deg: f32,
     attack_progress: f32,
+) -> Vec<Vertex> {
+    entity_mesh_with_pose(
+        geo,
+        offset,
+        uv_origin,
+        uv_size,
+        limb_swing,
+        limb_amount,
+        scale,
+        yaw_deg,
+        head_yaw_deg,
+        attack_progress,
+        0,
+    )
+}
+
+/// Builds a posed 3D entity mesh, feet at `offset`. Each bone's rest rotation
+/// is combined with procedural walking/attacking and the authoritative Pose
+/// metadata value. Pose IDs follow Java's stable enum ordering: fall-flying 1,
+/// sleeping 2, swimming 3, spin attack 4, crouching 5, dying 7, sitting 10.
+#[allow(clippy::too_many_arguments)]
+pub fn entity_mesh_with_pose(
+    geo: &crab_assets::EntityGeometry,
+    offset: [f32; 3],
+    uv_origin: [f32; 2],
+    uv_size: [f32; 2],
+    limb_swing: f32,
+    limb_amount: f32,
+    scale: f32,
+    yaw_deg: f32,
+    head_yaw_deg: f32,
+    attack_progress: f32,
+    pose: i32,
 ) -> Vec<Vertex> {
     // Whole-model facing: Minecraft yaw 0 = south (+Z) and increases clockwise
     // (90 = west/-X). Our model's front (head) is at -Z and we mirror X, so the
@@ -999,16 +1032,19 @@ pub fn entity_mesh(
         } else {
             0.0
         };
+        let pose_rotation = pose_bone_rotation(&bone.name, pose);
         let euler = [
-            -bone.rotation[0] + swing + attack_swing,
-            -bone.rotation[1] + head_turn,
-            -bone.rotation[2],
+            -bone.rotation[0] + swing + attack_swing + pose_rotation[0],
+            -bone.rotation[1] + head_turn + pose_rotation[1],
+            -bone.rotation[2] + pose_rotation[2],
         ];
+        let whole_rotation = whole_pose_rotation(pose);
         // Bedrock model space -> world: rotate about the bone pivot, then /16,
         // X negated (Bedrock/Java mirror), spin by the entity yaw about the
         // vertical axis, then translate to the feet offset.
         let place = |px: f32, py: f32, pz: f32| {
             let r = rotate_euler([px, py, pz], bone.pivot, euler);
+            let r = rotate_euler(r, [0.0, 14.4, 0.0], whole_rotation);
             let (lx, ly, lz) = (
                 -r[0] / 16.0 * scale,
                 r[1] / 16.0 * scale,
@@ -1022,6 +1058,7 @@ pub fn entity_mesh(
         };
         let nrm = |n: [f32; 3]| {
             let r = rotate_euler(n, [0.0, 0.0, 0.0], euler);
+            let r = rotate_euler(r, [0.0, 0.0, 0.0], whole_rotation);
             // Match `place`: mirror X, then apply the yaw spin.
             let (lx, lz) = (-r[0], r[2]);
             [
@@ -1121,6 +1158,34 @@ pub fn entity_mesh(
     verts
 }
 
+fn whole_pose_rotation(pose: i32) -> [f32; 3] {
+    match pose {
+        1 | 3 | 4 => [-90.0, 0.0, 0.0],
+        2 => [0.0, 0.0, 90.0],
+        6 => [-25.0, 0.0, 0.0],
+        7 => [0.0, 0.0, -90.0],
+        _ => [0.0; 3],
+    }
+}
+
+fn pose_bone_rotation(name: &str, pose: i32) -> [f32; 3] {
+    let name = name.to_ascii_lowercase();
+    let is_head = name.contains("head");
+    let is_body = name.contains("body") || name.contains("torso");
+    let is_arm = name.contains("arm");
+    let is_leg = name.contains("leg");
+    match pose {
+        5 if is_body => [22.0, 0.0, 0.0],
+        5 if is_head => [-12.0, 0.0, 0.0],
+        5 if is_arm => [18.0, 0.0, 0.0],
+        5 if is_leg => [-12.0, 0.0, 0.0],
+        10 if is_body => [12.0, 0.0, 0.0],
+        10 if is_arm => [-15.0, 0.0, 0.0],
+        10 if is_leg => [-75.0, 0.0, 0.0],
+        _ => [0.0; 3],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1212,6 +1277,43 @@ mod tests {
             .iter()
             .zip(&attack)
             .any(|(before, after)| before.position != after.position));
+    }
+
+    #[test]
+    fn metadata_poses_transform_humanoid_bones_and_whole_model() {
+        let geometry = crab_assets::player_geometry();
+        let mesh = |pose| {
+            entity_mesh_with_pose(
+                &geometry,
+                [0.0; 3],
+                [0.0; 2],
+                [64.0, 64.0],
+                0.0,
+                0.0,
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                pose,
+            )
+        };
+        let standing = mesh(0);
+        let crouching = mesh(5);
+        let swimming = mesh(3);
+        assert_eq!(standing.len(), crouching.len());
+        assert_eq!(standing.len(), swimming.len());
+        assert!(standing
+            .iter()
+            .zip(&crouching)
+            .any(|(before, after)| before.position != after.position));
+        assert!(standing
+            .iter()
+            .zip(&swimming)
+            .any(|(before, after)| before.position != after.position));
+        assert_eq!(whole_pose_rotation(3), [-90.0, 0.0, 0.0]);
+        assert_eq!(whole_pose_rotation(0), [0.0; 3]);
+        assert_eq!(pose_bone_rotation("body", 5), [22.0, 0.0, 0.0]);
+        assert_eq!(pose_bone_rotation("body", 0), [0.0; 3]);
     }
 
     #[test]

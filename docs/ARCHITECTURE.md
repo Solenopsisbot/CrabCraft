@@ -33,6 +33,10 @@ registry-sized diagnostic box. See [Asset pipeline](ASSETS.md).
 Special entities stay data-driven where their appearance is not a mob model:
 dropped stacks use item/block atlases, while falling blocks retain Spawn Entity's
 global block-state ID and resolve it through the active versioned block registry.
+For modelled entities, interpolation, limb swing, attack/hurt reactions, head
+yaw, and Pose metadata are combined when CPU mesh vertices are rebuilt. Protocol
+766+ uses the shifted Pose metadata serializer introduced with the 1.20.5
+particle-list insertion; older profiles retain the preceding serializer ID.
 
 The window renderer orders its frame as world geometry, HUD backgrounds, the
 inventory's depth-cleared 3D player viewport, then HUD item/text foregrounds.

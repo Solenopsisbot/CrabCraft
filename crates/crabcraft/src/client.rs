@@ -3464,7 +3464,7 @@ fn handle_entity_metadata(
             }
             12 | 14 | 15 | 19 | 20 | 21 | 22 => {
                 let value = b.read_varint()?;
-                if mtype == 20 && index == 6 {
+                if mtype == pose_metadata_type(protocol) && index == 6 {
                     if let Some(entity) = shared.entities.lock().unwrap().get_mut(&id) {
                         entity.pose = value;
                         match value {
@@ -3499,6 +3499,16 @@ fn handle_entity_metadata(
         }
     }
     Ok(())
+}
+
+/// Entity metadata serializer IDs gained the particle-list serializer in
+/// 1.20.5, shifting Pose and every following serializer up by one.
+fn pose_metadata_type(protocol: ProtocolVersion) -> i32 {
+    if protocol.uses_data_components() {
+        21
+    } else {
+        20
+    }
 }
 
 /// Reads a metadata Slot, returning the contained item id (or None if empty).
@@ -5476,6 +5486,14 @@ mod tests {
         assert_eq!(spawned_block_state(non_block, stone), None);
         assert_eq!(spawned_block_state(falling_block, -1), None);
         assert_eq!(spawned_block_state(falling_block, i32::MAX), None);
+    }
+
+    #[test]
+    fn component_era_metadata_uses_shifted_pose_serializer() {
+        assert_eq!(pose_metadata_type(ProtocolVersion::V1_20_1), 20);
+        assert_eq!(pose_metadata_type(ProtocolVersion::V1_20_3), 20);
+        assert_eq!(pose_metadata_type(ProtocolVersion::V1_20_5), 21);
+        assert_eq!(pose_metadata_type(ProtocolVersion::V1_21), 21);
     }
 
     #[test]

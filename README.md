@@ -78,7 +78,8 @@ tested for every supported profile:
    far fewer render as boxes; slimes/magma cubes scale to their size and
    **dropped items show their item icon**
 - **Entity presentation**: packet-driven arm swings, hurt reactions, independent
-  head rotation, main/offhand items, visible material-coloured armour layers,
+  head rotation, metadata-driven crouch/swim/glide/sleep/death/sit poses,
+  main/offhand items, visible material-coloured armour layers,
   bobbing/rotating 3D per-face dropped block models, and full-scale falling
   blocks selected from the server's exact block-state ID
 - **First-person presentation**: visible main/offhand items with attack/use swing
@@ -275,7 +276,8 @@ Microsoft account. Using the official server jar:
 - [x] Melee combat (attack mobs), health/food tracking + death-respawn
 - [x] Minimal HUD (crosshair, hotbar outline, health/food bars)
 - [x] Element block models (slabs/stairs/plants/lanterns render as real shapes)
-- [x] Entity bone rest rotations + interpolation + procedural walk animation
+ - [x] Entity bone rest rotations + interpolation + procedural walk animation
+ - [x] Version-correct entity pose metadata with crouch/swim/glide/sleep/death transforms
 - [x] Entity metadata: slime/magma-cube size scaling, dropped-item icons
 - [x] Real GUI textures + bitmap font; stack-size numbers
 - [x] Inventory open + click-to-move/swap items; hotbar slot switching
