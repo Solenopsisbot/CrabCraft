@@ -9,4 +9,4 @@ repository.workspace = true
 [dependencies]
 crab-world.workspace = true
 crab-registry.workspace = true
-glam = "0.29"
+glam = "0.33"
