@@ -39,6 +39,8 @@ remains the detailed source of truth.
 - Public contribution, security, architecture, protocol, and agent documentation.
 - Registry-driven vanilla blockstate loading for variants and multipart models,
   including conditional parts, weighted alternatives, rotations, and UV locking.
+- Inherited 3D item-model ground transforms, exact-state falling-block models,
+  and bone-following animated humanoid armour layers.
 
 ### Changed
 

@@ -949,56 +949,7 @@ pub fn block_item_mesh(
 ) -> Vec<Vertex> {
     let (sin_yaw, cos_yaw) = yaw_degrees.to_radians().sin_cos();
     if let Some(elements) = atlas.block_elements(block_name) {
-        let mut vertices = Vec::new();
-        for element in elements {
-            let from = [
-                element.from[0] / 16.0,
-                element.from[1] / 16.0,
-                element.from[2] / 16.0,
-            ];
-            let to = [
-                element.to[0] / 16.0,
-                element.to[1] / 16.0,
-                element.to[2] / 16.0,
-            ];
-            for (face_index, face) in FACES.iter().enumerate() {
-                let Some(texture) = element.faces[face_index] else {
-                    continue;
-                };
-                let [u0, v0, u1, v1] = texture.uv;
-                for &corner_index in &[0usize, 1, 2, 0, 2, 3] {
-                    let corner = face.corners[corner_index];
-                    let mut point = [
-                        if corner[0] == 0.0 { from[0] } else { to[0] },
-                        if corner[1] == 0.0 { from[1] } else { to[1] },
-                        if corner[2] == 0.0 { from[2] } else { to[2] },
-                    ];
-                    if let Some(rotation) = &element.rotation {
-                        point = rotate_point(point, rotation);
-                    }
-                    let local_x = (point[0] - 0.5) * size;
-                    let local_y = (point[1] - 0.5) * size;
-                    let local_z = (point[2] - 0.5) * size;
-                    let [u, v] = face.uvs[corner_index];
-                    vertices.push(Vertex {
-                        position: [
-                            center[0] + local_x * cos_yaw + local_z * sin_yaw,
-                            center[1] + local_y,
-                            center[2] - local_x * sin_yaw + local_z * cos_yaw,
-                        ],
-                        normal: [
-                            face.normal[0] * cos_yaw + face.normal[2] * sin_yaw,
-                            face.normal[1],
-                            -face.normal[0] * sin_yaw + face.normal[2] * cos_yaw,
-                        ],
-                        uv: [u0 + u * (u1 - u0), v0 + v * (v1 - v0)],
-                        tint: texture.tint,
-                        opacity: 1.0,
-                    });
-                }
-            }
-        }
-        return vertices;
+        return transformed_block_elements(elements, center, size, yaw_degrees, [0.0; 3], false);
     }
     let model = atlas.model(block_name);
     let mut vertices = Vec::with_capacity(36);
@@ -1029,6 +980,177 @@ pub fn block_item_mesh(
         }
     }
     vertices
+}
+
+/// Builds a block mesh using the exact global block state, so falling stairs,
+/// slabs, multipart blocks, and rotated variants retain their server-supplied
+/// shape. Falls back to the legacy block model when the pack has no matching
+/// blockstate definition.
+#[must_use]
+pub fn block_state_item_mesh(
+    atlas: &Atlas,
+    state: u32,
+    center: [f32; 3],
+    size: f32,
+    yaw_degrees: f32,
+) -> Vec<Vertex> {
+    if let Some(parts) = atlas.block_state_model(state) {
+        let cell = center.map(|coordinate| coordinate.floor() as i32);
+        let mut vertices = Vec::new();
+        for (part_index, part) in parts.iter().enumerate() {
+            if let Some(model) = select_state_alternative(part, cell, part_index) {
+                vertices.extend(transformed_block_elements(
+                    &model.elements,
+                    center,
+                    size,
+                    yaw_degrees,
+                    model.rotation,
+                    model.uvlock,
+                ));
+            }
+        }
+        return vertices;
+    }
+    crab_registry::block_name(state)
+        .map(|name| block_item_mesh(atlas, name, center, size, yaw_degrees))
+        .unwrap_or_default()
+}
+
+fn transformed_block_elements(
+    elements: &[crab_assets::ElementData],
+    center: [f32; 3],
+    size: f32,
+    yaw_degrees: f32,
+    model_rotation: [f32; 3],
+    uvlock: bool,
+) -> Vec<Vertex> {
+    let (sin_yaw, cos_yaw) = yaw_degrees.to_radians().sin_cos();
+    let mut vertices = Vec::new();
+    for element in elements {
+        let from = element.from.map(|coordinate| coordinate / 16.0);
+        let to = element.to.map(|coordinate| coordinate / 16.0);
+        for (face_index, face) in FACES.iter().enumerate() {
+            let Some(texture) = element.faces[face_index] else {
+                continue;
+            };
+            let [u0, v0, u1, v1] = texture.uv;
+            let mut normal = face.normal;
+            if let Some(rotation) = &element.rotation {
+                normal = rotate_element_normal(normal, rotation);
+            }
+            normal = rotate_model(normal, model_rotation, false);
+            normal = [
+                normal[0] * cos_yaw + normal[2] * sin_yaw,
+                normal[1],
+                -normal[0] * sin_yaw + normal[2] * cos_yaw,
+            ];
+            for &corner_index in &[0usize, 1, 2, 0, 2, 3] {
+                let corner = face.corners[corner_index];
+                let mut point = [
+                    if corner[0] == 0.0 { from[0] } else { to[0] },
+                    if corner[1] == 0.0 { from[1] } else { to[1] },
+                    if corner[2] == 0.0 { from[2] } else { to[2] },
+                ];
+                if let Some(rotation) = &element.rotation {
+                    point = rotate_point(point, rotation);
+                }
+                point = rotate_model(point, model_rotation, true);
+                let local = point.map(|coordinate| (coordinate - 0.5) * size);
+                let [mut u, mut v] = face.uvs[corner_index];
+                if uvlock {
+                    (u, v) = uvlock_coordinates(face_index, model_rotation, u, v);
+                }
+                for _ in 0..texture.uv_rotation {
+                    (u, v) = (1.0 - v, u);
+                }
+                vertices.push(Vertex {
+                    position: [
+                        center[0] + local[0] * cos_yaw + local[2] * sin_yaw,
+                        center[1] + local[1],
+                        center[2] - local[0] * sin_yaw + local[2] * cos_yaw,
+                    ],
+                    normal,
+                    uv: [u0 + u * (u1 - u0), v0 + v * (v1 - v0)],
+                    tint: texture.tint,
+                    opacity: 1.0,
+                });
+            }
+        }
+    }
+    vertices
+}
+
+/// Builds a dropped-item mesh from the resolved `models/item/<name>.json`
+/// geometry and its inherited vanilla `ground` display transform. Flat
+/// generated items return `None` and should use their atlas billboard instead.
+#[must_use]
+pub fn item_model_mesh(
+    atlas: &crab_assets::ItemAtlas,
+    item_name: &str,
+    center: [f32; 3],
+    yaw_degrees: f32,
+) -> Option<Vec<Vertex>> {
+    let model = atlas.model(item_name)?;
+    let (sin_yaw, cos_yaw) = yaw_degrees.to_radians().sin_cos();
+    let mut vertices = Vec::new();
+    for element in &model.elements {
+        let from = element.from.map(|coordinate| coordinate / 16.0);
+        let to = element.to.map(|coordinate| coordinate / 16.0);
+        for (face_index, face) in FACES.iter().enumerate() {
+            let Some(texture) = element.faces[face_index] else {
+                continue;
+            };
+            let [u0, v0, u1, v1] = texture.uv;
+            let mut normal = face.normal;
+            if let Some(rotation) = &element.rotation {
+                normal = rotate_element_normal(normal, rotation);
+            }
+            normal = rotate_model(normal, model.ground.rotation, false);
+            normal = [
+                normal[0] * cos_yaw + normal[2] * sin_yaw,
+                normal[1],
+                -normal[0] * sin_yaw + normal[2] * cos_yaw,
+            ];
+            for &corner_index in &[0usize, 1, 2, 0, 2, 3] {
+                let corner = face.corners[corner_index];
+                let mut point = [
+                    if corner[0] == 0.0 { from[0] } else { to[0] },
+                    if corner[1] == 0.0 { from[1] } else { to[1] },
+                    if corner[2] == 0.0 { from[2] } else { to[2] },
+                ];
+                if let Some(rotation) = &element.rotation {
+                    point = rotate_point(point, rotation);
+                }
+                point = [
+                    (point[0] - 0.5) * model.ground.scale[0],
+                    (point[1] - 0.5) * model.ground.scale[1],
+                    (point[2] - 0.5) * model.ground.scale[2],
+                ];
+                point = rotate_model(point, model.ground.rotation, false);
+                point = [
+                    point[0] + model.ground.translation[0] / 16.0,
+                    point[1] + model.ground.translation[1] / 16.0,
+                    point[2] + model.ground.translation[2] / 16.0,
+                ];
+                let [mut u, mut v] = face.uvs[corner_index];
+                for _ in 0..texture.uv_rotation {
+                    (u, v) = (1.0 - v, u);
+                }
+                vertices.push(Vertex {
+                    position: [
+                        center[0] + point[0] * cos_yaw + point[2] * sin_yaw,
+                        center[1] + point[1],
+                        center[2] - point[0] * sin_yaw + point[2] * cos_yaw,
+                    ],
+                    normal,
+                    uv: [u0 + u * (u1 - u0), v0 + v * (v1 - v0)],
+                    tint: texture.tint,
+                    opacity: 1.0,
+                });
+            }
+        }
+    }
+    Some(vertices)
 }
 
 fn push_quad(verts: &mut Vec<Vertex>, c: [[f32; 3]; 4], normal: [f32; 3], uv: [[f32; 2]; 4]) {
@@ -1311,6 +1433,73 @@ pub fn entity_mesh_with_pose(
     verts
 }
 
+/// Builds a simple bone-following armour layer for a humanoid geometry. Unlike
+/// an axis-aligned bounds overlay, these pieces inherit walking, attacking,
+/// crouching, swimming, gliding, sleeping, and death transforms from the same
+/// bones as the underlying entity. `slot` uses protocol equipment numbering:
+/// 2 boots, 3 leggings, 4 chestplate, 5 helmet.
+#[allow(clippy::too_many_arguments)]
+#[must_use]
+pub fn entity_armour_mesh(
+    geo: &crab_assets::EntityGeometry,
+    offset: [f32; 3],
+    white_uv: [f32; 4],
+    limb_swing: f32,
+    limb_amount: f32,
+    scale: f32,
+    yaw_deg: f32,
+    head_yaw_deg: f32,
+    attack_progress: f32,
+    pose: i32,
+    slot: usize,
+    color: [f32; 3],
+) -> Vec<Vertex> {
+    let mut armour = geo.clone();
+    armour.bones.retain(|bone| {
+        let name = bone.name.to_ascii_lowercase();
+        let head = name.contains("head") || name.contains("hat");
+        let body = name.contains("body") || name.contains("torso");
+        let arm = name.contains("arm");
+        let leg = name.contains("leg") || name.contains("foot");
+        match slot {
+            2 => leg,
+            3 => leg || body,
+            4 => body || arm,
+            5 => head,
+            _ => false,
+        }
+    });
+    for bone in &mut armour.bones {
+        for cube in &mut bone.cubes {
+            let inflation = if slot == 5 { 0.5 } else { 0.25 };
+            cube.origin = cube.origin.map(|coordinate| coordinate - inflation);
+            cube.size = cube.size.map(|extent| extent + inflation * 2.0);
+        }
+    }
+    let mut vertices = entity_mesh_with_pose(
+        &armour,
+        offset,
+        [0.0; 2],
+        [1.0; 2],
+        limb_swing,
+        limb_amount,
+        scale,
+        yaw_deg,
+        head_yaw_deg,
+        attack_progress,
+        pose,
+    );
+    let uv = [
+        (white_uv[0] + white_uv[2]) * 0.5,
+        (white_uv[1] + white_uv[3]) * 0.5,
+    ];
+    for vertex in &mut vertices {
+        vertex.uv = uv;
+        vertex.tint = color;
+    }
+    vertices
+}
+
 fn whole_pose_rotation(pose: i32) -> [f32; 3] {
     match pose {
         1 | 3 | 4 => [-90.0, 0.0, 0.0],
@@ -1478,6 +1667,37 @@ mod tests {
         assert_eq!(whole_pose_rotation(0), [0.0; 3]);
         assert_eq!(pose_bone_rotation("body", 5), [22.0, 0.0, 0.0]);
         assert_eq!(pose_bone_rotation("body", 0), [0.0; 3]);
+    }
+
+    #[test]
+    fn armour_layers_follow_filtered_humanoid_bones_and_pose() {
+        let geometry = crab_assets::player_geometry();
+        let mesh = |slot, pose| {
+            entity_armour_mesh(
+                &geometry,
+                [0.0; 3],
+                [0.0, 0.0, 1.0, 1.0],
+                0.0,
+                0.0,
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                pose,
+                slot,
+                [0.2, 0.8, 0.9],
+            )
+        };
+        let helmet = mesh(5, 0);
+        let crouching_helmet = mesh(5, 5);
+        let chestplate = mesh(4, 0);
+        assert_eq!(helmet.len(), 36);
+        assert_eq!(chestplate.len(), 108);
+        assert!(helmet
+            .iter()
+            .zip(&crouching_helmet)
+            .any(|(standing, crouching)| standing.position != crouching.position));
+        assert!(helmet.iter().all(|vertex| vertex.tint == [0.2, 0.8, 0.9]));
     }
 
     #[test]

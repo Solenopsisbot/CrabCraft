@@ -300,6 +300,8 @@ Microsoft account. Using the official server jar:
  - [x] Entity bone rest rotations + interpolation + procedural walk animation
  - [x] Version-correct entity pose metadata with crouch/swim/glide/sleep/death transforms
 - [x] Entity metadata: slime/magma-cube size scaling, dropped-item icons
+- [x] Dropped 3D item models use inherited vanilla `ground` transforms; falling
+  blocks retain their exact blockstate model
 - [x] Real GUI textures + bitmap font; stack-size numbers
 - [x] Inventory open + click-to-move/swap items; hotbar slot switching
 - [x] Chat + commands (send/receive, on-screen log)
@@ -310,6 +312,7 @@ Microsoft account. Using the official server jar:
  - [x] F5 first/rear/front camera cycling with an animated local-player model
  - [x] Player model (humanoid + default skin) for other players
  - [x] Entity body/head yaw facing; block-breaking crack overlay; aliased mob models
+ - [x] Bone-following armour layers inherit entity animation and pose transforms
  - [x] Registry-driven blockstate variants, multipart models, weighted choices,
    model/face rotations, UV locking, and biome tint
    - [x] Vanilla blockstate JSON is matched against generated state-property

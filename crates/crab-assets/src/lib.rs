@@ -98,6 +98,31 @@ pub struct ElementData {
     pub faces: [Option<ElementFace>; 6],
 }
 
+/// A model `display` transform, using vanilla model-space units and degrees.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
+pub struct DisplayTransform {
+    #[serde(default)]
+    pub rotation: [f32; 3],
+    #[serde(default)]
+    pub translation: [f32; 3],
+    #[serde(default = "unit_scale")]
+    pub scale: [f32; 3],
+}
+
+impl Default for DisplayTransform {
+    fn default() -> Self {
+        Self {
+            rotation: [0.0; 3],
+            translation: [0.0; 3],
+            scale: [1.0; 3],
+        }
+    }
+}
+
+const fn unit_scale() -> [f32; 3] {
+    [1.0; 3]
+}
+
 /// One model application selected by a vanilla blockstate definition.
 #[derive(Clone, Debug)]
 pub struct BlockStateModelPart {
@@ -221,6 +246,14 @@ pub struct ItemAtlas {
     pub width: u32,
     pub height: u32,
     icons: HashMap<String, [f32; 4]>,
+    models: HashMap<String, ItemModel>,
+}
+
+/// Resolved 3D item geometry and its inherited ground display transform.
+#[derive(Clone, Debug)]
+pub struct ItemModel {
+    pub elements: Vec<ElementData>,
+    pub ground: DisplayTransform,
 }
 
 impl ItemAtlas {
@@ -229,6 +262,13 @@ impl ItemAtlas {
     pub fn icon(&self, item_name: &str) -> Option<[f32; 4]> {
         let bare = item_name.strip_prefix("minecraft:").unwrap_or(item_name);
         self.icons.get(bare).copied()
+    }
+
+    /// Resolved 3D item model, when the item does not use generated flat layers.
+    #[must_use]
+    pub fn model(&self, item_name: &str) -> Option<&ItemModel> {
+        let bare = item_name.strip_prefix("minecraft:").unwrap_or(item_name);
+        self.models.get(bare)
     }
 
     /// Number of items with a resolved icon.
@@ -251,6 +291,7 @@ impl ItemAtlas {
             width: TILE,
             height: TILE,
             icons: HashMap::new(),
+            models: HashMap::new(),
         }
     }
 }
@@ -263,6 +304,8 @@ pub(crate) struct ModelJson {
     pub textures: HashMap<String, String>,
     #[serde(default)]
     pub elements: Option<Vec<ElementJson>>,
+    #[serde(default)]
+    pub display: HashMap<String, DisplayTransform>,
 }
 
 #[derive(Deserialize)]
@@ -872,6 +915,7 @@ pub fn load_item_atlas(jar_path: &Path, item_names: &[String]) -> Result<ItemAtl
 
     // Resolve each item to its icon texture path.
     let mut item_tex: HashMap<String, String> = HashMap::new();
+    let mut item_models: HashMap<String, (Vec<ParsedElem>, DisplayTransform)> = HashMap::new();
     let mut tex_paths: BTreeSet<String> = BTreeSet::new();
     for name in item_names {
         let bare = name.strip_prefix("minecraft:").unwrap_or(name);
@@ -881,6 +925,18 @@ pub fn load_item_atlas(jar_path: &Path, item_names: &[String]) -> Result<ItemAtl
         if let Some(path) = resolve_item_icon(&mut archive, bare, &mut cache) {
             tex_paths.insert(path.clone());
             item_tex.insert(bare.to_string(), path);
+        }
+        if let Some(resolved) = resolve(&mut archive, &format!("item/{bare}"), &mut cache) {
+            let elements = parse_elements(&resolved);
+            if !elements.is_empty() {
+                for element in &elements {
+                    for face in element.faces.iter().flatten() {
+                        tex_paths.insert(face.path.clone());
+                    }
+                }
+                let ground = resolved.display.get("ground").copied().unwrap_or_default();
+                item_models.insert(bare.to_string(), (elements, ground));
+            }
         }
     }
 
@@ -904,11 +960,38 @@ pub fn load_item_atlas(jar_path: &Path, item_names: &[String]) -> Result<ItemAtl
         .filter_map(|(item, path)| tex_uv.get(&path).map(|uv| (item, *uv)))
         .collect();
 
+    let models = item_models
+        .into_iter()
+        .map(|(name, (elements, ground))| {
+            let elements = elements
+                .into_iter()
+                .map(|element| ElementData {
+                    from: element.from,
+                    to: element.to,
+                    rotation: element.rotation,
+                    faces: element.faces.map(|face| {
+                        face.map(|face| {
+                            let tile = tex_uv.get(&face.path).copied().unwrap_or([0.0; 4]);
+                            ElementFace {
+                                uv: sub_rect(tile, face.uv16),
+                                tint: if face.tinted { FOLIAGE_TINT } else { [1.0; 3] },
+                                cull: face.cull,
+                                uv_rotation: face.uv_rotation,
+                            }
+                        })
+                    }),
+                })
+                .collect();
+            (name, ItemModel { elements, ground })
+        })
+        .collect();
+
     Ok(ItemAtlas {
         rgba,
         width: dim,
         height: dim,
         icons,
+        models,
     })
 }
 
@@ -1207,6 +1290,58 @@ mod tests {
         assert_eq!(alternative.elements.len(), 1);
         assert_eq!(alternative.elements[0].to, [16.0, 8.0, 16.0]);
         assert_eq!(alternative.elements[0].faces[2].unwrap().uv_rotation, 1);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn loads_inherited_item_geometry_and_ground_transform() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "crabcraft-item-model-{}-{nonce}.jar",
+            std::process::id()
+        ));
+        let file = File::create(&path).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        writer
+            .start_file("assets/minecraft/models/item/test_block.json", options)
+            .unwrap();
+        writer
+            .write_all(br#"{"parent":"minecraft:block/test_block"}"#)
+            .unwrap();
+        writer
+            .start_file("assets/minecraft/models/block/test_block.json", options)
+            .unwrap();
+        writer
+            .write_all(
+                br##"{
+                    "textures":{"all":"minecraft:block/test"},
+                    "display":{"ground":{
+                        "rotation":[10,20,30],
+                        "translation":[1,2,3],
+                        "scale":[0.25,0.5,0.75]
+                    }},
+                    "elements":[{
+                        "from":[0,0,0],
+                        "to":[16,8,16],
+                        "faces":{"up":{"texture":"#all","rotation":180}}
+                    }]
+                }"##,
+            )
+            .unwrap();
+        writer.finish().unwrap();
+
+        let atlas = load_item_atlas(&path, &["minecraft:test_block".to_string()]).unwrap();
+        let model = atlas.model("test_block").unwrap();
+        assert_eq!(model.ground.rotation, [10.0, 20.0, 30.0]);
+        assert_eq!(model.ground.translation, [1.0, 2.0, 3.0]);
+        assert_eq!(model.ground.scale, [0.25, 0.5, 0.75]);
+        assert_eq!(model.elements.len(), 1);
+        assert_eq!(model.elements[0].to, [16.0, 8.0, 16.0]);
+        assert_eq!(model.elements[0].faces[2].unwrap().uv_rotation, 2);
         std::fs::remove_file(path).unwrap();
     }
 }
