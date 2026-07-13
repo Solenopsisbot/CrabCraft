@@ -7,7 +7,7 @@ version = "0.0.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["Crabcraft contributors"]
-repository = "https://github.com/anomalyco/Crabcraft"
+repository = "https://github.com/Solenopsisbot/Crabcraft"
 
 [workspace.dependencies]
 # shared third-party deps (pinned at the workspace level for consistency)

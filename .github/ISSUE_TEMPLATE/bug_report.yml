@@ -1,0 +1,38 @@
+name: Bug report
+description: Report reproducible incorrect behavior
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not include access tokens, server jars, client assets, or private server data.
+  - type: input
+    id: version
+    attributes:
+      label: Minecraft and protocol version
+      placeholder: 1.20.4 / 765
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: Crabcraft commit
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected and actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized logs
+      render: shell
