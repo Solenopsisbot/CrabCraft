@@ -6,15 +6,15 @@
 //!
 //! Scope: **full-cube** blocks resolve to per-face atlas textures. Blocks with
 //! `elements` (slabs, stairs, plants, lanterns, …) resolve to element geometry
-//! ([`ElementData`]). The loader also prepares the alternate models needed by
-//! state-driven stairs, fences, walls, doors, trapdoors, rails, redstone wire,
-//! and furnace-family blocks; the renderer selects and rotates those models.
+//! ([`ElementData`]). Vanilla `variants` and `multipart` blockstate definitions
+//! are matched against the active protocol registry's property values, including
+//! weighted model alternatives and blockstate rotations.
 //!
 //! Model resolution follows vanilla: walk the `parent` chain, merge `textures`
 //! maps (child wins), take the deepest `elements`, then resolve each face's
 //! `#variable` texture reference through the merged map.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::Path;
@@ -74,6 +74,8 @@ pub struct ElementFace {
     /// Neighbour face index (0..6, `crab-render` order) that hides this face
     /// when occupied by a full cube, or `None` to always draw.
     pub cull: Option<u8>,
+    /// Clockwise texture rotation in quarter turns.
+    pub uv_rotation: u8,
 }
 
 /// An element rotation about one axis, in 0..16 model space.
@@ -96,6 +98,23 @@ pub struct ElementData {
     pub faces: [Option<ElementFace>; 6],
 }
 
+/// One model application selected by a vanilla blockstate definition.
+#[derive(Clone, Debug)]
+pub struct BlockStateModelPart {
+    /// Weighted model alternatives. Vanilla chooses one pseudo-randomly per
+    /// block position; multipart definitions contribute multiple parts.
+    pub alternatives: Vec<BlockStateModelAlternative>,
+}
+
+#[derive(Clone, Debug)]
+pub struct BlockStateModelAlternative {
+    pub elements: Vec<ElementData>,
+    /// Blockstate `x`/`y` model rotation in degrees.
+    pub rotation: [f32; 3],
+    pub weight: u32,
+    pub uvlock: bool,
+}
+
 /// A stitched texture atlas plus per-block face lookups.
 pub struct Atlas {
     /// RGBA8 atlas pixels, row-major.
@@ -104,6 +123,8 @@ pub struct Atlas {
     pub height: u32,
     blocks: HashMap<String, BlockModel>,
     non_cube: HashMap<String, Vec<ElementData>>,
+    state_models: HashMap<u32, Vec<BlockStateModelPart>>,
+    state_cubes: HashSet<u32>,
     fallback: BlockModel,
     white_uv: [f32; 4],
     /// When true (the debug atlas), every block is treated as a full cube.
@@ -124,8 +145,7 @@ impl Atlas {
         self.non_cube.get(bare).map(Vec::as_slice)
     }
 
-    /// Alternate element model for a blockstate family (currently stair
-    /// `inner`/`outer` models loaded alongside the straight model).
+    /// Alternate element model retained for legacy state-family fallbacks.
     pub fn block_elements_variant(
         &self,
         block_name: &str,
@@ -135,6 +155,22 @@ impl Atlas {
         self.non_cube
             .get(&format!("{bare}#{variant}"))
             .map(Vec::as_slice)
+    }
+
+    /// Model parts selected by the active registry values for `state`.
+    pub fn block_state_model(&self, state: u32) -> Option<&[BlockStateModelPart]> {
+        self.state_models.get(&state).map(Vec::as_slice)
+    }
+
+    /// Whether a specific state resolves to one opaque full-cube model.
+    pub fn is_state_cube(&self, state: u32, block_name: &str) -> bool {
+        if self.assume_cube {
+            true
+        } else if self.state_models.contains_key(&state) {
+            self.state_cubes.contains(&state)
+        } else {
+            self.is_cube(block_name)
+        }
     }
 
     /// Whether the block renders as a full cube (so it occludes neighbour faces).
@@ -165,6 +201,8 @@ impl Atlas {
             height: TILE,
             blocks: HashMap::new(),
             non_cube: HashMap::new(),
+            state_models: HashMap::new(),
+            state_cubes: HashSet::new(),
             fallback: BlockModel {
                 faces: [white; 6],
                 textured: false,
@@ -227,6 +265,110 @@ pub(crate) struct ModelJson {
     pub elements: Option<Vec<ElementJson>>,
 }
 
+#[derive(Deserialize)]
+struct BlockStateJson {
+    #[serde(default)]
+    variants: HashMap<String, ModelChoice>,
+    #[serde(default)]
+    multipart: Vec<MultipartCase>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ModelChoice {
+    One(ModelApplication),
+    Weighted(Vec<ModelApplication>),
+}
+
+impl ModelChoice {
+    fn applications(&self) -> &[ModelApplication] {
+        match self {
+            Self::One(model) => std::slice::from_ref(model),
+            Self::Weighted(models) => models,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct ModelApplication {
+    model: String,
+    #[serde(default)]
+    x: f32,
+    #[serde(default)]
+    y: f32,
+    #[serde(default)]
+    weight: Option<u32>,
+    #[serde(default)]
+    uvlock: bool,
+}
+
+#[derive(Deserialize)]
+struct MultipartCase {
+    #[serde(default)]
+    when: Option<serde_json::Value>,
+    apply: ModelChoice,
+}
+
+struct ParsedStateAlternative {
+    elements: Vec<ParsedElem>,
+    rotation: [f32; 3],
+    weight: u32,
+    full_cube: bool,
+    uvlock: bool,
+}
+
+struct ParsedStatePart {
+    alternatives: Vec<ParsedStateAlternative>,
+}
+
+fn read_blockstate<R: Read + std::io::Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    bare: &str,
+) -> Option<BlockStateJson> {
+    let path = format!("assets/minecraft/blockstates/{bare}.json");
+    let mut file = archive.by_name(&path).ok()?;
+    let mut text = String::new();
+    file.read_to_string(&mut text).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+fn property_condition_matches(condition: &serde_json::Value, properties: &[(&str, &str)]) -> bool {
+    let Some(object) = condition.as_object() else {
+        return false;
+    };
+    if let Some(or) = object.get("OR").and_then(serde_json::Value::as_array) {
+        return or
+            .iter()
+            .any(|condition| property_condition_matches(condition, properties));
+    }
+    if let Some(and) = object.get("AND").and_then(serde_json::Value::as_array) {
+        return and
+            .iter()
+            .all(|condition| property_condition_matches(condition, properties));
+    }
+    object.iter().all(|(name, expected)| {
+        let Some(expected) = expected.as_str() else {
+            return false;
+        };
+        properties
+            .iter()
+            .find(|(property, _)| *property == name)
+            .is_some_and(|(_, actual)| expected.split('|').any(|value| value == *actual))
+    })
+}
+
+fn variant_matches(key: &str, properties: &[(&str, &str)]) -> bool {
+    key.is_empty()
+        || key.split(',').all(|entry| {
+            let Some((name, expected)) = entry.split_once('=') else {
+                return false;
+            };
+            properties
+                .iter()
+                .any(|(property, actual)| *property == name && *actual == expected)
+        })
+}
+
 /// Reads + parses `assets/minecraft/models/<name>.json` from the jar.
 pub(crate) fn read_model<R: Read + std::io::Seek>(
     archive: &mut zip::ZipArchive<R>,
@@ -260,6 +402,83 @@ fn load_element_variant<R: Read + std::io::Seek>(
     block_elems.insert(key, elems);
 }
 
+fn load_state_models<R: Read + std::io::Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    cache: &mut HashMap<String, Option<Resolved>>,
+    tex_paths: &mut BTreeSet<String>,
+    bare: &str,
+) -> HashMap<u32, Vec<ParsedStatePart>> {
+    let Some(definition) = read_blockstate(archive, bare) else {
+        return HashMap::new();
+    };
+    let Some(block) = crab_registry::block_by_name(bare) else {
+        return HashMap::new();
+    };
+    let mut states = HashMap::new();
+    for state in block.min_state..=block.max_state {
+        let Some(properties) = crab_registry::block_state_properties(state) else {
+            continue;
+        };
+        let mut choices: Vec<&ModelChoice> = Vec::new();
+        if let Some((_, choice)) = definition
+            .variants
+            .iter()
+            .filter(|(key, _)| variant_matches(key, &properties))
+            .max_by_key(|(key, _)| {
+                if key.is_empty() {
+                    0
+                } else {
+                    key.split(',').count()
+                }
+            })
+        {
+            choices.push(choice);
+        }
+        for case in &definition.multipart {
+            if case
+                .when
+                .as_ref()
+                .is_none_or(|condition| property_condition_matches(condition, &properties))
+            {
+                choices.push(&case.apply);
+            }
+        }
+
+        let mut parts = Vec::new();
+        for choice in choices {
+            let mut alternatives = Vec::new();
+            for application in choice.applications() {
+                let Some(resolved) = resolve(archive, &application.model, cache) else {
+                    continue;
+                };
+                let elements = parse_elements(&resolved);
+                if elements.is_empty() {
+                    continue;
+                }
+                for element in &elements {
+                    for face in element.faces.iter().flatten() {
+                        tex_paths.insert(face.path.clone());
+                    }
+                }
+                alternatives.push(ParsedStateAlternative {
+                    elements,
+                    rotation: [application.x, application.y, 0.0],
+                    weight: application.weight.unwrap_or(1).max(1),
+                    full_cube: cube_faces(&resolved).is_some(),
+                    uvlock: application.uvlock,
+                });
+            }
+            if !alternatives.is_empty() {
+                parts.push(ParsedStatePart { alternatives });
+            }
+        }
+        if !parts.is_empty() {
+            states.insert(state, parts);
+        }
+    }
+    states
+}
+
 /// Loads block models + textures for `block_names` from `jar_path` and builds an
 /// atlas. Blocks that aren't full cubes get a flat fallback colour.
 pub fn load_block_atlas(jar_path: &Path, block_names: &[String]) -> Result<Atlas, AssetError> {
@@ -270,10 +489,17 @@ pub fn load_block_atlas(jar_path: &Path, block_names: &[String]) -> Result<Atlas
     let mut cache: HashMap<String, Option<Resolved>> = HashMap::new();
     let mut block_faces: HashMap<String, [(Option<String>, bool); 6]> = HashMap::new();
     let mut block_elems: HashMap<String, Vec<ParsedElem>> = HashMap::new();
+    let mut state_models: HashMap<u32, Vec<ParsedStatePart>> = HashMap::new();
     let mut tex_paths: BTreeSet<String> = BTreeSet::new();
 
     for name in block_names {
         let bare = name.strip_prefix("minecraft:").unwrap_or(name);
+        state_models.extend(load_state_models(
+            &mut archive,
+            &mut cache,
+            &mut tex_paths,
+            bare,
+        ));
         if bare.ends_with("_door") && !bare.ends_with("_trapdoor") {
             for half in ["bottom", "top"] {
                 for hinge in ["left", "right"] {
@@ -526,12 +752,66 @@ pub fn load_block_atlas(jar_path: &Path, block_names: &[String]) -> Result<Atlas
                                 [1.0, 1.0, 1.0]
                             },
                             cull: pf.cull,
+                            uv_rotation: pf.uv_rotation,
                         }
                     })
                 }),
             })
             .collect();
         non_cube.insert(name, data);
+    }
+
+    let mut finished_state_models = HashMap::new();
+    let mut state_cubes = HashSet::new();
+    for (state, parts) in state_models {
+        if parts.len() == 1
+            && parts[0]
+                .alternatives
+                .iter()
+                .all(|alternative| alternative.full_cube)
+        {
+            state_cubes.insert(state);
+        }
+        let parts = parts
+            .into_iter()
+            .map(|part| BlockStateModelPart {
+                alternatives: part
+                    .alternatives
+                    .into_iter()
+                    .map(|alternative| BlockStateModelAlternative {
+                        elements: alternative
+                            .elements
+                            .into_iter()
+                            .map(|element| ElementData {
+                                from: element.from,
+                                to: element.to,
+                                rotation: element.rotation,
+                                faces: element.faces.map(|face| {
+                                    face.map(|face| {
+                                        let tile =
+                                            tex_uv.get(&face.path).copied().unwrap_or(white_uv);
+                                        ElementFace {
+                                            uv: sub_rect(tile, face.uv16),
+                                            tint: if face.tinted {
+                                                FOLIAGE_TINT
+                                            } else {
+                                                [1.0, 1.0, 1.0]
+                                            },
+                                            cull: face.cull,
+                                            uv_rotation: face.uv_rotation,
+                                        }
+                                    })
+                                }),
+                            })
+                            .collect(),
+                        rotation: alternative.rotation,
+                        weight: alternative.weight,
+                        uvlock: alternative.uvlock,
+                    })
+                    .collect(),
+            })
+            .collect();
+        finished_state_models.insert(state, parts);
     }
 
     let fallback = BlockModel {
@@ -548,6 +828,8 @@ pub fn load_block_atlas(jar_path: &Path, block_names: &[String]) -> Result<Atlas
         height: dim,
         blocks,
         non_cube,
+        state_models: finished_state_models,
+        state_cubes,
         fallback,
         white_uv,
         assume_cube: false,
@@ -675,6 +957,7 @@ struct ParsedFace {
     uv16: [f32; 4],
     tinted: bool,
     cull: Option<u8>,
+    uv_rotation: u8,
 }
 
 /// A parsed (pre-atlas) element.
@@ -702,6 +985,7 @@ fn parse_elements(resolved: &Resolved) -> Vec<ParsedElem> {
                         uv16: fj.uv.unwrap_or([0.0, 0.0, 16.0, 16.0]),
                         tinted: fj.tintindex.is_some(),
                         cull: fj.cullface.as_deref().and_then(face_index).map(|i| i as u8),
+                        uv_rotation: fj.rotation.rem_euclid(360).div_euclid(90) as u8 % 4,
                     });
                 }
             }
@@ -820,4 +1104,109 @@ fn hash_color(name: &str) -> [f32; 3] {
         0.35 + ((h >> 8) & 0xff) as f32 / 255.0 * 0.5,
         0.35 + (h & 0xff) as f32 / 255.0 * 0.5,
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+
+    #[test]
+    fn blockstate_conditions_support_vanilla_boolean_forms() {
+        let properties = [("north", "true"), ("east", "false"), ("half", "top")];
+        assert!(variant_matches("half=top,north=true", &properties));
+        assert!(!variant_matches("half=bottom", &properties));
+        assert!(property_condition_matches(
+            &serde_json::json!({"north": "true|false", "half": "top"}),
+            &properties,
+        ));
+        assert!(property_condition_matches(
+            &serde_json::json!({"OR": [{"east": "true"}, {"half": "top"}]}),
+            &properties,
+        ));
+        assert!(!property_condition_matches(
+            &serde_json::json!({"AND": [{"north": "true"}, {"half": "bottom"}]}),
+            &properties,
+        ));
+    }
+
+    #[test]
+    fn loads_registry_selected_blockstate_model() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "crabcraft-blockstate-{}-{nonce}.jar",
+            std::process::id()
+        ));
+        let file = File::create(&path).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        writer
+            .start_file("assets/minecraft/blockstates/oak_stairs.json", options)
+            .unwrap();
+        writer
+            .write_all(
+                br##"{
+                    "variants": {
+                        "": {"model":"minecraft:block/fallback"},
+                        "facing=north,half=top,shape=straight,waterlogged=true": {
+                            "model":"minecraft:block/test_stair",
+                            "x":90,
+                            "y":180,
+                            "uvlock":true,
+                            "weight":3
+                        }
+                    }
+                }"##,
+            )
+            .unwrap();
+        writer
+            .start_file("assets/minecraft/models/block/test_stair.json", options)
+            .unwrap();
+        writer
+            .write_all(
+                br##"{
+                    "textures":{"all":"minecraft:block/test"},
+                    "elements":[{
+                        "from":[0,0,0],
+                        "to":[16,8,16],
+                        "faces":{"up":{"texture":"#all","rotation":90}}
+                    }]
+                }"##,
+            )
+            .unwrap();
+        writer
+            .start_file("assets/minecraft/models/block/fallback.json", options)
+            .unwrap();
+        writer
+            .write_all(
+                br##"{
+                    "textures":{"all":"minecraft:block/fallback"},
+                    "elements":[{
+                        "from":[0,0,0],
+                        "to":[16,16,16],
+                        "faces":{"up":{"texture":"#all"}}
+                    }]
+                }"##,
+            )
+            .unwrap();
+        writer.finish().unwrap();
+
+        let block = crab_registry::block_by_name("oak_stairs").unwrap();
+        let atlas = load_block_atlas(&path, &["minecraft:oak_stairs".to_string()]).unwrap();
+        let parts = atlas.block_state_model(block.min_state).unwrap();
+        assert_eq!(parts.len(), 1);
+        let alternative = &parts[0].alternatives[0];
+        assert_eq!(alternative.rotation, [90.0, 180.0, 0.0]);
+        assert_eq!(alternative.weight, 3);
+        assert!(alternative.uvlock);
+        assert_eq!(alternative.elements.len(), 1);
+        assert_eq!(alternative.elements[0].to, [16.0, 8.0, 16.0]);
+        assert_eq!(alternative.elements[0].faces[2].unwrap().uv_rotation, 1);
+        std::fs::remove_file(path).unwrap();
+    }
 }

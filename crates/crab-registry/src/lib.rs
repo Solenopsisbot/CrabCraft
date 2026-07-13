@@ -170,6 +170,14 @@ pub fn item_name(id: u32) -> Option<&'static str> {
     item_def(id).map(|e| e.name)
 }
 
+/// One blockstate property in global-state enumeration order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BlockProperty {
+    pub name: &'static str,
+    /// Values in wire-ID radix order (the first property is most significant).
+    pub values: &'static [&'static str],
+}
+
 /// A block and the contiguous, disjoint range of global block-state IDs it owns.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BlockDef {
@@ -186,6 +194,39 @@ pub struct BlockDef {
     /// True if a proper tool is required to harvest (bare hands mine it ~3x
     /// slower); affects break time.
     pub needs_tool: bool,
+    /// Property radices used to decode a global state ID without guessing.
+    pub properties: &'static [BlockProperty],
+}
+
+/// Resolves one property value from a global block-state ID.
+#[must_use]
+pub fn block_state_property(state: u32, property: &str) -> Option<&'static str> {
+    let block = block_for_state(state)?;
+    let offset = usize::try_from(state.checked_sub(block.min_state)?).ok()?;
+    let index = block
+        .properties
+        .iter()
+        .position(|candidate| candidate.name == property)?;
+    let stride = block.properties[index + 1..]
+        .iter()
+        .try_fold(1usize, |product, property| {
+            product.checked_mul(property.values.len())
+        })?;
+    let values = block.properties[index].values;
+    values.get((offset / stride) % values.len()).copied()
+}
+
+/// Returns all property/value pairs for a global block-state ID.
+#[must_use]
+pub fn block_state_properties(state: u32) -> Option<Vec<(&'static str, &'static str)>> {
+    let block = block_for_state(state)?;
+    block
+        .properties
+        .iter()
+        .map(|property| {
+            block_state_property(state, property.name).map(|value| (property.name, value))
+        })
+        .collect()
 }
 
 /// One axis-aligned part of a block collision shape, in local 0..=1 coordinates.
@@ -942,6 +983,33 @@ mod tests {
         assert_eq!(straight.boxes()[0].max[1], 0.5);
         let inner_bottom = collision_shape(stairs.min_state + 13);
         assert_eq!(inner_bottom.boxes().len(), 4); // base + three quadrants
+    }
+
+    #[test]
+    fn generated_property_radices_decode_global_states() {
+        let stairs = block_by_name("oak_stairs").unwrap();
+        assert_eq!(
+            block_state_property(stairs.min_state, "facing"),
+            Some("north")
+        );
+        assert_eq!(block_state_property(stairs.min_state, "half"), Some("top"));
+        assert_eq!(
+            block_state_property(stairs.min_state, "shape"),
+            Some("straight")
+        );
+        assert_eq!(
+            block_state_property(stairs.default_state, "half"),
+            Some("bottom")
+        );
+
+        let fence = block_by_name("oak_fence").unwrap();
+        assert_eq!(block_state_property(fence.min_state, "east"), Some("true"));
+        assert_eq!(
+            block_state_property(fence.default_state, "east"),
+            Some("false")
+        );
+        let properties = block_state_properties(fence.default_state).unwrap();
+        assert!(properties.contains(&("waterlogged", "false")));
     }
 
     #[test]

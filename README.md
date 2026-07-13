@@ -310,7 +310,10 @@ Microsoft account. Using the official server jar:
  - [x] F5 first/rear/front camera cycling with an animated local-player model
  - [x] Player model (humanoid + default skin) for other players
  - [x] Entity body/head yaw facing; block-breaking crack overlay; aliased mob models
- - [ ] Blockstate variants, multipart models, and biome tint
+ - [x] Registry-driven blockstate variants, multipart models, weighted choices,
+   model/face rotations, UV locking, and biome tint
+   - [x] Vanilla blockstate JSON is matched against generated state-property
+     schemas for every supported registry profile
    - [x] State-aware top/bottom, facing, straight/inner/outer stair models
    - [x] Multipart connected fence, pane/bar, and low/tall wall models
    - [x] Open/hinged doors and trapdoors; straight, corner, ascending, and powered rails

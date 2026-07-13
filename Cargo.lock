@@ -552,6 +552,7 @@ dependencies = [
 name = "crab-assets"
 version = "0.0.1"
 dependencies = [
+ "crab-registry",
  "image",
  "serde",
  "serde_json",
