@@ -89,7 +89,10 @@ presentation code resolves numeric IDs.
 - `crab-net`: async transport, framing, zlib, AES-CFB8, protocol-state tracking.
 - `crab-world`: section palettes, chunks, block updates, biomes and dimension data.
 - `crab-registry`: generated block/item/entity tables and state interpretation.
-- `crab-physics`: collision, ray casting, movement and fluid forces.
+- `crab-physics`: collision, ray casting, movement and fluid forces. Collision
+  consumes deduplicated per-state voxel boxes selected by `crab-registry` for
+  the active protocol profile; the committed tables are generated from
+  minecraft-data's vanilla voxel-shape extraction and contain no game assets.
 - `crab-assets`: jar/resource-pack models, textures, GUI and entity atlas loading.
 - `crab-render`: mesh generation, shaders, GPU state, HUD geometry.
 - `crab-audio`: sound-event resolution and playback.

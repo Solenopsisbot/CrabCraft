@@ -41,6 +41,8 @@ remains the detailed source of truth.
   including conditional parts, weighted alternatives, rotations, and UV locking.
 - Inherited 3D item-model ground transforms, exact-state falling-block models,
   and bone-following animated humanoid armour layers.
+- Deduplicated, version-selected vanilla collision boxes for every global block
+  state across all supported registry profiles.
 
 ### Changed
 

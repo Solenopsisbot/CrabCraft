@@ -334,13 +334,13 @@ Microsoft account. Using the official server jar:
  - [x] Server-driven spatial mob ambient sounds with range/volume attenuation
  - [x] Java-family texture aliases plus shared projectile and minecart geometry
  - [ ] Remaining per-mob geometry and hitbox models
-- [ ] Precise per-block collision shapes
+- [x] Precise generated per-state collision shapes for every supported registry
   - [x] Empty shapes: fluids, plants, rails, torches, redstone, signs, and similar blocks
   - [x] State-aware top/bottom/double slabs and full stair variants + 0.6-block auto-step
   - [x] Connected fences/walls/panes, gates, doors/trapdoors, snow layers, chests, beds, pots, and common low blocks
   - [x] Specialized cauldron/composter, hopper, anvil, bell, head/skull, and candle shapes
   - [x] Rare utility/decorative shapes (grindstones, lecterns, chains, sea pickles, brewing stands, lanterns)
-  - [ ] Exhaustive generated voxel shapes for every remaining block state
+  - [x] Exhaustive deduplicated vanilla voxel shapes for every global block state
 - [x] Protocol 764 / 1.20.2 login + Configuration state, registry transfer,
   configuration keepalive/ping/resource packs, chunk batching, and shifted play IDs
 - [x] Protocol 765 / 1.20.3–1.20.4 login, configuration, packet mappings,
