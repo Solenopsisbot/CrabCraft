@@ -45,6 +45,11 @@ remains the detailed source of truth.
 - Creative flight uses vanilla-style double-Space toggling; `F` swaps hands.
 - The inventory screen includes a cursor-facing 3D local-player preview with an
   isolated camera/depth viewport and correct HUD layering.
+- The pause menu now includes an options screen with live FOV, mouse
+  sensitivity, and fullscreen controls.
+- F5 now cycles first-person, rear third-person, and front third-person cameras;
+  third-person views render the local animated/posed player model and shorten
+  the camera arm around walls to prevent clipping.
 - Entity asset resolution now covers Java family texture directories, shared
   projectile and minecart geometry, and Bedrock's plain `.json` model files,
   substantially reducing generic-box fallbacks with the documented asset setup.

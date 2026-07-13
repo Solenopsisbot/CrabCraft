@@ -69,6 +69,10 @@ tested for every supported profile:
   **Shift sneak** (including crouched speed, eye height, and server pose state),
   plus reliable vanilla-style **double-Space Creative/Spectator flight**,
   Spectator noclip, and **F main/offhand swapping** with local prediction
+- **Camera perspectives**: **F5** cycles first person, third-person rear, and
+  third-person front views; third person renders the local animated player and
+  hides first-person hand overlays, with camera distance pulled forward by
+  nearby blocks to avoid wall clipping
 - **Advanced movement**: sprint-swimming with low pose/eye height and
   equipped-Elytra fall-flying initiation with reduced glide gravity
 - **Vehicles**: local mount/dismount tracking, camera/seat synchronization,
@@ -146,9 +150,9 @@ tested for every supported profile:
   applied to local movement, mining, and gravity, plus vanilla HUD icons
 - **Item/block use**: empty-hand interactions, doors/buttons/containers while
   holding blocks, air-use for food/bows/buckets/shields, and release-use packets
-- **Pause menu**: **Esc** opens a menu with the vanilla button sprites
-  (Back to Game / Controls / Quit), hover highlight + click, and an in-game
-  controls reference
+- **Pause/options menus**: **Esc** opens a menu with the vanilla button sprites,
+  an in-game controls reference, and live FOV, mouse-sensitivity, and fullscreen
+  settings
 - **Chat & commands**: **T** to chat, **/** for a command; messages send (chat +
   Chat Command packets) and incoming system chat shows in an on-screen log
 - **Server overlays**: action-bar text, timed titles/subtitles, stacked boss
@@ -302,6 +306,8 @@ Microsoft account. Using the official server jar:
  - [x] Sounds: per-block break / place / mining-hit / footstep / hurt / attack via `sounds.json`
  - [x] Crafting (2×2) + armour via the full inventory window; left/right clicks
  - [x] Real HUD (hearts / hunger / XP+level); pause menu with vanilla buttons
+ - [x] In-game options for FOV, mouse sensitivity, and fullscreen mode
+ - [x] F5 first/rear/front camera cycling with an animated local-player model
  - [x] Player model (humanoid + default skin) for other players
  - [x] Entity body/head yaw facing; block-breaking crack overlay; aliased mob models
  - [ ] Blockstate variants, multipart models, and biome tint
