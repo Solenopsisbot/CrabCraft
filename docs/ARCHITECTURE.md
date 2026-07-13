@@ -24,6 +24,13 @@ Resource-pack changes construct a validated vanilla-fallback archive, rebuild CP
 atlases, upload replacement GPU resources, remesh loaded chunks, and only then
 acknowledge success to the server.
 
+Entity assets are assembled at startup from user-provided sources: Java textures
+from the selected client jar and compatible box/bone geometry from Mojang's
+Bedrock sample pack. Name aliases bridge Java family texture directories and
+shared/versioned geometry names. The resulting atlas is keyed by the active
+protocol's generated entity IDs; unresolved entries deliberately retain a
+registry-sized diagnostic box. See [Asset pipeline](ASSETS.md).
+
 The window renderer orders its frame as world geometry, HUD backgrounds, the
 inventory's depth-cleared 3D player viewport, then HUD item/text foregrounds.
 The preview reuses the entity atlas and humanoid mesh but owns a separate camera

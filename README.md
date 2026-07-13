@@ -171,7 +171,8 @@ side-by-side rather than by rewriting the core.
 | `crabcraft` | The client binary that wires it all together |
 
 See [Architecture](docs/ARCHITECTURE.md) for data flow and crate boundaries,
-[Protocol support](docs/PROTOCOL.md) for the version matrix, and
+[Protocol support](docs/PROTOCOL.md) for the version matrix,
+[Asset pipeline](docs/ASSETS.md) for runtime asset resolution, and
 [Contributing](CONTRIBUTING.md) before sending a change.
 
 ## Build & run
@@ -207,8 +208,11 @@ CRABCRAFT_ENTITY_MODELS=/path/to/bedrock-samples/resource_pack/models/entity \
   cargo run --release -p crabcraft -- render 127.0.0.1:25565
 ```
 
-Entity geometry is parsed from Bedrock `.geo.json` and textured with the Java
-textures from your jar; entities without a loaded model render as coloured boxes.
+Entity geometry is parsed from Bedrock `.geo.json`/`.json` and textured with the
+Java textures from your jar. Family-folder skins, shared mob models, projectile
+models, and minecart variants are resolved explicitly; entities without both a
+loaded model and texture render as coloured registry-sized boxes. See the
+[asset pipeline](docs/ASSETS.md) for resolution and licensing details.
 
 Windowed controls: **WASD** move · **Space** jump / double-tap to fly when allowed
 · **F** swap main/offhand
@@ -296,6 +300,7 @@ Microsoft account. Using the official server jar:
  - [x] Core movement/mining status-effect behavior and expiry
  - [x] Cursor-facing 3D player preview in the inventory screen
  - [x] Server-driven spatial mob ambient sounds with range/volume attenuation
+ - [x] Java-family texture aliases plus shared projectile and minecart geometry
  - [ ] Remaining per-mob geometry and hitbox models
 - [ ] Precise per-block collision shapes
   - [x] Empty shapes: fluids, plants, rails, torches, redstone, signs, and similar blocks

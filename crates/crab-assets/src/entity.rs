@@ -230,6 +230,36 @@ pub fn entity_alias(name: &str) -> Option<(&'static str, &'static str)> {
         "giant" => ("zombie", "zombie/zombie"),
         "illusioner" => ("evoker", "illager/illusioner"),
         "wandering_trader" => ("villager_v2", "wandering_trader"),
+        "drowned" => ("drowned", "zombie/drowned"),
+        "husk" => ("husk", "zombie/husk"),
+        "stray" => ("stray", "skeleton/stray"),
+        "wither_skeleton" => ("wither_skeleton", "skeleton/wither_skeleton"),
+        "evoker" => ("evoker", "illager/evoker"),
+        "pillager" => ("pillager", "illager/pillager"),
+        "ravager" => ("ravager", "illager/ravager"),
+        "vindicator" => ("vindicator", "illager/vindicator"),
+        "glow_squid" => ("glow_squid", "squid/glow_squid"),
+        "ocelot" => ("ocelot", "cat/ocelot"),
+        "leash_knot" => ("leash_knot", "lead_knot"),
+        "shulker_bullet" => ("shulker_bullet", "shulker/spark"),
+        // Fish textures share the `fish` directory in Java resource packs.
+        "cod" => ("cod", "fish/cod"),
+        "pufferfish" => ("pufferfish", "fish/pufferfish"),
+        "salmon" => ("salmon", "fish/salmon"),
+        "tropical_fish" => ("tropical_fish", "fish/tropical_a"),
+        // Projectiles and vehicle variants reuse a common geometry. Some of
+        // these models are named differently in the Bedrock sample pack.
+        "arrow" => ("arrow", "projectiles/arrow"),
+        "spectral_arrow" => ("arrow", "projectiles/spectral_arrow"),
+        "dragon_fireball" => ("fireball", "enderdragon/dragon_fireball"),
+        "end_crystal" => ("ender_crystal", "end_crystal/end_crystal"),
+        "fishing_bobber" => ("fishing_hook", "fishing_hook"),
+        "chest_minecart"
+        | "command_block_minecart"
+        | "furnace_minecart"
+        | "hopper_minecart"
+        | "spawner_minecart"
+        | "tnt_minecart" => ("minecart", "minecart"),
         // Horses (all share the horse model).
         "horse" => ("horse_v2", "horse/horse_brown"),
         "donkey" => ("horse_v2", "horse/donkey"),
@@ -255,8 +285,16 @@ pub fn entity_alias(name: &str) -> Option<(&'static str, &'static str)> {
 
 /// Loads an entity model from `<models_dir>/<name>.geo.json`.
 pub fn load_geometry(models_dir: &Path, name: &str) -> Option<EntityGeometry> {
-    let text = fs::read_to_string(models_dir.join(format!("{name}.geo.json"))).ok()?;
-    parse_geometry(&text)
+    // Most Bedrock samples use `.geo.json`; a handful of otherwise compatible
+    // projectile models (notably evocation fangs and llama spit) use `.json`.
+    for suffix in [".geo.json", ".json"] {
+        if let Ok(text) = fs::read_to_string(models_dir.join(format!("{name}{suffix}"))) {
+            if let Some(geometry) = parse_geometry(&text) {
+                return Some(geometry);
+            }
+        }
+    }
+    None
 }
 
 /// Loads an RGBA entity texture from the client jar, trying the common
@@ -413,6 +451,16 @@ mod tests {
             entity_alias("parrot"),
             Some(("parrot", "parrot/parrot_red_blue"))
         );
+        assert_eq!(entity_alias("drowned"), Some(("drowned", "zombie/drowned")));
+        assert_eq!(
+            entity_alias("tropical_fish"),
+            Some(("tropical_fish", "fish/tropical_a"))
+        );
+        assert_eq!(
+            entity_alias("spectral_arrow"),
+            Some(("arrow", "projectiles/spectral_arrow"))
+        );
+        assert_eq!(entity_alias("tnt_minecart"), Some(("minecart", "minecart")));
         // Unaliased mobs fall through to the name-based defaults.
         assert_eq!(entity_alias("cow"), None);
         assert_eq!(entity_alias("zombie"), None);
