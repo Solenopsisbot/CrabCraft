@@ -41,6 +41,9 @@ pub struct FaceJson {
     pub cullface: Option<String>,
     #[serde(default)]
     pub tintindex: Option<i32>,
+    /// Clockwise texture rotation (0/90/180/270 degrees).
+    #[serde(default)]
+    pub rotation: i32,
 }
 
 /// A model with its parent chain fully merged.

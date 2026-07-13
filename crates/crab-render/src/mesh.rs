@@ -54,8 +54,6 @@ impl Mesh {
 }
 
 struct Face {
-    /// Neighbour direction this face points toward.
-    dir: [i32; 3],
     normal: [f32; 3],
     /// Four corners (unit cube space), wound as a quad.
     corners: [[f32; 3]; 4],
@@ -67,27 +65,27 @@ struct Face {
 #[rustfmt::skip]
 const FACES: [Face; 6] = [
     // +X (east)
-    Face { dir: [1, 0, 0], normal: [1.0, 0.0, 0.0],
+    Face { normal: [1.0, 0.0, 0.0],
         corners: [[1.0,0.0,0.0],[1.0,1.0,0.0],[1.0,1.0,1.0],[1.0,0.0,1.0]],
         uvs: [[0.0,1.0],[0.0,0.0],[1.0,0.0],[1.0,1.0]] },
     // -X (west)
-    Face { dir: [-1, 0, 0], normal: [-1.0, 0.0, 0.0],
+    Face { normal: [-1.0, 0.0, 0.0],
         corners: [[0.0,0.0,1.0],[0.0,1.0,1.0],[0.0,1.0,0.0],[0.0,0.0,0.0]],
         uvs: [[0.0,1.0],[0.0,0.0],[1.0,0.0],[1.0,1.0]] },
     // +Y (top)
-    Face { dir: [0, 1, 0], normal: [0.0, 1.0, 0.0],
+    Face { normal: [0.0, 1.0, 0.0],
         corners: [[0.0,1.0,0.0],[1.0,1.0,0.0],[1.0,1.0,1.0],[0.0,1.0,1.0]],
         uvs: [[0.0,0.0],[1.0,0.0],[1.0,1.0],[0.0,1.0]] },
     // -Y (bottom)
-    Face { dir: [0, -1, 0], normal: [0.0, -1.0, 0.0],
+    Face { normal: [0.0, -1.0, 0.0],
         corners: [[0.0,0.0,1.0],[1.0,0.0,1.0],[1.0,0.0,0.0],[0.0,0.0,0.0]],
         uvs: [[0.0,1.0],[1.0,1.0],[1.0,0.0],[0.0,0.0]] },
     // +Z (south)
-    Face { dir: [0, 0, 1], normal: [0.0, 0.0, 1.0],
+    Face { normal: [0.0, 0.0, 1.0],
         corners: [[1.0,0.0,1.0],[1.0,1.0,1.0],[0.0,1.0,1.0],[0.0,0.0,1.0]],
         uvs: [[0.0,1.0],[0.0,0.0],[1.0,0.0],[1.0,1.0]] },
     // -Z (north)
-    Face { dir: [0, 0, -1], normal: [0.0, 0.0, -1.0],
+    Face { normal: [0.0, 0.0, -1.0],
         corners: [[0.0,0.0,0.0],[0.0,1.0,0.0],[1.0,1.0,0.0],[1.0,0.0,0.0]],
         uvs: [[0.0,1.0],[0.0,0.0],[1.0,0.0],[1.0,1.0]] },
 ];
@@ -95,7 +93,41 @@ const FACES: [Face; 6] = [
 /// Whether `state` is a full opaque cube, so it hides neighbouring faces.
 fn occludes(atlas: &Atlas, state: u32) -> bool {
     !crab_registry::is_air(state)
-        && crab_registry::block_name(state).is_some_and(|n| atlas.is_cube(n))
+        && crab_registry::block_name(state).is_some_and(|n| atlas.is_state_cube(state, n))
+}
+
+fn block_model_seed(cell: [i32; 3], part: usize) -> u64 {
+    let mut seed = i64::from(cell[0]).wrapping_mul(3_129_871)
+        ^ i64::from(cell[2]).wrapping_mul(116_129_781)
+        ^ i64::from(cell[1]);
+    seed = seed
+        .wrapping_mul(seed)
+        .wrapping_mul(42_317_861)
+        .wrapping_add(seed.wrapping_mul(11));
+    (seed ^ i64::try_from(part).unwrap_or(0).wrapping_mul(0x5deece66d)) as u64
+}
+
+fn select_state_alternative(
+    part: &crab_assets::BlockStateModelPart,
+    cell: [i32; 3],
+    part_index: usize,
+) -> Option<&crab_assets::BlockStateModelAlternative> {
+    let total = part
+        .alternatives
+        .iter()
+        .fold(0u64, |sum, model| sum + u64::from(model.weight));
+    if total == 0 {
+        return part.alternatives.first();
+    }
+    let mut choice = block_model_seed(cell, part_index) % total;
+    part.alternatives.iter().find(|model| {
+        if choice < u64::from(model.weight) {
+            true
+        } else {
+            choice -= u64::from(model.weight);
+            false
+        }
+    })
 }
 
 fn biome_tint(world: &World, name: &str, cell: [i32; 3], model_tint: [f32; 3]) -> [f32; 3] {
@@ -285,6 +317,24 @@ pub fn mesh_region(world: &World, atlas: &Atlas, min: [i32; 3], max: [i32; 3]) -
                 let name = crab_registry::block_name(state).unwrap_or("");
                 let base = [x as f32, y as f32, z as f32];
 
+                if let Some(parts) = atlas.block_state_model(state) {
+                    for (part_index, part) in parts.iter().enumerate() {
+                        if let Some(model) = select_state_alternative(part, [x, y, z], part_index) {
+                            emit_state_elements(
+                                &mut vertices,
+                                world,
+                                atlas,
+                                base,
+                                [x, y, z],
+                                &model.elements,
+                                model.rotation,
+                                model.uvlock,
+                            );
+                        }
+                    }
+                    continue;
+                }
+
                 if name.ends_with("_wall") {
                     if let Some(block) = crab_registry::block_for_state(state) {
                         let offset = (state - block.min_state) as usize;
@@ -448,6 +498,7 @@ pub fn mesh_region(world: &World, atlas: &Atlas, min: [i32; 3], max: [i32; 3]) -
                                     [x, y, z],
                                     elements,
                                     [0.0, 0.0, 0.0],
+                                    false,
                                     Some(tint),
                                 );
                             }
@@ -470,6 +521,7 @@ pub fn mesh_region(world: &World, atlas: &Atlas, min: [i32; 3], max: [i32; 3]) -
                                     [x, y, z],
                                     elements,
                                     [0.0, yaw, 0.0],
+                                    false,
                                     Some(tint),
                                 );
                             }
@@ -489,6 +541,7 @@ pub fn mesh_region(world: &World, atlas: &Atlas, min: [i32; 3], max: [i32; 3]) -
                                         [x, y, z],
                                         elements,
                                         [0.0, up_yaw, 0.0],
+                                        false,
                                         Some(tint),
                                     );
                                 }
@@ -677,6 +730,31 @@ fn emit_elements(
         cell,
         elements,
         model_rotation,
+        false,
+        None,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_state_elements(
+    verts: &mut Vec<Vertex>,
+    world: &World,
+    atlas: &Atlas,
+    base: [f32; 3],
+    cell: [i32; 3],
+    elements: &[crab_assets::ElementData],
+    model_rotation: [f32; 3],
+    uvlock: bool,
+) {
+    emit_elements_tinted(
+        verts,
+        world,
+        atlas,
+        base,
+        cell,
+        elements,
+        model_rotation,
+        uvlock,
         None,
     );
 }
@@ -690,6 +768,7 @@ fn emit_elements_tinted(
     cell: [i32; 3],
     elements: &[crab_assets::ElementData],
     model_rotation: [f32; 3],
+    uvlock: bool,
     tint_override: Option<[f32; 3]>,
 ) {
     let block_name = world
@@ -705,13 +784,19 @@ fn emit_elements_tinted(
             };
             // Cull this face only when a cullface neighbour is a full cube.
             if let Some(cd) = ef.cull {
-                let d = FACES[cd as usize].dir;
+                let direction = rotate_model(FACES[cd as usize].normal, model_rotation, false);
+                let d = direction.map(|value| value.round() as i32);
                 let n = world.block_state(cell[0] + d[0], cell[1] + d[1], cell[2] + d[2]);
                 if n.is_some_and(|s| occludes(atlas, s)) {
                     continue;
                 }
             }
             let [su0, sv0, su1, sv1] = ef.uv;
+            let mut normal = face.normal;
+            if let Some(rotation) = &el.rotation {
+                normal = rotate_element_normal(normal, rotation);
+            }
+            normal = rotate_model(normal, model_rotation, false);
             for &ci in &[0usize, 1, 2, 0, 2, 3] {
                 let uc = face.corners[ci];
                 let mut p = [
@@ -723,10 +808,16 @@ fn emit_elements_tinted(
                     p = rotate_point(p, rot);
                 }
                 p = rotate_model(p, model_rotation, true);
-                let [cu, cv] = face.uvs[ci];
+                let [mut cu, mut cv] = face.uvs[ci];
+                if uvlock {
+                    (cu, cv) = uvlock_coordinates(fi, model_rotation, cu, cv);
+                }
+                for _ in 0..ef.uv_rotation {
+                    (cu, cv) = (1.0 - cv, cu);
+                }
                 verts.push(Vertex {
                     position: [base[0] + p[0], base[1] + p[1], base[2] + p[2]],
-                    normal: rotate_model(face.normal, model_rotation, false),
+                    normal,
                     uv: [su0 + cu * (su1 - su0), sv0 + cv * (sv1 - sv0)],
                     tint: tint_override
                         .unwrap_or_else(|| biome_tint(world, block_name, cell, ef.tint)),
@@ -735,6 +826,68 @@ fn emit_elements_tinted(
             }
         }
     }
+}
+
+fn face_texture_basis(face: usize) -> ([f32; 3], [f32; 3]) {
+    match face {
+        0 => ([0.0, 0.0, 1.0], [0.0, -1.0, 0.0]),
+        1 => ([0.0, 0.0, -1.0], [0.0, -1.0, 0.0]),
+        2 => ([1.0, 0.0, 0.0], [0.0, 0.0, 1.0]),
+        3 => ([1.0, 0.0, 0.0], [0.0, 0.0, -1.0]),
+        4 => ([-1.0, 0.0, 0.0], [0.0, -1.0, 0.0]),
+        _ => ([1.0, 0.0, 0.0], [0.0, -1.0, 0.0]),
+    }
+}
+
+fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn uvlock_coordinates(source_face: usize, model_rotation: [f32; 3], u: f32, v: f32) -> (f32, f32) {
+    let normal = rotate_model(FACES[source_face].normal, model_rotation, false);
+    let target_face = FACES
+        .iter()
+        .enumerate()
+        .max_by(|(_, left), (_, right)| {
+            dot(normal, left.normal).total_cmp(&dot(normal, right.normal))
+        })
+        .map_or(source_face, |(index, _)| index);
+    let (source_u, source_v) = face_texture_basis(source_face);
+    let rotated_u = rotate_model(source_u, model_rotation, false);
+    let rotated_v = rotate_model(source_v, model_rotation, false);
+    let (target_u, target_v) = face_texture_basis(target_face);
+    let du = u - 0.5;
+    let dv = v - 0.5;
+    (
+        0.5 + du * dot(rotated_u, target_u) + dv * dot(rotated_v, target_u),
+        0.5 + du * dot(rotated_u, target_v) + dv * dot(rotated_v, target_v),
+    )
+}
+
+fn rotate_element_normal(
+    mut normal: [f32; 3],
+    rotation: &crab_assets::ElementRotation,
+) -> [f32; 3] {
+    let angle = rotation.angle.to_radians();
+    let (sin, cos) = angle.sin_cos();
+    match rotation.axis {
+        0 => {
+            let (y, z) = (normal[1], normal[2]);
+            normal[1] = y * cos - z * sin;
+            normal[2] = y * sin + z * cos;
+        }
+        2 => {
+            let (x, y) = (normal[0], normal[1]);
+            normal[0] = x * cos - y * sin;
+            normal[1] = x * sin + y * cos;
+        }
+        _ => {
+            let (x, z) = (normal[0], normal[2]);
+            normal[0] = x * cos + z * sin;
+            normal[2] = -x * sin + z * cos;
+        }
+    }
+    normal
 }
 
 fn rotate_model(mut point: [f32; 3], rotation: [f32; 3], around_center: bool) -> [f32; 3] {
@@ -1225,6 +1378,17 @@ mod tests {
         let vertices = block_item_mesh(&atlas, "minecraft:stone", [0.0, 0.0, 0.0], 0.36, 45.0);
         assert_eq!(vertices.len(), 36);
         assert!(vertices.iter().all(|vertex| vertex.opacity == 1.0));
+    }
+
+    #[test]
+    fn uvlock_keeps_top_texture_aligned_after_model_rotation() {
+        let (u, v) = uvlock_coordinates(2, [0.0, 90.0, 0.0], 0.0, 0.0);
+        assert!((u - 0.0).abs() < 1e-5);
+        assert!((v - 1.0).abs() < 1e-5);
+
+        let (u, v) = uvlock_coordinates(4, [0.0, 90.0, 0.0], 0.0, 0.0);
+        assert!((u - 0.0).abs() < 1e-5);
+        assert!((v - 0.0).abs() < 1e-5);
     }
 
     #[test]

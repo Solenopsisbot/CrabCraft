@@ -37,11 +37,15 @@ remains the detailed source of truth.
   fluids, sky rendering, particles, expanded menus, vehicles, swimming/Elytra,
   scoreboards, tab list, entity poses/equipment, and dropped block-item models.
 - Public contribution, security, architecture, protocol, and agent documentation.
+- Registry-driven vanilla blockstate loading for variants and multipart models,
+  including conditional parts, weighted alternatives, rotations, and UV locking.
 
 ### Changed
 
 - Expanded collision shapes, blockstate rendering, entity animation, audio,
   movement, HUD, inventory, and workstation behavior toward vanilla parity.
+- Replaced block-family state guesses in the primary rendering path with
+  generated property schemas for every supported registry profile.
 - Creative flight uses vanilla-style double-Space toggling; `F` swaps hands.
 - The inventory screen includes a cursor-facing 3D local-player preview with an
   isolated camera/depth viewport and correct HUD layering.

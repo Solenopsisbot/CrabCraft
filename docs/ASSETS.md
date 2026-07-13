@@ -17,6 +17,21 @@ The entity-model path may point at the sample repository root, its
 `resource_pack` directory, or the final `models/entity` directory. The loader
 locates the model directory without copying it into the project.
 
+## Blockstate and model resolution
+
+For every loaded block, the asset pipeline reads the vanilla
+`blockstates/<name>.json` definition and matches its `variants` and `multipart`
+conditions against the active protocol registry's generated property schema.
+This preserves the registry's property order and values instead of inferring
+state radices from block names. Multipart `OR`/`AND` conditions, pipe-separated
+values, weighted alternatives, model rotations, per-face UV rotations, and
+`uvlock` are carried into chunk meshing. The model loader then follows parent
+chains and texture variables before adding the resolved textures to the atlas.
+
+Legacy family-specific model lookups remain a non-fatal fallback for incomplete
+or custom packs. A missing blockstate, model, or texture never causes a client
+jar to be copied or extracted into the repository.
+
 ## Entity model resolution
 
 Java entity models are code-defined and are not present in a client jar. The
