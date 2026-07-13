@@ -152,6 +152,7 @@ fn celestial_mesh(eye: Vec3, environment: EnvironmentState, white_uv: [f32; 4]) 
 /// First-person camera: eye at the player's head, looking along yaw/pitch
 /// (Minecraft convention, degrees). Position comes from the player; this just
 /// holds the look angles.
+#[allow(clippy::too_many_arguments)]
 fn first_person_camera(
     player_pos: Vec3,
     yaw_deg: f32,
