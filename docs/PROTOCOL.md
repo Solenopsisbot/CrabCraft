@@ -7,7 +7,7 @@ Crabcraft defaults to protocol 763. Choose another profile with
 |---|---:|---|---|
 | 1.20 / 1.20.1 | 763 | Primary, live-tested | Direct Login-to-Play, classic root NBT |
 | 1.20.2 | 764 | Implemented | Login acknowledgement, Configuration state, registry codec, network-NBT chunks, chunk batches, shifted packet IDs |
-| 1.20.3 / 1.20.4 | 765 | Implemented; live validation pending | NBT chat components, score reset/formats, UUID resource packs/removal, play reconfiguration |
+| 1.20.3 / 1.20.4 | 765 | Core path live-tested on 1.20.4 | NBT chat components, score reset/formats, UUID resource packs/removal, play reconfiguration |
 | 1.20.5 / 1.20.6 | 766 | Not implemented | Data-component item stack redesign |
 | 1.21+ | 767+ | Not implemented | New registries, packets and incremental schema changes |
 
@@ -26,6 +26,12 @@ before reusing the configuration loop.
 Classic NBT includes a root name. Network/anonymous NBT omits it. Using the wrong
 reader shifts every following field, so chunk heightmaps, block entities, registry
 data, and component-era text explicitly select the correct form.
+
+The 765 live fixture uses an official vanilla 1.20.4 offline server and exercises
+Login, Configuration registry transfer, Join Game, dimension lookup, chunk and
+entity streams, spawn synchronization, inventory, movement/keepalive, and chat.
+Optional presentation packets still retain byte-level regression coverage so a
+server need not emit every UI feature during the smoke test.
 
 ## Adding a protocol
 

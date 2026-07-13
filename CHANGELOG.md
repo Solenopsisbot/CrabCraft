@@ -9,7 +9,8 @@ remains the detailed source of truth.
 
 - Protocol profiles for Java Edition 1.20.2 and 1.20.3/1.20.4, including the
   Configuration state, registry data, chunk batches, NBT components, and
-  versioned resource-pack packets.
+  versioned resource-pack packets. The 1.20.4 core path is live-tested against
+  an official vanilla server.
 - Live validated resource-pack layering and renderer atlas replacement.
 - Signs, editable/readable books, maps, recipe books, biome tinting, transparent
   fluids, sky rendering, particles, expanded menus, vehicles, swimming/Elytra,

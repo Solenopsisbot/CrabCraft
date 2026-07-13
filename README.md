@@ -25,8 +25,9 @@ replacement for Mojang's client.
 
 ## What works today
 
-The core path is verified end-to-end against a vanilla 1.20.1 server (offline
-mode unless noted), with protocol codecs and mappings tested for 1.20.2–1.20.4:
+The core path is verified end-to-end against vanilla 1.20.1 and 1.20.4 servers
+(offline mode unless noted), with protocol codecs and mappings tested for every
+supported 1.20.x profile:
 
 - TCP connection, handshake, and **login** (with packet compression)
 - Staying connected: **KeepAlive**, spawn (teleport confirm), position reporting
@@ -296,10 +297,10 @@ Microsoft account. Using the official server jar:
   - [ ] Exhaustive generated voxel shapes for every remaining block state
 - [x] Protocol 764 / 1.20.2 login + Configuration state, registry transfer,
   configuration keepalive/ping/resource packs, chunk batching, and shifted play IDs
-- [ ] Protocol 765 / 1.20.3–1.20.4 login, configuration, packet mappings,
+- [x] Protocol 765 / 1.20.3–1.20.4 login, configuration, packet mappings,
   NBT text components, network-NBT chunks/block entities, score formats,
-  resource-pack UUIDs/removal, and reconfiguration entry are implemented;
-  live vanilla-server validation remains before this profile is promoted
+  resource-pack UUIDs/removal, and reconfiguration entry, live-tested through
+  login, registry transfer, chunks, spawn, inventory, entities, movement, and chat
 - [ ] Protocol 766+ (1.20.5/1.20.6, 1.21, …) data-component item formats and registries
 - [ ] (Far future, maybe) Forge mod support — see the note below
 
