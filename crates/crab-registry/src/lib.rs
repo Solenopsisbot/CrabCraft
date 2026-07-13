@@ -18,23 +18,27 @@ mod blocks_1_20_1;
 mod blocks_1_20_2;
 mod blocks_1_20_3;
 mod blocks_1_20_5;
+mod blocks_1_21;
 mod entities_1_20_1;
 mod entities_1_20_3;
 mod entities_1_20_5;
 mod items_1_20_1;
 mod items_1_20_3;
 mod items_1_20_5;
+mod items_1_21;
 
 pub use blocks_1_20_1::BLOCKS_1_20_1;
 pub use blocks_1_20_2::BLOCKS_1_20_2;
 pub use blocks_1_20_3::BLOCKS_1_20_3;
 pub use blocks_1_20_5::BLOCKS_1_20_5;
+pub use blocks_1_21::BLOCKS_1_21;
 pub use entities_1_20_1::ENTITIES_1_20_1;
 pub use entities_1_20_3::ENTITIES_1_20_3;
 pub use entities_1_20_5::ENTITIES_1_20_5;
 pub use items_1_20_1::ITEMS_1_20_1;
 pub use items_1_20_3::ITEMS_1_20_3;
 pub use items_1_20_5::ITEMS_1_20_5;
+pub use items_1_21::ITEMS_1_21;
 
 static REGISTRY_PROFILE: AtomicU8 = AtomicU8::new(0);
 
@@ -46,6 +50,7 @@ pub fn set_protocol(protocol: i32) {
             764 => 1,
             765 => 2,
             766 => 3,
+            767 => 4,
             _ => 0,
         },
         Ordering::Relaxed,
@@ -59,6 +64,7 @@ pub fn blocks() -> &'static [BlockDef] {
         1 => BLOCKS_1_20_2,
         2 => BLOCKS_1_20_3,
         3 => BLOCKS_1_20_5,
+        4 => BLOCKS_1_21,
         _ => BLOCKS_1_20_1,
     }
 }
@@ -69,6 +75,7 @@ pub fn items() -> &'static [ItemDef] {
     match REGISTRY_PROFILE.load(Ordering::Relaxed) {
         2 => ITEMS_1_20_3,
         3 => ITEMS_1_20_5,
+        4 => ITEMS_1_21,
         _ => ITEMS_1_20_1,
     }
 }
@@ -79,6 +86,7 @@ pub fn entities() -> &'static [EntityDef] {
     match REGISTRY_PROFILE.load(Ordering::Relaxed) {
         2 => ENTITIES_1_20_3,
         3 => ENTITIES_1_20_5,
+        4 => ENTITIES_1_20_5,
         _ => ENTITIES_1_20_1,
     }
 }
@@ -1074,5 +1082,13 @@ mod tests {
             .find(|entity| entity.name == "armadillo")
             .unwrap();
         assert_eq!(armadillo.id, 2);
+
+        let mace = ITEMS_1_21.iter().find(|item| item.name == "mace").unwrap();
+        assert_eq!(mace.id, 1093);
+        let trial_spawner = BLOCKS_1_21
+            .iter()
+            .find(|block| block.name == "minecraft:trial_spawner")
+            .unwrap();
+        assert_eq!(trial_spawner.default_state, 26_644);
     }
 }

@@ -138,11 +138,42 @@ fn skip_registry_holder<B: Buf>(
     Ok(())
 }
 
+fn skip_sound_holder<B: Buf>(src: &mut B) -> Result<(), ProtoError> {
+    skip_registry_holder(src, |src| {
+        skip_string(src)?;
+        skip_optional(src, |src| {
+            let _ = src.read_f32()?;
+            Ok(())
+        })
+    })
+}
+
 fn skip_component<B: Buf>(
     src: &mut B,
     kind: i32,
     metadata: &mut HashMap<String, Nbt>,
+    protocol_767: bool,
 ) -> Result<(), ProtoError> {
+    if protocol_767 && kind == 42 {
+        if src.read_bool()? {
+            skip_registry_holder(src, |src| {
+                skip_sound_holder(src)?;
+                let _ = nbt::read_anonymous_nbt(src)?;
+                let _ = src.read_f32()?;
+                let _ = src.read_varint()?;
+                Ok(())
+            })?;
+        } else {
+            skip_string(src)?;
+        }
+        let _ = src.read_bool()?;
+        return Ok(());
+    }
+    let kind = if protocol_767 && kind >= 43 {
+        kind - 1
+    } else {
+        kind
+    };
     match kind {
         0 => {
             if let Nbt::Compound(values) = nbt::read_anonymous_nbt(src)? {
@@ -191,7 +222,9 @@ fn skip_component<B: Buf>(
         12 => {
             for _ in 0..bounded_count(src, "attribute count")? {
                 let _ = src.read_varint()?;
-                let _ = src.read_uuid()?;
+                if !protocol_767 {
+                    let _ = src.read_uuid()?;
+                }
                 skip_string(src)?;
                 let _ = src.read_f64()?;
                 let _ = src.read_varint()?;
@@ -211,7 +244,7 @@ fn skip_component<B: Buf>(
             let _ = src.read_f32()?;
             let _ = src.read_bool()?;
             let _ = src.read_f32()?;
-            let _ = read_component_slot(src)?;
+            let _ = read_component_slot_version(src, protocol_767)?;
             for _ in 0..bounded_count(src, "food effect count")? {
                 let _ = src.read_varint()?;
                 let _ = src.read_f32()?;
@@ -241,7 +274,7 @@ fn skip_component<B: Buf>(
         }
         29 | 30 | 51 => {
             for _ in 0..bounded_count(src, "nested item count")? {
-                let _ = read_component_slot(src)?;
+                let _ = read_component_slot_version(src, protocol_767)?;
             }
         }
         31 => {
@@ -288,13 +321,7 @@ fn skip_component<B: Buf>(
             let _ = src.read_bool()?;
         }
         40 => skip_registry_holder(src, |s| {
-            skip_registry_holder(s, |s| {
-                skip_string(s)?;
-                skip_optional(s, |s| {
-                    let _ = s.read_f32()?;
-                    Ok(())
-                })
-            })?;
+            skip_sound_holder(s)?;
             let _ = s.read_f32()?;
             let _ = s.read_f32()?;
             let _ = nbt::read_anonymous_nbt(s)?;
@@ -367,11 +394,34 @@ fn skip_component<B: Buf>(
 
 /// Decodes a protocol 766 item stack and consumes its complete component patch.
 pub fn read_component_slot<B: Buf>(src: &mut B) -> Result<ComponentSlot, ProtoError> {
-    let count = src.read_i8()?;
+    read_component_slot_version(src, false)
+}
+
+/// Decodes the protocol 767 variant, whose item count is a VarInt and whose
+/// component registry includes `jukebox_playable` at index 42.
+pub fn read_component_slot_767<B: Buf>(src: &mut B) -> Result<ComponentSlot, ProtoError> {
+    read_component_slot_version(src, true)
+}
+
+fn read_component_slot_version<B: Buf>(
+    src: &mut B,
+    protocol_767: bool,
+) -> Result<ComponentSlot, ProtoError> {
+    let count = if protocol_767 {
+        src.read_varint()?
+    } else {
+        i32::from(src.read_i8()?)
+    };
     if count == 0 {
         return Ok(ComponentSlot {
             item: None,
             metadata: None,
+        });
+    }
+    if !(1..=127).contains(&count) {
+        return Err(ProtoError::InvalidEnum {
+            type_name: "item stack count",
+            value: i64::from(count),
         });
     }
     let item_id = src.read_varint()?;
@@ -386,13 +436,19 @@ pub fn read_component_slot<B: Buf>(src: &mut B) -> Result<ComponentSlot, ProtoEr
     let mut values = HashMap::new();
     for _ in 0..added {
         let kind = src.read_varint()?;
-        skip_component(src, kind, &mut values)?;
+        skip_component(src, kind, &mut values, protocol_767)?;
     }
     for _ in 0..removed {
         let _ = src.read_varint()?;
     }
     Ok(ComponentSlot {
-        item: Some(SlotItem { item_id, count }),
+        item: Some(SlotItem {
+            item_id,
+            count: i8::try_from(count).map_err(|_| ProtoError::InvalidEnum {
+                type_name: "item stack count",
+                value: i64::from(count),
+            })?,
+        }),
         metadata: (!values.is_empty()).then_some(Nbt::Compound(values)),
     })
 }
@@ -407,6 +463,19 @@ pub fn write_component_slot<B: BufMut>(dst: &mut B, item: Option<SlotItem>) {
             dst.put_varint(0);
         }
         None => dst.put_i8(0),
+    }
+}
+
+/// Writes the protocol 767 VarInt-count item stack representation.
+pub fn write_component_slot_767<B: BufMut>(dst: &mut B, item: Option<SlotItem>) {
+    match item {
+        Some(item) => {
+            dst.put_varint(i32::from(item.count));
+            dst.put_varint(item.item_id);
+            dst.put_varint(0);
+            dst.put_varint(0);
+        }
+        None => dst.put_varint(0),
     }
 }
 

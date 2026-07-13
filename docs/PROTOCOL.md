@@ -9,7 +9,8 @@ Crabcraft defaults to protocol 763. Choose another profile with
 | 1.20.2 | 764 | Implemented | Login acknowledgement, Configuration state, registry codec, network-NBT chunks, chunk batches, shifted packet IDs |
 | 1.20.3 / 1.20.4 | 765 | Core path live-tested on 1.20.4 | NBT chat components, score reset/formats, UUID resource packs/removal, play reconfiguration |
 | 1.20.5 / 1.20.6 | 766 | Core path live-tested on 1.20.6 | Split configuration registries, revised packet maps, data-component item stacks |
-| 1.21+ | 767+ | Not implemented | New registries, packets and incremental schema changes |
+| 1.21 / 1.21.1 | 767 | Core path live-tested on 1.21.1 | Tricky Trials registries, VarInt item counts, jukebox component, configuration report/link packets |
+| 1.21.2+ | 768+ | Not implemented | New registries, packets and incremental schema changes |
 
 ## Versioning approach
 
@@ -19,12 +20,17 @@ version-specific decoder whenever its payload changed; accepting a shifted ID is
 not considered sufficient support.
 
 Blocks, block states, items, and entities are also numeric wire registries. The
-client selects committed generated 1.20.1, 1.20.2, 1.20.3, or 1.20.5 tables before it
-loads assets or decodes a world. This matters even within 1.20.x: 1.20.2 changed
+client selects committed generated 1.20.1, 1.20.2, 1.20.3, 1.20.5, or 1.21
+tables before it loads assets or decodes a world. This matters even within
+1.20.x: 1.20.2 changed
 some block-state ranges, while 1.20.3 inserted the crafter, new copper/tuff
 families, the breeze, and wind charge, shifting most later IDs.
+
 Protocol 766 adds the Armored Paws registries and therefore selects its own
 blocks, items, and entities as well.
+
+Protocol 767 selects generated Tricky Trials block/item tables while retaining
+the 766 entity table, matching the authoritative data-set inheritance.
 
 Protocol 764+ spends time in `State::Configuration` after Login Success. Registry
 data is retained for Join Game dimension and biome interpretation. Protocol 765
@@ -54,6 +60,13 @@ consumes all 56 component layouts, including recursively nested item stacks, and
 retains UI-relevant custom data, names, map IDs, and block-entity data in the
 client's metadata representation. Never decode these packets with the legacy
 present/id/count/classic-NBT layout.
+
+The 767 fixture uses Mojang's official vanilla 1.21.1 server jar (SHA-1
+`59353fb40c36d304f2035d51e7d6e6baa98dc05c`). It completed the same core
+Login-to-Play path with 95 entities. A component pass injected a custom-named
+mace, filled map, and Music Disc 5 and decoded all three inventory updates. In
+767, Slot count is a VarInt, attribute modifiers omit their UUID field, and the
+inserted `jukebox_playable` component shifts component IDs 42 and above.
 
 ## Adding a protocol
 

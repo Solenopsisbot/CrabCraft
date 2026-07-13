@@ -37,7 +37,10 @@ use crab_protocol::versions::v1_20_2::login::{LoginAcknowledged, LoginStart as L
 use crab_protocol::versions::v1_20_2::play::ChunkBatchReceived;
 use crab_protocol::versions::v1_20_3::{configuration as configuration765, play as play765};
 use crab_protocol::versions::v1_20_5::{configuration as configuration766, play as play766};
-use crab_protocol::versions::{PROTOCOL_1_20_1, PROTOCOL_1_20_2, PROTOCOL_1_20_3, PROTOCOL_1_20_5};
+use crab_protocol::versions::v1_21::play as play767;
+use crab_protocol::versions::{
+    PROTOCOL_1_20_1, PROTOCOL_1_20_2, PROTOCOL_1_20_3, PROTOCOL_1_20_5, PROTOCOL_1_21,
+};
 use crab_protocol::BufExt;
 use crab_world::{Chunk, World};
 use sha1::{Digest, Sha1};
@@ -850,6 +853,7 @@ enum ProtocolVersion {
     V1_20_2,
     V1_20_3,
     V1_20_5,
+    V1_21,
 }
 
 impl ProtocolVersion {
@@ -859,8 +863,11 @@ impl ProtocolVersion {
                 "764" | "1.20.2" => Ok(Self::V1_20_2),
                 "765" | "1.20.3" | "1.20.4" => Ok(Self::V1_20_3),
                 "766" | "1.20.5" | "1.20.6" => Ok(Self::V1_20_5),
+                "767" | "1.21" | "1.21.1" => Ok(Self::V1_21),
                 "763" | "1.20" | "1.20.1" => Ok(Self::V1_20_1),
-                _ => bail!("unsupported CRABCRAFT_PROTOCOL={value}; use 763, 764, 765, or 766"),
+                _ => {
+                    bail!("unsupported CRABCRAFT_PROTOCOL={value}; use 763, 764, 765, 766, or 767")
+                }
             },
             Err(std::env::VarError::NotPresent) => Ok(Self::V1_20_1),
             Err(error) => bail!("invalid CRABCRAFT_PROTOCOL: {error}"),
@@ -873,11 +880,20 @@ impl ProtocolVersion {
             Self::V1_20_2 => PROTOCOL_1_20_2,
             Self::V1_20_3 => PROTOCOL_1_20_3,
             Self::V1_20_5 => PROTOCOL_1_20_5,
+            Self::V1_21 => PROTOCOL_1_21,
         }
     }
 
     const fn uses_nbt_components(self) -> bool {
-        matches!(self, Self::V1_20_3 | Self::V1_20_5)
+        matches!(self, Self::V1_20_3 | Self::V1_20_5 | Self::V1_21)
+    }
+
+    const fn uses_data_components(self) -> bool {
+        matches!(self, Self::V1_20_5 | Self::V1_21)
+    }
+
+    const fn uses_split_registry(self) -> bool {
+        self.uses_data_components()
     }
 }
 
@@ -1014,7 +1030,7 @@ where
         tokio::select! {
             raw = conn.read_packet() => {
                 let raw = raw.context("reading configuration packet")?;
-                if protocol == ProtocolVersion::V1_20_5 {
+                if protocol.uses_split_registry() {
                     match raw.id {
                         0x02 => {
                             let mut body = raw.body.clone();
@@ -1160,7 +1176,7 @@ where
             conn.send(&ConfigurationResourcePackStatus { status })
                 .await?;
         }
-        ProtocolVersion::V1_20_3 | ProtocolVersion::V1_20_5 => {
+        ProtocolVersion::V1_20_3 | ProtocolVersion::V1_20_5 | ProtocolVersion::V1_21 => {
             let uuid = shared
                 .resource_pack_request
                 .lock()
@@ -1229,7 +1245,10 @@ async fn run_inner(
             })
             .await?;
         }
-        ProtocolVersion::V1_20_2 | ProtocolVersion::V1_20_3 | ProtocolVersion::V1_20_5 => {
+        ProtocolVersion::V1_20_2
+        | ProtocolVersion::V1_20_3
+        | ProtocolVersion::V1_20_5
+        | ProtocolVersion::V1_21 => {
             conn.send(&LoginStart764 {
                 name: name.clone(),
                 uuid: uuid.unwrap_or_else(|| offline_uuid(&name)),
@@ -1280,6 +1299,7 @@ async fn run_inner(
                         ProtocolVersion::V1_20_2 => serverbound_764_id,
                         ProtocolVersion::V1_20_3 => serverbound_765_id,
                         ProtocolVersion::V1_20_5 => serverbound_766_id,
+                        ProtocolVersion::V1_21 => serverbound_766_id,
                         ProtocolVersion::V1_20_1 => unreachable!(),
                     });
                     conn.send(&LoginAcknowledged).await?;
@@ -1343,7 +1363,7 @@ where
                     Err(e) => { tracing::info!("connection closed: {e}"); break; }
                 };
                 if protocol != ProtocolVersion::V1_20_1 && raw.id == 0x0c {
-                    if protocol == ProtocolVersion::V1_20_5 {
+                    if protocol.uses_split_registry() {
                         conn.send_unmapped(&play766::ChunkBatchReceived {
                             chunks_per_tick: 64.0,
                         })
@@ -1362,7 +1382,7 @@ where
                     conn.set_state(State::Play);
                     continue;
                 }
-                if protocol == ProtocolVersion::V1_20_5 && raw.id == 0x69 {
+                if protocol.uses_split_registry() && raw.id == 0x69 {
                     conn.send_unmapped(&play766::ConfigurationAcknowledged).await?;
                     conn.set_state(State::Configuration);
                     configuration_loop(conn, shared, protocol).await?;
@@ -1377,15 +1397,15 @@ where
                     handle_remove_resource_pack_765(&raw, shared)?;
                     continue;
                 }
-                if protocol == ProtocolVersion::V1_20_5 && raw.id == 0x44 {
+                if protocol.uses_split_registry() && raw.id == 0x44 {
                     handle_reset_score_765(&raw, shared)?;
                     continue;
                 }
-                if protocol == ProtocolVersion::V1_20_5 && raw.id == 0x45 {
+                if protocol.uses_split_registry() && raw.id == 0x45 {
                     handle_remove_resource_pack_765(&raw, shared)?;
                     continue;
                 }
-                if protocol == ProtocolVersion::V1_20_5 && raw.id == 0x46 {
+                if protocol.uses_split_registry() && raw.id == 0x46 {
                     handle_resource_pack_request_765(&raw, shared)?;
                     continue;
                 }
@@ -1394,6 +1414,7 @@ where
                     ProtocolVersion::V1_20_2 => canonical_clientbound_764_id(raw.id),
                     ProtocolVersion::V1_20_3 => canonical_clientbound_765_id(raw.id),
                     ProtocolVersion::V1_20_5 => canonical_clientbound_766_id(raw.id),
+                    ProtocolVersion::V1_21 => canonical_clientbound_766_id(raw.id),
                 };
                 match packet_id {
                     id if id == KeepAlive::ID => {
@@ -2147,8 +2168,10 @@ where
                         }
                     }
                     id if id == ID_CONTAINER_CONTENT => {
-                        if protocol == ProtocolVersion::V1_20_5 {
-                            if let Ok((pkt, metadata)) = decode_component_container_content(&raw) {
+                        if protocol.uses_data_components() {
+                            if let Ok((pkt, metadata)) =
+                                decode_component_container_content(&raw, protocol)
+                            {
                                 capture_component_content_metadata(shared, pkt.window_id, metadata);
                                 handle_container_content(shared, pkt);
                             }
@@ -2165,8 +2188,10 @@ where
                         }
                     }
                     id if id == ID_CONTAINER_SLOT => {
-                        if protocol == ProtocolVersion::V1_20_5 {
-                            if let Ok((pkt, metadata)) = decode_component_container_slot(&raw) {
+                        if protocol.uses_data_components() {
+                            if let Ok((pkt, metadata)) =
+                                decode_component_container_slot(&raw, protocol)
+                            {
                                 capture_component_slot_metadata(shared, &pkt, metadata);
                                 handle_container_slot(shared, &pkt);
                             }
@@ -2501,7 +2526,18 @@ where
                         }
                     };
                     if let Some((state_id, changed, carried)) = predicted {
-                        if protocol == ProtocolVersion::V1_20_5 {
+                        if protocol == ProtocolVersion::V1_21 {
+                            conn.send(&play767::ClickContainerComponents {
+                                window_id,
+                                state_id,
+                                slot,
+                                button,
+                                mode,
+                                changed,
+                                carried,
+                            })
+                            .await?;
+                        } else if protocol == ProtocolVersion::V1_20_5 {
                             conn.send(&play766::ClickContainerComponents {
                                 window_id,
                                 state_id,
@@ -2993,7 +3029,7 @@ fn handle_join_game(
                 .unwrap_or(crab_protocol::nbt::Nbt::End);
             (codec, dimension_type, game_mode)
         }
-        ProtocolVersion::V1_20_5 => {
+        ProtocolVersion::V1_20_5 | ProtocolVersion::V1_21 => {
             let world_count = b.read_varint()?.max(0);
             for _ in 0..world_count {
                 let _ = b.read_string(32767)?;
@@ -3111,7 +3147,7 @@ where
             .as_ref()
             .and_then(|request| request.uuid)
             .context("765 resource-pack status has no pack UUID")?;
-        if protocol == ProtocolVersion::V1_20_5 {
+        if protocol.uses_split_registry() {
             conn.send_unmapped(&play766::ResourcePackStatus { uuid, status })
                 .await?;
         } else {
@@ -3452,7 +3488,11 @@ fn read_slot_item<B: crab_protocol::BufExt>(
     b: &mut B,
     protocol: ProtocolVersion,
 ) -> Result<Option<i32>> {
-    if protocol == ProtocolVersion::V1_20_5 {
+    if protocol == ProtocolVersion::V1_21 {
+        Ok(play766::read_component_slot_767(b)?
+            .item
+            .map(|item| item.item_id))
+    } else if protocol == ProtocolVersion::V1_20_5 {
         Ok(play766::read_component_slot(b)?
             .item
             .map(|item| item.item_id))
@@ -3490,8 +3530,8 @@ fn parse_declared_recipes(
     raw: &crab_net::RawPacket,
     protocol: ProtocolVersion,
 ) -> Result<DeclaredRecipes> {
-    if protocol == ProtocolVersion::V1_20_5 {
-        parse_declared_recipes_766(raw)
+    if protocol.uses_data_components() {
+        parse_declared_recipes_766(raw, protocol)
     } else {
         parse_declared_recipes_legacy(raw)
     }
@@ -3596,25 +3636,45 @@ fn parse_declared_recipes_legacy(raw: &crab_net::RawPacket) -> Result<DeclaredRe
     })
 }
 
-fn read_component_ingredient<B: crab_protocol::BufExt>(b: &mut B) -> Result<Vec<i32>> {
+fn read_data_component_slot<B: crab_protocol::BufExt>(
+    b: &mut B,
+    protocol: ProtocolVersion,
+) -> Result<play766::ComponentSlot> {
+    if protocol == ProtocolVersion::V1_21 {
+        Ok(play766::read_component_slot_767(b)?)
+    } else {
+        Ok(play766::read_component_slot(b)?)
+    }
+}
+
+fn read_component_ingredient<B: crab_protocol::BufExt>(
+    b: &mut B,
+    protocol: ProtocolVersion,
+) -> Result<Vec<i32>> {
     let count = b.read_varint()?;
     if !(0..=4096).contains(&count) {
         bail!("invalid component recipe ingredient alternative count {count}");
     }
     let mut items = Vec::with_capacity(count as usize);
     for _ in 0..count {
-        if let Some(item) = play766::read_component_slot(b)?.item {
+        if let Some(item) = read_data_component_slot(b, protocol)?.item {
             items.push(item.item_id);
         }
     }
     Ok(items)
 }
 
-fn read_component_recipe_slot<B: crab_protocol::BufExt>(b: &mut B) -> Result<Option<SlotItem>> {
-    Ok(play766::read_component_slot(b)?.item)
+fn read_component_recipe_slot<B: crab_protocol::BufExt>(
+    b: &mut B,
+    protocol: ProtocolVersion,
+) -> Result<Option<SlotItem>> {
+    Ok(read_data_component_slot(b, protocol)?.item)
 }
 
-fn parse_declared_recipes_766(raw: &crab_net::RawPacket) -> Result<DeclaredRecipes> {
+fn parse_declared_recipes_766(
+    raw: &crab_net::RawPacket,
+    protocol: ProtocolVersion,
+) -> Result<DeclaredRecipes> {
     let mut b = raw.body.clone();
     let count = b.read_varint()?;
     if !(0..=65_536).contains(&count) {
@@ -3635,9 +3695,9 @@ fn parse_declared_recipes_766(raw: &crab_net::RawPacket) -> Result<DeclaredRecip
                     bail!("invalid protocol 766 shaped dimensions {width}x{height}");
                 }
                 let ingredients = (0..width * height)
-                    .map(|_| read_component_ingredient(&mut b))
+                    .map(|_| read_component_ingredient(&mut b, protocol))
                     .collect::<Result<Vec<_>>>()?;
-                let result = read_component_recipe_slot(&mut b)?;
+                let result = read_component_recipe_slot(&mut b, protocol)?;
                 let _show_notification = b.read_bool()?;
                 crafting.push(CraftingRecipe {
                     id,
@@ -3655,9 +3715,9 @@ fn parse_declared_recipes_766(raw: &crab_net::RawPacket) -> Result<DeclaredRecip
                     bail!("invalid protocol 766 shapeless ingredient count {ingredients}");
                 }
                 let ingredients = (0..ingredients)
-                    .map(|_| read_component_ingredient(&mut b))
+                    .map(|_| read_component_ingredient(&mut b, protocol))
                     .collect::<Result<Vec<_>>>()?;
-                let result = read_component_recipe_slot(&mut b)?;
+                let result = read_component_recipe_slot(&mut b, protocol)?;
                 crafting.push(CraftingRecipe {
                     id,
                     width: 0,
@@ -3672,15 +3732,15 @@ fn parse_declared_recipes_766(raw: &crab_net::RawPacket) -> Result<DeclaredRecip
             15..=18 => {
                 let _group = b.read_string(32_767)?;
                 let _category = b.read_varint()?;
-                let _ingredient = read_component_ingredient(&mut b)?;
-                let _result = read_component_recipe_slot(&mut b)?;
+                let _ingredient = read_component_ingredient(&mut b, protocol)?;
+                let _result = read_component_recipe_slot(&mut b, protocol)?;
                 let _experience = b.read_f32()?;
                 let _cook_time = b.read_varint()?;
             }
             19 => {
                 let _group = b.read_string(32_767)?;
-                let ingredients = read_component_ingredient(&mut b)?;
-                let result = read_component_recipe_slot(&mut b)?;
+                let ingredients = read_component_ingredient(&mut b, protocol)?;
+                let result = read_component_recipe_slot(&mut b, protocol)?;
                 stonecutting.push(StonecutterRecipe {
                     id,
                     ingredients,
@@ -3689,13 +3749,13 @@ fn parse_declared_recipes_766(raw: &crab_net::RawPacket) -> Result<DeclaredRecip
             }
             20 => {
                 for _ in 0..3 {
-                    let _ = read_component_ingredient(&mut b)?;
+                    let _ = read_component_ingredient(&mut b, protocol)?;
                 }
-                let _ = read_component_recipe_slot(&mut b)?;
+                let _ = read_component_recipe_slot(&mut b, protocol)?;
             }
             21 => {
                 for _ in 0..3 {
-                    let _ = read_component_ingredient(&mut b)?;
+                    let _ = read_component_ingredient(&mut b, protocol)?;
                 }
             }
             other => bail!("unsupported protocol 766 recipe type {other}"),
@@ -4376,6 +4436,7 @@ fn read_item_nbt<B: crab_protocol::BufExt>(
 
 fn decode_component_container_content(
     raw: &crab_net::RawPacket,
+    protocol: ProtocolVersion,
 ) -> Result<(SetContainerContent, Vec<Option<crab_protocol::nbt::Nbt>>)> {
     let mut body = raw.body.clone();
     let window_id = body.read_u8()?;
@@ -4387,11 +4448,11 @@ fn decode_component_container_content(
     let mut slots = Vec::with_capacity(count as usize);
     let mut metadata = Vec::with_capacity(count as usize);
     for _ in 0..count {
-        let decoded = play766::read_component_slot(&mut body)?;
+        let decoded = read_data_component_slot(&mut body, protocol)?;
         slots.push(decoded.item);
         metadata.push(decoded.metadata);
     }
-    let carried = play766::read_component_slot(&mut body)?.item;
+    let carried = read_data_component_slot(&mut body, protocol)?.item;
     Ok((
         SetContainerContent {
             window_id,
@@ -4405,12 +4466,13 @@ fn decode_component_container_content(
 
 fn decode_component_container_slot(
     raw: &crab_net::RawPacket,
+    protocol: ProtocolVersion,
 ) -> Result<(SetContainerSlot, Option<crab_protocol::nbt::Nbt>)> {
     let mut body = raw.body.clone();
     let window_id = body.read_i8()?;
     let state_id = body.read_varint()?;
     let slot = body.read_i16()?;
-    let decoded = play766::read_component_slot(&mut body)?;
+    let decoded = read_data_component_slot(&mut body, protocol)?;
     Ok((
         SetContainerSlot {
             window_id,
@@ -5278,6 +5340,11 @@ mod tests {
         assert_eq!(serverbound_766_id(State::Play, ClickContainer::ID), 0x0e);
         assert_eq!(serverbound_766_id(State::Play, PlaceRecipe::ID), 0x22);
         assert_eq!(serverbound_766_id(State::Configuration, 0x05), 0x06);
+        // 1.21 keeps protocol 766's play packet map while changing selected
+        // payloads and registries under protocol number 767.
+        assert_eq!(ProtocolVersion::V1_21.number(), 767);
+        assert_eq!(canonical_clientbound_766_id(0x2b), ID_JOIN_GAME);
+        assert_eq!(serverbound_766_id(State::Play, ClickContainer::ID), 0x0e);
     }
 
     #[test]

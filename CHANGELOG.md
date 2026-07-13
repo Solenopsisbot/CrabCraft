@@ -15,8 +15,11 @@ remains the detailed source of truth.
   registries, revised play/configuration packet maps, component-era item stacks,
   recipes and container clicks. The core path and component-rich inventory
   updates are live-tested against an official vanilla 1.20.6 server.
+- Protocol 767 for Java Edition 1.21/1.21.1, with Tricky Trials registries,
+  VarInt-count item stacks, revised attribute/jukebox components, configuration
+  additions, and official-server core/component live validation.
 - Version-selected generated block/state, item, and entity registries for the
-  763, 764, 765, and 766 wire profiles.
+  763, 764, 765, 766, and 767 wire profiles.
 - Protocol-aware entity metadata components and scoreboard teams, including
   team prefixes/suffixes in sidebar and Tab-list names.
 - UUID-addressed server resource-pack stacks that can remove and rebuild any
