@@ -40,3 +40,5 @@ remains the detailed source of truth.
 - Entity asset resolution now covers Java family texture directories, shared
   projectile and minecart geometry, and Bedrock's plain `.json` model files,
   substantially reducing generic-box fallbacks with the documented asset setup.
+- Falling-block entities retain their Spawn Entity block-state ID and render as
+  full-scale textured block models instead of anonymous bounds boxes.

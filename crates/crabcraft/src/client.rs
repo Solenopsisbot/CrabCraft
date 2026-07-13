@@ -418,6 +418,9 @@ pub struct Entity {
     pub hurt_sequence: u64,
     /// For dropped-item entities: the contained item id (for icon rendering).
     pub item: Option<i32>,
+    /// For falling-block entities: the exact protocol block-state ID carried by
+    /// Spawn Entity's object-data field.
+    pub block_state: Option<u32>,
 }
 
 /// Our current position/orientation as last told by the server.
@@ -3170,7 +3173,7 @@ fn handle_spawn_object(raw: &crab_net::RawPacket, shared: &Arc<Shared>) -> Resul
     let _pitch = b.read_u8()?;
     let yaw = angle_to_deg(b.read_u8()?);
     let head_yaw = angle_to_deg(b.read_u8()?);
-    let _data = b.read_varint()?;
+    let data = b.read_varint()?;
     let velocity = [
         f64::from(b.read_i16()?) / 400.0,
         f64::from(b.read_i16()?) / 400.0,
@@ -3179,6 +3182,7 @@ fn handle_spawn_object(raw: &crab_net::RawPacket, shared: &Arc<Shared>) -> Resul
     let (half_width, height) = crab_registry::entity_def(kind as u32)
         .map(|d| (d.width / 2.0, d.height))
         .unwrap_or((0.45, 1.3));
+    let block_state = spawned_block_state(kind, data);
     shared.entities.lock().unwrap().insert(
         id,
         Entity {
@@ -3200,9 +3204,22 @@ fn handle_spawn_object(raw: &crab_net::RawPacket, shared: &Arc<Shared>) -> Resul
             swing_sequence: 0,
             hurt_sequence: 0,
             item: None,
+            block_state,
         },
     );
     Ok(())
+}
+
+/// Resolves Spawn Entity's overloaded object-data field only for falling
+/// blocks. Other entity types use this integer for unrelated meanings (vehicle
+/// variants, projectile owners, directions), so treating every value as a
+/// block state would produce plausible but incorrect models.
+fn spawned_block_state(kind: i32, data: i32) -> Option<u32> {
+    if crab_registry::entity_name(u32::try_from(kind).ok()?) != Some("falling_block") {
+        return None;
+    }
+    let state = u32::try_from(data).ok()?;
+    crab_registry::block_for_state(state).map(|_| state)
 }
 
 /// Converts a Minecraft angle byte (256 steps = 360°) to degrees.
@@ -3238,6 +3255,7 @@ fn handle_spawn_player(raw: &crab_net::RawPacket, shared: &Arc<Shared>) -> Resul
             swing_sequence: 0,
             hurt_sequence: 0,
             item: None,
+            block_state: None,
         },
     );
     Ok(())
@@ -5436,6 +5454,31 @@ mod tests {
     }
 
     #[test]
+    fn falling_block_spawn_data_is_validated_by_entity_type_and_registry() {
+        let falling_block = crab_registry::entities()
+            .iter()
+            .find(|entity| entity.name == "falling_block")
+            .expect("selected registry has falling_block")
+            .id as i32;
+        let stone = crab_registry::block_by_name("stone")
+            .expect("selected registry has stone")
+            .default_state as i32;
+        let non_block = crab_registry::entities()
+            .iter()
+            .find(|entity| entity.name != "falling_block")
+            .expect("selected registry has other entities")
+            .id as i32;
+
+        assert_eq!(
+            spawned_block_state(falling_block, stone),
+            Some(stone as u32)
+        );
+        assert_eq!(spawned_block_state(non_block, stone), None);
+        assert_eq!(spawned_block_state(falling_block, -1), None);
+        assert_eq!(spawned_block_state(falling_block, i32::MAX), None);
+    }
+
+    #[test]
     fn passenger_updates_mount_and_dismount_the_local_player() {
         let shared = Arc::new(Shared::new());
         shared.player.lock().unwrap().entity_id = 42;
@@ -5460,6 +5503,7 @@ mod tests {
                 swing_sequence: 0,
                 hurt_sequence: 0,
                 item: None,
+                block_state: None,
             },
         );
         let packet = |passengers: &[i32]| {

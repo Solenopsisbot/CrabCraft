@@ -30,6 +30,9 @@ Bedrock sample pack. Name aliases bridge Java family texture directories and
 shared/versioned geometry names. The resulting atlas is keyed by the active
 protocol's generated entity IDs; unresolved entries deliberately retain a
 registry-sized diagnostic box. See [Asset pipeline](ASSETS.md).
+Special entities stay data-driven where their appearance is not a mob model:
+dropped stacks use item/block atlases, while falling blocks retain Spawn Entity's
+global block-state ID and resolve it through the active versioned block registry.
 
 The window renderer orders its frame as world geometry, HUD backgrounds, the
 inventory's depth-cleared 3D player viewport, then HUD item/text foregrounds.

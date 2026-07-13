@@ -1950,6 +1950,19 @@ impl App {
         let (mut box_v, mut model_v, mut item_v) = (Vec::new(), Vec::new(), Vec::new());
         for (&id, e) in entities.iter() {
             let a = self.entity_anim[&id];
+            // Falling Block's Spawn Entity data is a global block-state ID.
+            // Render it at full block scale instead of using a generic entity
+            // bounds box; gravity/position remain server-authoritative.
+            if let Some(block_name) = e.block_state.and_then(crab_registry::block_name) {
+                box_v.extend(block_item_mesh(
+                    &self.atlas,
+                    block_name,
+                    [a.pos[0], a.pos[1] + 0.5, a.pos[2]],
+                    1.0,
+                    0.0,
+                ));
+                continue;
+            }
             // Dropped item: a camera-facing billboard of its icon.
             if let Some(item_id) = e.item {
                 if let Some(name) = u32::try_from(item_id)

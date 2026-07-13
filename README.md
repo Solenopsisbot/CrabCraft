@@ -79,7 +79,8 @@ tested for every supported profile:
    **dropped items show their item icon**
 - **Entity presentation**: packet-driven arm swings, hurt reactions, independent
   head rotation, main/offhand items, visible material-coloured armour layers,
-  and bobbing/rotating 3D per-face dropped block models
+  bobbing/rotating 3D per-face dropped block models, and full-scale falling
+  blocks selected from the server's exact block-state ID
 - **First-person presentation**: visible main/offhand items with attack/use swing
   motion, including immediate feedback when swapping hands
 - **Maps**: authoritative map IDs, scale/lock state, partial pixel updates,
