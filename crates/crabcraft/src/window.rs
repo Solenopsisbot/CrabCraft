@@ -1025,6 +1025,67 @@ fn inventory_icons(shared: &Shared, item_atlas: &ItemAtlas) -> Vec<Option<[f32; 
         .collect()
 }
 
+struct InventoryPlayerPreview {
+    mesh: Vec<Vertex>,
+    camera: crab_render::Camera,
+    bounds: (f32, f32, f32, f32),
+}
+
+fn inventory_player_preview(
+    entity_atlas: &EntityAtlas,
+    cursor: (f32, f32),
+    aspect: f32,
+) -> Option<InventoryPlayerPreview> {
+    let player_id = crab_registry::entities()
+        .iter()
+        .find(|entity| entity.name == "player")?
+        .id as i32;
+    let model = entity_atlas.models.get(&player_id)?;
+    let panel = crab_render::inventory_rect(aspect);
+    let panel_w = panel.2 - panel.0;
+    let panel_h = panel.3 - panel.1;
+    // Vanilla's player viewport occupies pixels 26..75 × 8..78 in the
+    // 176×166 inventory texture. Keeping those exact proportions prevents the
+    // preview from covering armour/crafting slots at unusual aspect ratios.
+    let bounds = (
+        panel.0 + panel_w * 26.0 / 176.0,
+        panel.3 - panel_h * 78.0 / 166.0,
+        panel.0 + panel_w * 75.0 / 176.0,
+        panel.3 - panel_h * 8.0 / 166.0,
+    );
+    let center = ((bounds.0 + bounds.2) * 0.5, (bounds.1 + bounds.3) * 0.5);
+    let pointer_x = ((cursor.0 - center.0) / (bounds.2 - bounds.0).max(0.01)).clamp(-1.5, 1.5);
+    let pointer_y = ((cursor.1 - center.1) / (bounds.3 - bounds.1).max(0.01)).clamp(-1.5, 1.5);
+    let yaw = pointer_x * 28.0;
+    let mesh = entity_mesh(
+        &model.geo,
+        [0.0, 0.0, 0.0],
+        [model.atlas_x, model.atlas_y],
+        [entity_atlas.width as f32, entity_atlas.height as f32],
+        0.0,
+        0.0,
+        1.0,
+        yaw,
+        yaw + pointer_x * 18.0,
+        0.0,
+    );
+    let viewport_aspect = ((bounds.2 - bounds.0) * aspect / (bounds.3 - bounds.1)).max(0.01);
+    let camera = crab_render::Camera {
+        eye: Vec3::new(0.0, 0.9 + pointer_y * 0.08, 4.2),
+        target: Vec3::new(0.0, 0.9, 0.0),
+        up: Vec3::Y,
+        aspect: viewport_aspect,
+        fovy_radians: 34.0_f32.to_radians(),
+        znear: 0.1,
+        zfar: 20.0,
+    };
+    Some(InventoryPlayerPreview {
+        mesh,
+        camera,
+        bounds,
+    })
+}
+
 fn slot_icons(
     slots: &[Option<crab_protocol::versions::v1_20_1::play::SlotItem>],
     item_atlas: &ItemAtlas,
@@ -1116,6 +1177,8 @@ struct Graphics {
     pipeline: wgpu::RenderPipeline,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
+    inventory_camera_buffer: wgpu::Buffer,
+    inventory_camera_bind_group: wgpu::BindGroup,
     atlas_bind_group: wgpu::BindGroup,
     texture_layout: wgpu::BindGroupLayout,
     depth_view: wgpu::TextureView,
@@ -1147,6 +1210,9 @@ struct Graphics {
     crack_bind_group: Option<wgpu::BindGroup>,
     /// Per-frame crack overlay cube for the block being mined.
     crack_buffer: Option<(wgpu::Buffer, u32)>,
+    /// Vanilla-style 3D local-player preview shown over the inventory panel.
+    inventory_player_buffer: Option<(wgpu::Buffer, u32)>,
+    inventory_player_bounds: Option<(f32, f32, f32, f32)>,
 }
 
 impl Graphics {
@@ -1222,6 +1288,23 @@ impl Graphics {
                 resource: camera_buffer.as_entire_binding(),
             }],
         });
+        let inventory_camera_buffer =
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("inventory player camera"),
+                contents: bytemuck::cast_slice(&[CameraUniform {
+                    view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
+                    lighting: [1.0, 0.0, 0.0, 0.0],
+                }]),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+        let inventory_camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("inventory player camera bg"),
+            layout: &camera_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: inventory_camera_buffer.as_entire_binding(),
+            }],
+        });
         let atlas_bind_group = upload_atlas(&device, &queue, &texture_bgl, atlas);
         let entity_atlas_bind_group = upload_texture(
             &device,
@@ -1277,6 +1360,8 @@ impl Graphics {
             pipeline,
             camera_buffer,
             camera_bind_group,
+            inventory_camera_buffer,
+            inventory_camera_bind_group,
             atlas_bind_group,
             texture_layout: texture_bgl,
             depth_view,
@@ -1295,6 +1380,8 @@ impl Graphics {
             item_entity_buffer: None,
             crack_bind_group,
             crack_buffer: None,
+            inventory_player_buffer: None,
+            inventory_player_bounds: None,
         }
     }
 
@@ -1397,6 +1484,24 @@ impl Graphics {
                 usage: wgpu::BufferUsages::VERTEX,
             });
         Some((buffer, vertices.len() as u32))
+    }
+
+    fn set_inventory_player(
+        &mut self,
+        vertices: &[Vertex],
+        camera: Option<&crab_render::Camera>,
+        bounds: Option<(f32, f32, f32, f32)>,
+    ) {
+        self.inventory_player_buffer = self.make_vertex_buffer(vertices);
+        self.inventory_player_bounds = bounds;
+        if let Some(camera) = camera {
+            let uniform = CameraUniform::with_light(camera, 1.0);
+            self.queue.write_buffer(
+                &self.inventory_camera_buffer,
+                0,
+                bytemuck::cast_slice(&[uniform]),
+            );
+        }
     }
 
     fn resize(&mut self, width: u32, height: u32) {
@@ -1509,17 +1614,84 @@ impl Graphics {
                 pass.set_vertex_buffer(0, buffer.slice(..));
                 pass.draw(0..*count, 0..1);
             }
-            // HUD overlay: coloured quads, then GUI sprites (gui atlas), item
-            // icons (item atlas), and text (gui atlas) — in that order so text
-            // sits on top of icons which sit on top of backgrounds.
+            // HUD backgrounds and GUI sprites are drawn before the inventory
+            // player preview so the 3D model appears inside the panel cutout.
             if let Some((buf, count)) = &self.hud_color_buffer {
                 pass.set_pipeline(&self.hud.color);
                 pass.set_vertex_buffer(0, buf.slice(..));
                 pass.draw(0..*count, 0..1);
             }
             pass.set_pipeline(&self.hud.textured);
+            for (buffer, bind) in [(&self.hud_gui_buffer, &self.gui_atlas_bind_group)] {
+                if let Some((buf, count)) = buffer {
+                    pass.set_bind_group(0, bind, &[]);
+                    pass.set_vertex_buffer(0, buf.slice(..));
+                    pass.draw(0..*count, 0..1);
+                }
+            }
+        }
+        if let (Some((buffer, count)), Some(bounds)) =
+            (&self.inventory_player_buffer, self.inventory_player_bounds)
+        {
+            let width = self.config.width as f32;
+            let height = self.config.height as f32;
+            let x = ((bounds.0 + 1.0) * 0.5 * width).clamp(0.0, width);
+            let y = ((1.0 - bounds.3) * 0.5 * height).clamp(0.0, height);
+            let viewport_width = ((bounds.2 - bounds.0) * 0.5 * width).max(1.0);
+            let viewport_height = ((bounds.3 - bounds.1) * 0.5 * height).max(1.0);
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("inventory player pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_viewport(x, y, viewport_width, viewport_height, 0.0, 1.0);
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &self.inventory_camera_bind_group, &[]);
+            pass.set_bind_group(1, &self.entity_atlas_bind_group, &[]);
+            pass.set_vertex_buffer(0, buffer.slice(..));
+            pass.draw(0..*count, 0..1);
+        }
+        {
+            // Item icons and text remain above the 3D inventory preview.
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("hud foreground pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Discard,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.hud.textured);
             for (buffer, bind) in [
-                (&self.hud_gui_buffer, &self.gui_atlas_bind_group),
                 (&self.hud_item_buffer, &self.item_atlas_bind_group),
                 (&self.hud_text_buffer, &self.gui_atlas_bind_group),
             ] {
@@ -3153,6 +3325,7 @@ impl ApplicationHandler for App {
                         gfx.resize(real.width, real.height);
                     }
                     let aspect = gfx.aspect();
+                    gfx.set_inventory_player(&[], None, None);
                     let eye_height = if player.swimming || player.gliding {
                         0.4
                     } else if player.sneaking {
@@ -3790,6 +3963,17 @@ impl ApplicationHandler for App {
                                     [0.06, 0.02, 0.09],
                                 );
                                 crab_render::push_text(&mut hud_text, gui, &label, x, y, h, aspect);
+                            }
+                        }
+                        if self.inventory_open && container.is_none() {
+                            if let Some(preview) =
+                                inventory_player_preview(&self.entity_atlas, self.cursor, aspect)
+                            {
+                                gfx.set_inventory_player(
+                                    &preview.mesh,
+                                    Some(&preview.camera),
+                                    Some(preview.bounds),
+                                );
                             }
                         }
                         gfx.set_hud(&hud_c, &hud_g, &hud_i, &hud_text);

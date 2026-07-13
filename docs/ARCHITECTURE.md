@@ -24,6 +24,13 @@ Resource-pack changes construct a validated vanilla-fallback archive, rebuild CP
 atlases, upload replacement GPU resources, remesh loaded chunks, and only then
 acknowledge success to the server.
 
+The window renderer orders its frame as world geometry, HUD backgrounds, the
+inventory's depth-cleared 3D player viewport, then HUD item/text foregrounds.
+The preview reuses the entity atlas and humanoid mesh but owns a separate camera
+uniform and a viewport derived from the vanilla inventory texture's pixel
+bounds. This keeps world depth from clipping the player and keeps slot icons and
+tooltips above the model.
+
 ## Crate boundaries
 
 - `crab-protocol`: byte codecs, classic/network NBT, packet traits, per-version packets.

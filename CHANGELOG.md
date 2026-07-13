@@ -32,3 +32,5 @@ remains the detailed source of truth.
 - Expanded collision shapes, blockstate rendering, entity animation, audio,
   movement, HUD, inventory, and workstation behavior toward vanilla parity.
 - Creative flight uses vanilla-style double-Space toggling; `F` swaps hands.
+- The inventory screen includes a cursor-facing 3D local-player preview with an
+  isolated camera/depth viewport and correct HUD layering.

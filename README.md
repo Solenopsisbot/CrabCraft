@@ -275,7 +275,7 @@ Microsoft account. Using the official server jar:
  - [x] Crafting (2×2) + armour via the full inventory window; left/right clicks
  - [x] Real HUD (hearts / hunger / XP+level); pause menu with vanilla buttons
  - [x] Player model (humanoid + default skin) for other players
- - [x] Entity yaw facing; block-breaking crack overlay; aliased mob models
+ - [x] Entity body/head yaw facing; block-breaking crack overlay; aliased mob models
  - [ ] Blockstate variants, multipart models, and biome tint
    - [x] State-aware top/bottom, facing, straight/inner/outer stair models
    - [x] Multipart connected fence, pane/bar, and low/tall wall models
@@ -290,8 +290,8 @@ Microsoft account. Using the official server jar:
  - [x] Crafting table, enchanting table, dispenser/dropper, hopper, and brewing-stand GUIs
  - [x] Anvil, grindstone, smithing, and cartography-table GUIs
  - [x] Core movement/mining status-effect behavior and expiry
- - [ ] In-inventory 3D player
- - [ ] Per-mob head yaw + hitbox models; ambient sounds
+ - [x] Cursor-facing 3D player preview in the inventory screen
+ - [ ] Per-mob hitbox models and ambient sounds
 - [ ] Precise per-block collision shapes
   - [x] Empty shapes: fluids, plants, rails, torches, redstone, signs, and similar blocks
   - [x] State-aware top/bottom/double slabs and full stair variants + 0.6-block auto-step
