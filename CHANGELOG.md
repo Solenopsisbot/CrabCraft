@@ -43,6 +43,9 @@ remains the detailed source of truth.
   and bone-following animated humanoid armour layers.
 - Deduplicated, version-selected vanilla collision boxes for every global block
   state across all supported registry profiles.
+- Registry-complete entity geometry/texture resolution, built-in textured
+  boats and rafts, item/block-shaped entity rendering, and ambient wing, fin,
+  tail, and paddle animation.
 
 ### Changed
 

@@ -333,7 +333,8 @@ Microsoft account. Using the official server jar:
  - [x] Cursor-facing 3D player preview in the inventory screen
  - [x] Server-driven spatial mob ambient sounds with range/volume attenuation
  - [x] Java-family texture aliases plus shared projectile and minecart geometry
- - [ ] Remaining per-mob geometry and hitbox models
+ - [x] Registry-complete mob/vehicle geometry resolution with generated hitbox
+   dimensions, built-in textured boats/rafts, and item/block-shaped entities
 - [x] Precise generated per-state collision shapes for every supported registry
   - [x] Empty shapes: fluids, plants, rails, torches, redstone, signs, and similar blocks
   - [x] State-aware top/bottom/double slabs and full stair variants + 0.6-block auto-step
