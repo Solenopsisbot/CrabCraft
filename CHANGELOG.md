@@ -11,8 +11,12 @@ remains the detailed source of truth.
   Configuration state, registry data, chunk batches, NBT components, and
   versioned resource-pack packets. The 1.20.4 core path is live-tested against
   an official vanilla server.
+- Protocol 766 for Java Edition 1.20.5/1.20.6, including split configuration
+  registries, revised play/configuration packet maps, component-era item stacks,
+  recipes and container clicks. The core path and component-rich inventory
+  updates are live-tested against an official vanilla 1.20.6 server.
 - Version-selected generated block/state, item, and entity registries for the
-  763, 764, and 765 wire profiles.
+  763, 764, 765, and 766 wire profiles.
 - Protocol-aware entity metadata components and scoreboard teams, including
   team prefixes/suffixes in sidebar and Tab-list names.
 - UUID-addressed server resource-pack stacks that can remove and rebuild any

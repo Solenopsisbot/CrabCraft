@@ -36,7 +36,8 @@ use crab_protocol::versions::v1_20_2::configuration::{
 use crab_protocol::versions::v1_20_2::login::{LoginAcknowledged, LoginStart as LoginStart764};
 use crab_protocol::versions::v1_20_2::play::ChunkBatchReceived;
 use crab_protocol::versions::v1_20_3::{configuration as configuration765, play as play765};
-use crab_protocol::versions::{PROTOCOL_1_20_1, PROTOCOL_1_20_2, PROTOCOL_1_20_3};
+use crab_protocol::versions::v1_20_5::{configuration as configuration766, play as play766};
+use crab_protocol::versions::{PROTOCOL_1_20_1, PROTOCOL_1_20_2, PROTOCOL_1_20_3, PROTOCOL_1_20_5};
 use crab_protocol::BufExt;
 use crab_world::{Chunk, World};
 use sha1::{Digest, Sha1};
@@ -848,6 +849,7 @@ enum ProtocolVersion {
     V1_20_1,
     V1_20_2,
     V1_20_3,
+    V1_20_5,
 }
 
 impl ProtocolVersion {
@@ -856,8 +858,9 @@ impl ProtocolVersion {
             Ok(value) => match value.as_str() {
                 "764" | "1.20.2" => Ok(Self::V1_20_2),
                 "765" | "1.20.3" | "1.20.4" => Ok(Self::V1_20_3),
+                "766" | "1.20.5" | "1.20.6" => Ok(Self::V1_20_5),
                 "763" | "1.20" | "1.20.1" => Ok(Self::V1_20_1),
-                _ => bail!("unsupported CRABCRAFT_PROTOCOL={value}; use 763, 764, or 765"),
+                _ => bail!("unsupported CRABCRAFT_PROTOCOL={value}; use 763, 764, 765, or 766"),
             },
             Err(std::env::VarError::NotPresent) => Ok(Self::V1_20_1),
             Err(error) => bail!("invalid CRABCRAFT_PROTOCOL: {error}"),
@@ -869,7 +872,12 @@ impl ProtocolVersion {
             Self::V1_20_1 => PROTOCOL_1_20_1,
             Self::V1_20_2 => PROTOCOL_1_20_2,
             Self::V1_20_3 => PROTOCOL_1_20_3,
+            Self::V1_20_5 => PROTOCOL_1_20_5,
         }
+    }
+
+    const fn uses_nbt_components(self) -> bool {
+        matches!(self, Self::V1_20_3 | Self::V1_20_5)
     }
 }
 
@@ -913,6 +921,28 @@ fn serverbound_765_id(state: State, canonical: i32) -> i32 {
     }
 }
 
+fn serverbound_766_id(state: State, canonical: i32) -> i32 {
+    if state == State::Configuration {
+        return match canonical {
+            0x01..=0x05 => canonical + 1,
+            _ => canonical,
+        };
+    }
+    if state != State::Play {
+        return canonical;
+    }
+    match canonical {
+        0x00..=0x04 => canonical,
+        0x05..=0x06 => canonical + 1,
+        0x07..=0x09 => canonical + 2,
+        0x0a..=0x0c => canonical + 3,
+        0x0d => canonical + 5,
+        0x0e..=0x1a => canonical + 6,
+        0x1b..=0x32 => canonical + 7,
+        _ => canonical,
+    }
+}
+
 fn canonical_clientbound_764_id(wire: i32) -> i32 {
     match wire {
         0x00..=0x02 => wire,
@@ -942,6 +972,24 @@ fn canonical_clientbound_765_id(wire: i32) -> i32 {
     }
 }
 
+fn canonical_clientbound_766_id(wire: i32) -> i32 {
+    match wire {
+        0x00..=0x02 => wire,
+        0x03..=0x0b => wire + 1,
+        0x0c | 0x0d | 0x16 | 0x1b | 0x36 | 0x44..=0x46 | 0x69 | 0x6b | 0x71..=0x73 | 0x79 => -1,
+        0x0e..=0x15 => wire - 1,
+        0x17..=0x1a => wire - 2,
+        0x1c..=0x35 => wire - 3,
+        0x37..=0x43 => wire - 4,
+        0x47..=0x68 => wire - 6,
+        0x6a => wire - 7,
+        0x6c..=0x70 => wire - 8,
+        0x74..=0x75 => wire - 11,
+        0x76..=0x78 => wire - 10,
+        _ => wire,
+    }
+}
+
 async fn configuration_loop<S>(
     conn: &mut Connection<S>,
     shared: &Arc<Shared>,
@@ -966,6 +1014,48 @@ where
         tokio::select! {
             raw = conn.read_packet() => {
                 let raw = raw.context("reading configuration packet")?;
+                if protocol == ProtocolVersion::V1_20_5 {
+                    match raw.id {
+                        0x02 => {
+                            let mut body = raw.body.clone();
+                            let reason = read_text_component(&mut body, protocol)?;
+                            bail!("configuration refused: {reason}");
+                        }
+                        0x03 => {
+                            conn.send(&FinishConfiguration).await?;
+                            return Ok(());
+                        }
+                        0x04 => {
+                            let packet: ConfigurationKeepAlive = raw.decode()?;
+                            conn.send(&ConfigurationKeepAliveResponse { id: packet.id }).await?;
+                        }
+                        0x05 => {
+                            let packet: ConfigurationPing = raw.decode()?;
+                            conn.send(&ConfigurationPong { id: packet.id }).await?;
+                        }
+                        0x07 => {
+                            let packet: configuration766::RegistryData = raw.decode()?;
+                            merge_registry_data_766(shared, packet);
+                        }
+                        0x08 => handle_remove_resource_pack_765(&raw, shared)?,
+                        0x09 => {
+                            let packet: configuration765::AddResourcePack = raw.decode()?;
+                            set_resource_pack_request(
+                                shared,
+                                Some(packet.uuid),
+                                packet.url,
+                                packet.hash,
+                                packet.forced,
+                                packet.prompt.as_ref().map(nbt_plain_text),
+                            );
+                        }
+                        0x0e => {
+                            conn.send_unmapped(&configuration766::SelectKnownPacks).await?;
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
                 match raw.id {
                     0x01 => {
                         let mut body = raw.body.clone();
@@ -1070,7 +1160,7 @@ where
             conn.send(&ConfigurationResourcePackStatus { status })
                 .await?;
         }
-        ProtocolVersion::V1_20_3 => {
+        ProtocolVersion::V1_20_3 | ProtocolVersion::V1_20_5 => {
             let uuid = shared
                 .resource_pack_request
                 .lock()
@@ -1139,7 +1229,7 @@ async fn run_inner(
             })
             .await?;
         }
-        ProtocolVersion::V1_20_2 | ProtocolVersion::V1_20_3 => {
+        ProtocolVersion::V1_20_2 | ProtocolVersion::V1_20_3 | ProtocolVersion::V1_20_5 => {
             conn.send(&LoginStart764 {
                 name: name.clone(),
                 uuid: uuid.unwrap_or_else(|| offline_uuid(&name)),
@@ -1186,14 +1276,15 @@ async fn run_inner(
                 let pkt: LoginSuccess = raw.decode()?;
                 tracing::info!(uuid = %pkt.uuid, name = %pkt.username, "logged in");
                 if protocol != ProtocolVersion::V1_20_1 {
-                    conn.send(&LoginAcknowledged).await?;
-                    conn.set_state(State::Configuration);
-                    configuration_loop(&mut conn, shared, protocol).await?;
                     conn.set_packet_id_mapper(match protocol {
                         ProtocolVersion::V1_20_2 => serverbound_764_id,
                         ProtocolVersion::V1_20_3 => serverbound_765_id,
+                        ProtocolVersion::V1_20_5 => serverbound_766_id,
                         ProtocolVersion::V1_20_1 => unreachable!(),
                     });
+                    conn.send(&LoginAcknowledged).await?;
+                    conn.set_state(State::Configuration);
+                    configuration_loop(&mut conn, shared, protocol).await?;
                 }
                 conn.set_state(State::Play);
                 break;
@@ -1252,13 +1343,27 @@ where
                     Err(e) => { tracing::info!("connection closed: {e}"); break; }
                 };
                 if protocol != ProtocolVersion::V1_20_1 && raw.id == 0x0c {
-                    conn.send_unmapped(&ChunkBatchReceived {
-                        chunks_per_tick: 64.0,
-                    })
-                    .await?;
+                    if protocol == ProtocolVersion::V1_20_5 {
+                        conn.send_unmapped(&play766::ChunkBatchReceived {
+                            chunks_per_tick: 64.0,
+                        })
+                        .await?;
+                    } else {
+                        conn.send_unmapped(&ChunkBatchReceived {
+                            chunks_per_tick: 64.0,
+                        })
+                        .await?;
+                    }
                 }
                 if protocol == ProtocolVersion::V1_20_3 && raw.id == 0x67 {
                     conn.send_unmapped(&play765::ConfigurationAcknowledged).await?;
+                    conn.set_state(State::Configuration);
+                    configuration_loop(conn, shared, protocol).await?;
+                    conn.set_state(State::Play);
+                    continue;
+                }
+                if protocol == ProtocolVersion::V1_20_5 && raw.id == 0x69 {
+                    conn.send_unmapped(&play766::ConfigurationAcknowledged).await?;
                     conn.set_state(State::Configuration);
                     configuration_loop(conn, shared, protocol).await?;
                     conn.set_state(State::Play);
@@ -1272,10 +1377,23 @@ where
                     handle_remove_resource_pack_765(&raw, shared)?;
                     continue;
                 }
+                if protocol == ProtocolVersion::V1_20_5 && raw.id == 0x44 {
+                    handle_reset_score_765(&raw, shared)?;
+                    continue;
+                }
+                if protocol == ProtocolVersion::V1_20_5 && raw.id == 0x45 {
+                    handle_remove_resource_pack_765(&raw, shared)?;
+                    continue;
+                }
+                if protocol == ProtocolVersion::V1_20_5 && raw.id == 0x46 {
+                    handle_resource_pack_request_765(&raw, shared)?;
+                    continue;
+                }
                 let packet_id = match protocol {
                     ProtocolVersion::V1_20_1 => raw.id,
                     ProtocolVersion::V1_20_2 => canonical_clientbound_764_id(raw.id),
                     ProtocolVersion::V1_20_3 => canonical_clientbound_765_id(raw.id),
+                    ProtocolVersion::V1_20_5 => canonical_clientbound_766_id(raw.id),
                 };
                 match packet_id {
                     id if id == KeepAlive::ID => {
@@ -1311,7 +1429,7 @@ where
                         }
                     }
                     id if id == SystemChat::ID => {
-                        let (line, overlay) = if protocol == ProtocolVersion::V1_20_3 {
+                        let (line, overlay) = if protocol.uses_nbt_components() {
                             let mut body = raw.body.clone();
                             let component = crab_protocol::nbt::read_anonymous_nbt(&mut body)?;
                             (nbt_plain_text(&component), body.read_bool()?)
@@ -1514,7 +1632,7 @@ where
                                 0 | 2 => {
                                     if let Ok(display) = read_text_component(&mut b, protocol) {
                                         let _render_type = b.read_varint();
-                                        if protocol == ProtocolVersion::V1_20_3 {
+                                        if protocol.uses_nbt_components() {
                                             skip_optional_number_format(&mut b)?;
                                         }
                                         scoreboard.objectives.insert(name, display);
@@ -1533,7 +1651,7 @@ where
                     }
                     id if id == ID_SCOREBOARD_SCORE => {
                         let mut b = raw.body.clone();
-                        if protocol == ProtocolVersion::V1_20_3 {
+                        if protocol.uses_nbt_components() {
                             if let (Ok(item), Ok(objective), Ok(value)) =
                                 (b.read_string(32767), b.read_string(32767), b.read_varint())
                             {
@@ -1787,7 +1905,7 @@ where
                         let _ = handle_entity_velocity(&raw, shared);
                     }
                     id if id == ID_ENTITY_EQUIPMENT => {
-                        let _ = handle_entity_equipment(&raw, shared);
+                        let _ = handle_entity_equipment(&raw, shared, protocol);
                     }
                     id if id == ID_SET_PASSENGERS => {
                         let _ = handle_set_passengers(&raw, shared);
@@ -1951,7 +2069,7 @@ where
                         }
                     }
                     id if id == ID_DECLARE_RECIPES => {
-                        if let Ok(recipes) = parse_declared_recipes(&raw) {
+                        if let Ok(recipes) = parse_declared_recipes(&raw, protocol) {
                             *shared.crafting_recipes.lock().unwrap() = recipes.crafting;
                             *shared.stonecutter_recipes.lock().unwrap() = recipes.stonecutting;
                         }
@@ -1960,7 +2078,7 @@ where
                         let _ = handle_unlock_recipes(&raw, shared);
                     }
                     id if id == ID_RESOURCE_PACK => {
-                        let result = if protocol == ProtocolVersion::V1_20_3 {
+                        let result = if protocol.uses_nbt_components() {
                             handle_resource_pack_request_765(&raw, shared)
                         } else {
                             handle_resource_pack_request(&raw, shared)
@@ -2014,7 +2132,7 @@ where
                         shared.player.lock().unwrap().vehicle = None;
                     }
                     id if id == OpenScreen::ID => {
-                        let decoded: Result<OpenScreen> = if protocol == ProtocolVersion::V1_20_3 {
+                        let decoded: Result<OpenScreen> = if protocol.uses_nbt_components() {
                             decode_open_screen_765(&raw)
                         } else {
                             raw.decode::<OpenScreen>().map_err(Into::into)
@@ -2029,9 +2147,16 @@ where
                         }
                     }
                     id if id == ID_CONTAINER_CONTENT => {
-                        let _ = capture_container_content_nbt(&raw, shared);
-                        if let Ok(pkt) = raw.decode::<SetContainerContent>() {
-                            handle_container_content(shared, pkt);
+                        if protocol == ProtocolVersion::V1_20_5 {
+                            if let Ok((pkt, metadata)) = decode_component_container_content(&raw) {
+                                capture_component_content_metadata(shared, pkt.window_id, metadata);
+                                handle_container_content(shared, pkt);
+                            }
+                        } else {
+                            let _ = capture_container_content_nbt(&raw, shared);
+                            if let Ok(pkt) = raw.decode::<SetContainerContent>() {
+                                handle_container_content(shared, pkt);
+                            }
                         }
                     }
                     id if id == SetContainerData::ID => {
@@ -2040,9 +2165,16 @@ where
                         }
                     }
                     id if id == ID_CONTAINER_SLOT => {
-                        let _ = capture_container_slot_nbt(&raw, shared);
-                        if let Ok(pkt) = raw.decode::<SetContainerSlot>() {
-                            handle_container_slot(shared, &pkt);
+                        if protocol == ProtocolVersion::V1_20_5 {
+                            if let Ok((pkt, metadata)) = decode_component_container_slot(&raw) {
+                                capture_component_slot_metadata(shared, &pkt, metadata);
+                                handle_container_slot(shared, &pkt);
+                            }
+                        } else {
+                            let _ = capture_container_slot_nbt(&raw, shared);
+                            if let Ok(pkt) = raw.decode::<SetContainerSlot>() {
+                                handle_container_slot(shared, &pkt);
+                            }
                         }
                     }
                     id if id == ID_SET_HELD_ITEM => {
@@ -2055,7 +2187,7 @@ where
                         }
                     }
                     id if id == PlayDisconnect::ID => {
-                        let reason = if protocol == ProtocolVersion::V1_20_3 {
+                        let reason = if protocol.uses_nbt_components() {
                             let mut body = raw.body.clone();
                             read_text_component(&mut body, protocol)?
                         } else {
@@ -2369,16 +2501,29 @@ where
                         }
                     };
                     if let Some((state_id, changed, carried)) = predicted {
-                        conn.send(&ClickContainer {
-                            window_id,
-                            state_id,
-                            slot,
-                            button,
-                            mode,
-                            changed,
-                            carried,
-                        })
-                        .await?;
+                        if protocol == ProtocolVersion::V1_20_5 {
+                            conn.send(&play766::ClickContainerComponents {
+                                window_id,
+                                state_id,
+                                slot,
+                                button,
+                                mode,
+                                changed,
+                                carried,
+                            })
+                            .await?;
+                        } else {
+                            conn.send(&ClickContainer {
+                                window_id,
+                                state_id,
+                                slot,
+                                button,
+                                mode,
+                                changed,
+                                carried,
+                            })
+                            .await?;
+                        }
                     }
                 }
 
@@ -2848,6 +2993,41 @@ fn handle_join_game(
                 .unwrap_or(crab_protocol::nbt::Nbt::End);
             (codec, dimension_type, game_mode)
         }
+        ProtocolVersion::V1_20_5 => {
+            let world_count = b.read_varint()?.max(0);
+            for _ in 0..world_count {
+                let _ = b.read_string(32767)?;
+            }
+            let _max_players = b.read_varint()?;
+            let _view_distance = b.read_varint()?;
+            let _simulation_distance = b.read_varint()?;
+            let _reduced_debug = b.read_bool()?;
+            let _respawn_screen = b.read_bool()?;
+            let _limited_crafting = b.read_bool()?;
+            let dimension_id = b.read_varint()?;
+            let _world_name = b.read_string(32767)?;
+            let _hashed_seed = b.read_i64()?;
+            let game_mode = b.read_i8()? as u8;
+            let _prev_game_mode = b.read_u8()?;
+            let _debug = b.read_bool()?;
+            let _flat = b.read_bool()?;
+            if b.read_bool()? {
+                let _death_dimension = b.read_string(32767)?;
+                let _death_position = b.read_position()?;
+            }
+            let _portal_cooldown = b.read_varint()?;
+            let _enforces_secure_chat = b.read_bool()?;
+            let codec = shared
+                .registry_codec
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or(crab_protocol::nbt::Nbt::End);
+            let dimension_type =
+                registry_name_by_id(&codec, "minecraft:dimension_type", dimension_id)
+                    .unwrap_or_else(|| "minecraft:overworld".to_string());
+            (codec, dimension_type, game_mode)
+        }
     };
     {
         let mut player = shared.player.lock().unwrap();
@@ -2866,6 +3046,54 @@ fn handle_join_game(
     Ok(())
 }
 
+fn merge_registry_data_766(shared: &Arc<Shared>, packet: configuration766::RegistryData) {
+    use crab_protocol::nbt::Nbt;
+    let values = packet
+        .entries
+        .into_iter()
+        .enumerate()
+        .filter_map(|(id, (name, element))| {
+            let id = i32::try_from(id).ok()?;
+            Some(Nbt::Compound(HashMap::from([
+                ("name".to_string(), Nbt::String(name)),
+                ("id".to_string(), Nbt::Int(id)),
+                ("element".to_string(), element.unwrap_or(Nbt::End)),
+            ])))
+        })
+        .collect();
+    let registry = Nbt::Compound(HashMap::from([
+        ("type".to_string(), Nbt::String(packet.id.clone())),
+        ("value".to_string(), Nbt::List(values)),
+    ]));
+    let mut codec = shared.registry_codec.lock().unwrap();
+    let root = codec.get_or_insert_with(|| Nbt::Compound(HashMap::new()));
+    if !matches!(root, Nbt::Compound(_)) {
+        *root = Nbt::Compound(HashMap::new());
+    }
+    if let Nbt::Compound(entries) = root {
+        entries.insert(packet.id, registry);
+    }
+}
+
+fn registry_name_by_id(codec: &crab_protocol::nbt::Nbt, registry: &str, id: i32) -> Option<String> {
+    use crab_protocol::nbt::Nbt;
+    let Nbt::List(entries) = codec.get(registry)?.get("value")? else {
+        return None;
+    };
+    entries.iter().find_map(|entry| {
+        let Nbt::Int(entry_id) = entry.get("id")? else {
+            return None;
+        };
+        if *entry_id != id {
+            return None;
+        }
+        let Nbt::String(name) = entry.get("name")? else {
+            return None;
+        };
+        Some(name.clone())
+    })
+}
+
 async fn send_play_pack_status<S>(
     conn: &mut Connection<S>,
     shared: &Arc<Shared>,
@@ -2875,7 +3103,7 @@ async fn send_play_pack_status<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    if protocol == ProtocolVersion::V1_20_3 {
+    if protocol.uses_nbt_components() {
         let uuid = shared
             .resource_pack_request
             .lock()
@@ -2883,8 +3111,13 @@ where
             .as_ref()
             .and_then(|request| request.uuid)
             .context("765 resource-pack status has no pack UUID")?;
-        conn.send_unmapped(&play765::ResourcePackStatus { uuid, status })
-            .await?;
+        if protocol == ProtocolVersion::V1_20_5 {
+            conn.send_unmapped(&play766::ResourcePackStatus { uuid, status })
+                .await?;
+        } else {
+            conn.send_unmapped(&play765::ResourcePackStatus { uuid, status })
+                .await?;
+        }
     } else {
         conn.send(&ResourcePackStatus { status }).await?;
     }
@@ -2998,14 +3231,18 @@ fn handle_entity_velocity(raw: &crab_net::RawPacket, shared: &Arc<Shared>) -> Re
     Ok(())
 }
 
-fn handle_entity_equipment(raw: &crab_net::RawPacket, shared: &Arc<Shared>) -> Result<()> {
+fn handle_entity_equipment(
+    raw: &crab_net::RawPacket,
+    shared: &Arc<Shared>,
+    protocol: ProtocolVersion,
+) -> Result<()> {
     let mut b = raw.body.clone();
     let id = b.read_varint()?;
     let mut updates = Vec::new();
     loop {
         let encoded_slot = b.read_u8()?;
         let slot = usize::from(encoded_slot & 0x7f);
-        let item = read_slot_item(&mut b)?;
+        let item = read_slot_item(&mut b, protocol)?;
         updates.push((slot, item));
         if encoded_slot & 0x80 == 0 {
             break;
@@ -3148,7 +3385,7 @@ fn handle_entity_metadata(
                 }
             }
             7 => {
-                let item = read_slot_item(&mut b)?;
+                let item = read_slot_item(&mut b, protocol)?;
                 if index == 8 {
                     if let Some(e) = shared.entities.lock().unwrap().get_mut(&id) {
                         e.item = item;
@@ -3193,7 +3430,7 @@ fn handle_entity_metadata(
                 }
             }
             16 => {
-                let _ = if protocol == ProtocolVersion::V1_20_3 {
+                let _ = if protocol.uses_nbt_components() {
                     crab_protocol::nbt::read_anonymous_nbt(&mut b)?
                 } else {
                     crab_protocol::nbt::read_nbt(&mut b)?
@@ -3211,8 +3448,17 @@ fn handle_entity_metadata(
 }
 
 /// Reads a metadata Slot, returning the contained item id (or None if empty).
-fn read_slot_item<B: crab_protocol::BufExt>(b: &mut B) -> Result<Option<i32>> {
-    Ok(read_recipe_slot(b)?.map(|item| item.item_id))
+fn read_slot_item<B: crab_protocol::BufExt>(
+    b: &mut B,
+    protocol: ProtocolVersion,
+) -> Result<Option<i32>> {
+    if protocol == ProtocolVersion::V1_20_5 {
+        Ok(play766::read_component_slot(b)?
+            .item
+            .map(|item| item.item_id))
+    } else {
+        Ok(read_recipe_slot(b)?.map(|item| item.item_id))
+    }
 }
 
 fn read_recipe_slot<B: crab_protocol::BufExt>(b: &mut B) -> Result<Option<SlotItem>> {
@@ -3240,7 +3486,18 @@ fn read_ingredient<B: crab_protocol::BufExt>(b: &mut B) -> Result<Vec<i32>> {
     Ok(items)
 }
 
-fn parse_declared_recipes(raw: &crab_net::RawPacket) -> Result<DeclaredRecipes> {
+fn parse_declared_recipes(
+    raw: &crab_net::RawPacket,
+    protocol: ProtocolVersion,
+) -> Result<DeclaredRecipes> {
+    if protocol == ProtocolVersion::V1_20_5 {
+        parse_declared_recipes_766(raw)
+    } else {
+        parse_declared_recipes_legacy(raw)
+    }
+}
+
+fn parse_declared_recipes_legacy(raw: &crab_net::RawPacket) -> Result<DeclaredRecipes> {
     let mut b = raw.body.clone();
     let count = b.read_varint()?;
     if !(0..=65_536).contains(&count) {
@@ -3331,6 +3588,117 @@ fn parse_declared_recipes(raw: &crab_net::RawPacket) -> Result<DeclaredRecipes> 
                 let _category = b.read_varint()?;
             }
             other => bail!("unsupported declared recipe type {other}"),
+        }
+    }
+    Ok(DeclaredRecipes {
+        crafting,
+        stonecutting,
+    })
+}
+
+fn read_component_ingredient<B: crab_protocol::BufExt>(b: &mut B) -> Result<Vec<i32>> {
+    let count = b.read_varint()?;
+    if !(0..=4096).contains(&count) {
+        bail!("invalid component recipe ingredient alternative count {count}");
+    }
+    let mut items = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        if let Some(item) = play766::read_component_slot(b)?.item {
+            items.push(item.item_id);
+        }
+    }
+    Ok(items)
+}
+
+fn read_component_recipe_slot<B: crab_protocol::BufExt>(b: &mut B) -> Result<Option<SlotItem>> {
+    Ok(play766::read_component_slot(b)?.item)
+}
+
+fn parse_declared_recipes_766(raw: &crab_net::RawPacket) -> Result<DeclaredRecipes> {
+    let mut b = raw.body.clone();
+    let count = b.read_varint()?;
+    if !(0..=65_536).contains(&count) {
+        bail!("invalid protocol 766 declared recipe count {count}");
+    }
+    let mut stonecutting = Vec::new();
+    let mut crafting = Vec::new();
+    for _ in 0..count {
+        let id = b.read_string(32_767)?;
+        let recipe_type = b.read_varint()?;
+        match recipe_type {
+            0 => {
+                let _group = b.read_string(32_767)?;
+                let _category = b.read_varint()?;
+                let width = b.read_varint()?;
+                let height = b.read_varint()?;
+                if !(0..=16).contains(&width) || !(0..=16).contains(&height) {
+                    bail!("invalid protocol 766 shaped dimensions {width}x{height}");
+                }
+                let ingredients = (0..width * height)
+                    .map(|_| read_component_ingredient(&mut b))
+                    .collect::<Result<Vec<_>>>()?;
+                let result = read_component_recipe_slot(&mut b)?;
+                let _show_notification = b.read_bool()?;
+                crafting.push(CraftingRecipe {
+                    id,
+                    width: width as u8,
+                    height: height as u8,
+                    ingredients,
+                    result,
+                });
+            }
+            1 => {
+                let _group = b.read_string(32_767)?;
+                let _category = b.read_varint()?;
+                let ingredients = b.read_varint()?;
+                if !(0..=4096).contains(&ingredients) {
+                    bail!("invalid protocol 766 shapeless ingredient count {ingredients}");
+                }
+                let ingredients = (0..ingredients)
+                    .map(|_| read_component_ingredient(&mut b))
+                    .collect::<Result<Vec<_>>>()?;
+                let result = read_component_recipe_slot(&mut b)?;
+                crafting.push(CraftingRecipe {
+                    id,
+                    width: 0,
+                    height: 0,
+                    ingredients,
+                    result,
+                });
+            }
+            2..=14 | 22 => {
+                let _category = b.read_varint()?;
+            }
+            15..=18 => {
+                let _group = b.read_string(32_767)?;
+                let _category = b.read_varint()?;
+                let _ingredient = read_component_ingredient(&mut b)?;
+                let _result = read_component_recipe_slot(&mut b)?;
+                let _experience = b.read_f32()?;
+                let _cook_time = b.read_varint()?;
+            }
+            19 => {
+                let _group = b.read_string(32_767)?;
+                let ingredients = read_component_ingredient(&mut b)?;
+                let result = read_component_recipe_slot(&mut b)?;
+                stonecutting.push(StonecutterRecipe {
+                    id,
+                    ingredients,
+                    result,
+                });
+            }
+            20 => {
+                for _ in 0..3 {
+                    let _ = read_component_ingredient(&mut b)?;
+                }
+                let _ = read_component_recipe_slot(&mut b)?;
+            }
+            21 => {
+                for _ in 0..3 {
+                    let _ = read_component_ingredient(&mut b)?;
+                }
+            }
+            other => bail!("unsupported protocol 766 recipe type {other}"),
         }
     }
     Ok(DeclaredRecipes {
@@ -4006,6 +4374,81 @@ fn read_item_nbt<B: crab_protocol::BufExt>(
     Ok((!matches!(nbt, crab_protocol::nbt::Nbt::End)).then_some(nbt))
 }
 
+fn decode_component_container_content(
+    raw: &crab_net::RawPacket,
+) -> Result<(SetContainerContent, Vec<Option<crab_protocol::nbt::Nbt>>)> {
+    let mut body = raw.body.clone();
+    let window_id = body.read_u8()?;
+    let state_id = body.read_varint()?;
+    let count = body.read_varint()?;
+    if !(0..=65_536).contains(&count) {
+        bail!("invalid component container slot count {count}");
+    }
+    let mut slots = Vec::with_capacity(count as usize);
+    let mut metadata = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        let decoded = play766::read_component_slot(&mut body)?;
+        slots.push(decoded.item);
+        metadata.push(decoded.metadata);
+    }
+    let carried = play766::read_component_slot(&mut body)?.item;
+    Ok((
+        SetContainerContent {
+            window_id,
+            state_id,
+            slots,
+            carried,
+        },
+        metadata,
+    ))
+}
+
+fn decode_component_container_slot(
+    raw: &crab_net::RawPacket,
+) -> Result<(SetContainerSlot, Option<crab_protocol::nbt::Nbt>)> {
+    let mut body = raw.body.clone();
+    let window_id = body.read_i8()?;
+    let state_id = body.read_varint()?;
+    let slot = body.read_i16()?;
+    let decoded = play766::read_component_slot(&mut body)?;
+    Ok((
+        SetContainerSlot {
+            window_id,
+            state_id,
+            slot,
+            item: decoded.item,
+        },
+        decoded.metadata,
+    ))
+}
+
+fn capture_component_content_metadata(
+    shared: &Arc<Shared>,
+    window_id: u8,
+    metadata: Vec<Option<crab_protocol::nbt::Nbt>>,
+) {
+    if window_id == 0 {
+        let mut inventory_nbt = shared.inventory_nbt.lock().unwrap();
+        *inventory_nbt = metadata;
+        inventory_nbt.resize(PLAYER_INVENTORY_SLOTS, None);
+    }
+}
+
+fn capture_component_slot_metadata(
+    shared: &Arc<Shared>,
+    pkt: &SetContainerSlot,
+    metadata: Option<crab_protocol::nbt::Nbt>,
+) {
+    if matches!(pkt.window_id, 0 | -2) {
+        if let Ok(index) = usize::try_from(pkt.slot) {
+            let mut inventory_nbt = shared.inventory_nbt.lock().unwrap();
+            if index < inventory_nbt.len() {
+                inventory_nbt[index] = metadata;
+            }
+        }
+    }
+}
+
 fn capture_container_content_nbt(raw: &crab_net::RawPacket, shared: &Arc<Shared>) -> Result<()> {
     let mut body = raw.body.clone();
     let window_id = body.read_u8()?;
@@ -4653,7 +5096,7 @@ fn nbt_plain_text(value: &crab_protocol::nbt::Nbt) -> String {
 }
 
 fn read_text_component<B: Buf>(body: &mut B, protocol: ProtocolVersion) -> Result<String> {
-    if protocol == ProtocolVersion::V1_20_3 {
+    if protocol.uses_nbt_components() {
         Ok(nbt_plain_text(&crab_protocol::nbt::read_anonymous_nbt(
             body,
         )?))
@@ -4821,6 +5264,20 @@ mod tests {
             0x28
         );
         assert_eq!(serverbound_765_id(State::Configuration, 0x03), 0x03);
+    }
+
+    #[test]
+    fn protocol_766_profiles_cover_configuration_and_play_insertions() {
+        assert_eq!(canonical_clientbound_766_id(0x03), ID_ENTITY_ANIMATION);
+        assert_eq!(canonical_clientbound_766_id(0x27), ID_MAP_CHUNK);
+        assert_eq!(canonical_clientbound_766_id(0x2b), ID_JOIN_GAME);
+        assert_eq!(canonical_clientbound_766_id(0x46), -1); // transfer
+        assert_eq!(canonical_clientbound_766_id(0x69), -1); // start configuration
+        assert_eq!(canonical_clientbound_766_id(0x79), -1); // recipe declarations moved
+        assert_eq!(serverbound_766_id(State::Play, ClientChatMessage::ID), 0x06);
+        assert_eq!(serverbound_766_id(State::Play, ClickContainer::ID), 0x0e);
+        assert_eq!(serverbound_766_id(State::Play, PlaceRecipe::ID), 0x22);
+        assert_eq!(serverbound_766_id(State::Configuration, 0x05), 0x06);
     }
 
     #[test]
@@ -4999,7 +5456,7 @@ mod tests {
             body: body.into(),
         };
 
-        let recipes = parse_declared_recipes(&raw).unwrap();
+        let recipes = parse_declared_recipes(&raw, ProtocolVersion::V1_20_1).unwrap();
         assert_eq!(recipes.stonecutting.len(), 1);
         assert_eq!(recipes.stonecutting[0].ingredients, vec![1]);
         assert_eq!(recipes.stonecutting[0].result, slot(53, 2));

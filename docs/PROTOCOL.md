@@ -8,7 +8,7 @@ Crabcraft defaults to protocol 763. Choose another profile with
 | 1.20 / 1.20.1 | 763 | Primary, live-tested | Direct Login-to-Play, classic root NBT |
 | 1.20.2 | 764 | Implemented | Login acknowledgement, Configuration state, registry codec, network-NBT chunks, chunk batches, shifted packet IDs |
 | 1.20.3 / 1.20.4 | 765 | Core path live-tested on 1.20.4 | NBT chat components, score reset/formats, UUID resource packs/removal, play reconfiguration |
-| 1.20.5 / 1.20.6 | 766 | Not implemented | Data-component item stack redesign |
+| 1.20.5 / 1.20.6 | 766 | Core path live-tested on 1.20.6 | Split configuration registries, revised packet maps, data-component item stacks |
 | 1.21+ | 767+ | Not implemented | New registries, packets and incremental schema changes |
 
 ## Versioning approach
@@ -19,10 +19,12 @@ version-specific decoder whenever its payload changed; accepting a shifted ID is
 not considered sufficient support.
 
 Blocks, block states, items, and entities are also numeric wire registries. The
-client selects committed generated 1.20.1, 1.20.2, or 1.20.3 tables before it
+client selects committed generated 1.20.1, 1.20.2, 1.20.3, or 1.20.5 tables before it
 loads assets or decodes a world. This matters even within 1.20.x: 1.20.2 changed
 some block-state ranges, while 1.20.3 inserted the crafter, new copper/tuff
 families, the breeze, and wind charge, shifting most later IDs.
+Protocol 766 adds the Armored Paws registries and therefore selects its own
+blocks, items, and entities as well.
 
 Protocol 764+ spends time in `State::Configuration` after Login Success. Registry
 data is retained for Join Game dimension and biome interpretation. Protocol 765
@@ -38,6 +40,20 @@ Login, Configuration registry transfer, Join Game, dimension lookup, chunk and
 entity streams, spawn synchronization, inventory, movement/keepalive, and chat.
 Optional presentation packets still retain byte-level regression coverage so a
 server need not emit every UI feature during the smoke test.
+
+The 766 fixture uses Mojang's official vanilla 1.20.6 server jar (SHA-1
+`145ff0858209bcfc164859ba735d4199aafa1eea`). It has completed Login,
+Configuration, split registry merge, Join Game, chunks, spawn, inventory,
+entities, movement/keepalive, and chat. A second smoke pass injected a custom
+named/unbreakable sword and a filled map to verify that typed component patches
+remain aligned through live Set Container Slot packets.
+
+Protocol 766 `Slot` values begin with an item count (zero means empty), followed
+by an item registry ID and added/removed data-component lists. The bounded codec
+consumes all 56 component layouts, including recursively nested item stacks, and
+retains UI-relevant custom data, names, map IDs, and block-entity data in the
+client's metadata representation. Never decode these packets with the legacy
+present/id/count/classic-NBT layout.
 
 ## Adding a protocol
 

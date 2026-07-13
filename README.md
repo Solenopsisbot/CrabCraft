@@ -1,6 +1,6 @@
 # Crabcraft
 
-A Minecraft **Java Edition 1.20.1–1.20.4** client written from scratch in **pure Rust**.
+A Minecraft **Java Edition 1.20.1–1.20.6** client written from scratch in **pure Rust**.
 
 [![CI](https://github.com/Solenopsisbot/CrabCraft/actions/workflows/ci.yml/badge.svg)](https://github.com/Solenopsisbot/CrabCraft/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
@@ -12,12 +12,15 @@ connection like a real player, simulates physics, renders the world, and
 connection.
 
 Protocol 763 (1.20/1.20.1) is the default. Set `CRABCRAFT_PROTOCOL=764`, `765`,
-or a matching version string (`1.20.2`, `1.20.3`, or `1.20.4`) for newer
+`766`, or a matching version string (`1.20.2` through `1.20.6`) for newer
 servers. Protocol 764+ includes the Configuration state, registry transfer,
 network-NBT chunk data, chunk-batch acknowledgement, and versioned packet-ID
 profiles. Protocol 765 additionally handles NBT text components, UUID-addressed
 resource packs and removal, score reset/format packets, and play-to-configuration
 transitions.
+Protocol 766 adds split configuration registries, revised packet maps, and the
+data-component item-stack format used by inventory, equipment, dropped items,
+recipes, maps, books, and container clicks.
 
 Crabcraft is under active development. The feature inventory below distinguishes
 implemented behavior from the remaining parity work; it is not yet a drop-in
@@ -25,7 +28,7 @@ replacement for Mojang's client.
 
 ## What works today
 
-The core path is verified end-to-end against vanilla 1.20.1 and 1.20.4 servers
+The core path is verified end-to-end against vanilla 1.20.1, 1.20.4, and 1.20.6 servers
 (offline mode unless noted), with protocol codecs and mappings tested for every
 supported 1.20.x profile:
 
@@ -302,7 +305,9 @@ Microsoft account. Using the official server jar:
   NBT text components, network-NBT chunks/block entities, score formats,
   resource-pack UUIDs/removal, and reconfiguration entry, live-tested through
   login, registry transfer, chunks, spawn, inventory, entities, movement, and chat
-- [ ] Protocol 766+ (1.20.5/1.20.6, 1.21, …) data-component item formats and registries
+- [x] Protocol 766 / 1.20.5–1.20.6 split registries, packet mappings,
+  data-component inventory/equipment/dropped-item/recipe formats, and live core path
+- [ ] Protocol 767+ (1.21 and newer) registries and incremental packet schemas
 - [ ] (Far future, maybe) Forge mod support — see the note below
 
 ### On Forge mods
