@@ -403,6 +403,166 @@ pub fn read_component_slot_767<B: Buf>(src: &mut B) -> Result<ComponentSlot, Pro
     read_component_slot_version(src, true)
 }
 
+/// Decodes the protocol 768 component registry. 1.21.2 inserted ten component
+/// types and changed several payloads, so translating IDs without consuming the
+/// new schemas would desynchronize every following slot in the packet.
+pub fn read_component_slot_768<B: Buf>(src: &mut B) -> Result<ComponentSlot, ProtoError> {
+    let count = src.read_varint()?;
+    if count == 0 {
+        return Ok(ComponentSlot {
+            item: None,
+            metadata: None,
+        });
+    }
+    if !(1..=127).contains(&count) {
+        return Err(ProtoError::InvalidEnum {
+            type_name: "protocol 768 item stack count",
+            value: i64::from(count),
+        });
+    }
+    let item_id = src.read_varint()?;
+    let added = src.read_varint()?;
+    let removed = src.read_varint()?;
+    if !(0..=MAX_COMPONENTS).contains(&added) || !(0..=MAX_COMPONENTS).contains(&removed) {
+        return Err(ProtoError::InvalidEnum {
+            type_name: "protocol 768 item component count",
+            value: i64::from(added.max(removed)),
+        });
+    }
+    let mut values = HashMap::new();
+    for _ in 0..added {
+        let kind = src.read_varint()?;
+        skip_component_768(src, kind, &mut values)?;
+    }
+    for _ in 0..removed {
+        let _ = src.read_varint()?;
+    }
+    Ok(ComponentSlot {
+        item: Some(SlotItem {
+            item_id,
+            count: i8::try_from(count).map_err(|_| ProtoError::InvalidEnum {
+                type_name: "protocol 768 item stack count",
+                value: i64::from(count),
+            })?,
+        }),
+        metadata: (!values.is_empty()).then_some(Nbt::Compound(values)),
+    })
+}
+
+fn skip_consume_effect_768<B: Buf>(src: &mut B) -> Result<(), ProtoError> {
+    match src.read_varint()? {
+        0 => {
+            for _ in 0..bounded_count(src, "consume potion effect count")? {
+                let _ = src.read_varint()?;
+                skip_effect_detail(src, 0)?;
+            }
+            let _ = src.read_f32()?;
+        }
+        1 => skip_holder_set(src)?,
+        2 => {}
+        3 => {
+            let _ = src.read_f32()?;
+        }
+        4 => skip_sound_holder(src)?,
+        value => {
+            return Err(ProtoError::InvalidEnum {
+                type_name: "consume effect type",
+                value: i64::from(value),
+            })
+        }
+    }
+    Ok(())
+}
+
+fn skip_component_768<B: Buf>(
+    src: &mut B,
+    kind: i32,
+    metadata: &mut HashMap<String, Nbt>,
+) -> Result<(), ProtoError> {
+    match kind {
+        7 | 25 | 31 => skip_string(src)?,
+        14 => {
+            for _ in 0..bounded_count(src, "custom model float count")? {
+                let _ = src.read_f32()?;
+            }
+            for _ in 0..bounded_count(src, "custom model flag count")? {
+                let _ = src.read_bool()?;
+            }
+            for _ in 0..bounded_count(src, "custom model string count")? {
+                skip_string(src)?;
+            }
+            for _ in 0..bounded_count(src, "custom model color count")? {
+                let _ = src.read_i32()?;
+            }
+        }
+        21 => {
+            let _ = src.read_varint()?;
+            let _ = src.read_f32()?;
+            let _ = src.read_bool()?;
+        }
+        22 => {
+            let _ = src.read_f32()?;
+            let _ = src.read_varint()?;
+            skip_sound_holder(src)?;
+            let _ = src.read_bool()?;
+            for _ in 0..bounded_count(src, "consume effect count")? {
+                skip_consume_effect_768(src)?;
+            }
+        }
+        23 => {
+            let _ = read_component_slot_768(src)?;
+        }
+        24 => {
+            let _ = src.read_f32()?;
+            skip_optional(src, skip_string)?;
+        }
+        27 => {
+            let _ = src.read_varint()?;
+        }
+        28 => {
+            let _ = src.read_varint()?;
+            skip_sound_holder(src)?;
+            skip_optional(src, skip_string)?;
+            skip_optional(src, skip_string)?;
+            skip_optional(src, skip_holder_set)?;
+            let _ = src.read_bool()?;
+            let _ = src.read_bool()?;
+            let _ = src.read_bool()?;
+        }
+        29 => skip_holder_set(src)?,
+        30 => {}
+        32 => {
+            for _ in 0..bounded_count(src, "death protection effect count")? {
+                skip_consume_effect_768(src)?;
+            }
+        }
+        39 | 40 | 62 => {
+            for _ in 0..bounded_count(src, "protocol 768 nested item count")? {
+                let _ = read_component_slot_768(src)?;
+            }
+        }
+        _ => {
+            let translated = match kind {
+                0..=6 => kind,
+                8..=13 => kind - 1,
+                15..=20 => kind - 1,
+                26 => 22,
+                33..=38 => kind - 10,
+                41..=61 => kind - 10,
+                63..=66 => kind - 10,
+                _ => {
+                    return Err(ProtoError::InvalidEnum {
+                        type_name: "protocol 768 item component type",
+                        value: i64::from(kind),
+                    })
+                }
+            };
+            skip_component(src, translated, metadata, true)?;
+        }
+    }
+    Ok(())
+}
+
 fn read_component_slot_version<B: Buf>(
     src: &mut B,
     protocol_767: bool,

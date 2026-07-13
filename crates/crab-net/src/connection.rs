@@ -109,6 +109,13 @@ where
         packet: &P,
         packet_id: i32,
     ) -> Result<(), NetError> {
+        tracing::trace!(
+            packet = std::any::type_name::<P>(),
+            state = ?self.state,
+            canonical_id = P::ID,
+            wire_id = packet_id,
+            "sending packet"
+        );
         debug_assert_eq!(
             P::BOUND,
             Bound::Serverbound,

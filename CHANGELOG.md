@@ -18,8 +18,12 @@ remains the detailed source of truth.
 - Protocol 767 for Java Edition 1.21/1.21.1, with Tricky Trials registries,
   VarInt-count item stacks, revised attribute/jukebox components, configuration
   additions, and official-server core/component live validation.
+- Protocol 768 for Java Edition 1.21.2/1.21.3, including generated registries,
+  bundle-era packet maps, teleport velocity/movement flags, particle settings,
+  split inventory updates, all 67 item components, and official 1.21.3 live
+  core/component validation.
 - Version-selected generated block/state, item, and entity registries for the
-  763, 764, 765, 766, and 767 wire profiles.
+  763 through 768 wire profiles.
 - Protocol-aware entity metadata components and scoreboard teams, including
   team prefixes/suffixes in sidebar and Tab-list names.
 - UUID-addressed server resource-pack stacks that can remove and rebuild any

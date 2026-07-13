@@ -1,6 +1,6 @@
 # Crabcraft
 
-A Minecraft **Java Edition 1.20.1–1.21.1** client written from scratch in **pure Rust**.
+A Minecraft **Java Edition 1.20.1–1.21.3** client written from scratch in **pure Rust**.
 
 [![CI](https://github.com/Solenopsisbot/CrabCraft/actions/workflows/ci.yml/badge.svg)](https://github.com/Solenopsisbot/CrabCraft/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
@@ -12,7 +12,7 @@ connection like a real player, simulates physics, renders the world, and
 connection.
 
 Protocol 763 (1.20/1.20.1) is the default. Set `CRABCRAFT_PROTOCOL=764`, `765`,
-`766`, `767`, or a matching version string (`1.20.2` through `1.21.1`) for newer
+`766`, `767`, `768`, or a matching version string (`1.20.2` through `1.21.3`) for newer
 servers. Protocol 764+ includes the Configuration state, registry transfer,
 network-NBT chunk data, chunk-batch acknowledgement, and versioned packet-ID
 profiles. Protocol 765 additionally handles NBT text components, UUID-addressed
@@ -26,6 +26,10 @@ recipes, maps, books, and container clicks.
 Protocol 767 keeps the 766 play packet map while selecting Tricky Trials block
 and item registries and its VarInt-count component stack revision.
 
+Protocol 768 adds the 1.21.2/1.21.3 registries, bundle-era packet maps, revised
+teleport velocity and movement/input payloads, particle preferences, split
+cursor/player-inventory updates, and the expanded 67-type component registry.
+
 Crabcraft is under active development. The feature inventory below distinguishes
 implemented behavior from the remaining parity work; it is not yet a drop-in
 replacement for Mojang's client.
@@ -33,7 +37,7 @@ replacement for Mojang's client.
 ## What works today
 
 The core path is verified end-to-end against vanilla 1.20.1, 1.20.4, 1.20.6,
-and 1.21.1 servers (offline mode unless noted), with protocol codecs and mappings
+1.21.1, and 1.21.3 servers (offline mode unless noted), with protocol codecs and mappings
 tested for every supported profile:
 
 - TCP connection, handshake, and **login** (with packet compression)
@@ -322,7 +326,10 @@ Microsoft account. Using the official server jar:
   data-component inventory/equipment/dropped-item/recipe formats, and live core path
 - [x] Protocol 767 / 1.21–1.21.1 Tricky Trials registries, component-stack
   changes, configuration additions, and live core path
-- [ ] Protocol 768+ (1.21.2 and newer) registries and incremental packet schemas
+- [x] Protocol 768 / 1.21.2–1.21.3 registries, packet maps, movement/teleport,
+  settings, inventory split packets, expanded components, and live core path
+  - [ ] New recipe-display/book numeric-ID UI and bundle selection interaction
+- [ ] Protocol 769+ (1.21.4 and newer) registries and incremental packet schemas
 - [ ] (Far future, maybe) Forge mod support — see the note below
 
 ### On Forge mods

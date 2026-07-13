@@ -38,8 +38,10 @@ use crab_protocol::versions::v1_20_2::play::ChunkBatchReceived;
 use crab_protocol::versions::v1_20_3::{configuration as configuration765, play as play765};
 use crab_protocol::versions::v1_20_5::{configuration as configuration766, play as play766};
 use crab_protocol::versions::v1_21::play as play767;
+use crab_protocol::versions::v1_21_2::{configuration as configuration768, play as play768};
 use crab_protocol::versions::{
     PROTOCOL_1_20_1, PROTOCOL_1_20_2, PROTOCOL_1_20_3, PROTOCOL_1_20_5, PROTOCOL_1_21,
+    PROTOCOL_1_21_2,
 };
 use crab_protocol::BufExt;
 use crab_world::{Chunk, World};
@@ -857,6 +859,7 @@ enum ProtocolVersion {
     V1_20_3,
     V1_20_5,
     V1_21,
+    V1_21_2,
 }
 
 impl ProtocolVersion {
@@ -867,9 +870,10 @@ impl ProtocolVersion {
                 "765" | "1.20.3" | "1.20.4" => Ok(Self::V1_20_3),
                 "766" | "1.20.5" | "1.20.6" => Ok(Self::V1_20_5),
                 "767" | "1.21" | "1.21.1" => Ok(Self::V1_21),
+                "768" | "1.21.2" | "1.21.3" => Ok(Self::V1_21_2),
                 "763" | "1.20" | "1.20.1" => Ok(Self::V1_20_1),
                 _ => {
-                    bail!("unsupported CRABCRAFT_PROTOCOL={value}; use 763, 764, 765, 766, or 767")
+                    bail!("unsupported CRABCRAFT_PROTOCOL={value}; use 763, 764, 765, 766, 767, or 768")
                 }
             },
             Err(std::env::VarError::NotPresent) => Ok(Self::V1_20_1),
@@ -884,15 +888,19 @@ impl ProtocolVersion {
             Self::V1_20_3 => PROTOCOL_1_20_3,
             Self::V1_20_5 => PROTOCOL_1_20_5,
             Self::V1_21 => PROTOCOL_1_21,
+            Self::V1_21_2 => PROTOCOL_1_21_2,
         }
     }
 
     const fn uses_nbt_components(self) -> bool {
-        matches!(self, Self::V1_20_3 | Self::V1_20_5 | Self::V1_21)
+        matches!(
+            self,
+            Self::V1_20_3 | Self::V1_20_5 | Self::V1_21 | Self::V1_21_2
+        )
     }
 
     const fn uses_data_components(self) -> bool {
-        matches!(self, Self::V1_20_5 | Self::V1_21)
+        matches!(self, Self::V1_20_5 | Self::V1_21 | Self::V1_21_2)
     }
 
     const fn uses_split_registry(self) -> bool {
@@ -962,6 +970,29 @@ fn serverbound_766_id(state: State, canonical: i32) -> i32 {
     }
 }
 
+fn serverbound_768_id(state: State, canonical: i32) -> i32 {
+    if state == State::Configuration {
+        return serverbound_766_id(state, canonical);
+    }
+    if state != State::Play {
+        return canonical;
+    }
+    match canonical {
+        0x00..=0x01 => canonical,
+        0x02..=0x04 => canonical + 1,
+        0x05..=0x06 => canonical + 2,
+        0x07 => canonical + 3,
+        0x08..=0x09 => canonical + 4,
+        0x0a..=0x0c => canonical + 5,
+        0x0d => canonical + 7,
+        0x0e => canonical + 8,
+        0x0f..=0x1a => canonical + 8,
+        0x1b..=0x1e => canonical + 9,
+        0x20..=0x32 => canonical + 9,
+        _ => canonical,
+    }
+}
+
 fn canonical_clientbound_764_id(wire: i32) -> i32 {
     match wire {
         0x00..=0x02 => wire,
@@ -1009,6 +1040,73 @@ fn canonical_clientbound_766_id(wire: i32) -> i32 {
     }
 }
 
+/// Protocol 768 inserted several packets and split recipe/inventory updates.
+/// Mapping only the packets consumed by this client makes new, unimplemented
+/// presentation packets safely ignorable instead of accidentally decoding a
+/// same-number packet with an unrelated payload.
+fn canonical_clientbound_768_id(wire: i32) -> i32 {
+    match wire {
+        0x03 => ID_ENTITY_ANIMATION,
+        0x01 => ID_SPAWN_ENTITY,
+        0x07 => ID_BLOCK_ENTITY_DATA,
+        0x09 => ID_BLOCK_CHANGE,
+        0x0a => ID_BOSS_BAR,
+        0x0f => ID_CLEAR_TITLES,
+        0x13 => ID_CONTAINER_CONTENT,
+        0x15 => ID_CONTAINER_SLOT,
+        0x22 => ID_UNLOAD_CHUNK,
+        0x23 => ID_GAME_STATE,
+        0x25 => ID_HURT_ANIMATION,
+        0x26 => ID_INIT_WORLD_BORDER,
+        0x27 => KeepAlive::ID,
+        0x28 => ID_MAP_CHUNK,
+        0x2a => ID_PARTICLES,
+        0x2c => ID_JOIN_GAME,
+        0x2d => ID_MAP_DATA,
+        0x2f => ID_REL_MOVE,
+        0x30 => ID_MOVE_LOOK,
+        0x32 => ID_ENTITY_ROTATION,
+        0x33 => ID_VEHICLE_MOVE,
+        0x37 => Ping::ID,
+        0x3f => ID_PLAYER_REMOVE,
+        0x40 => ID_PLAYER_INFO,
+        0x42 => SynchronizePlayerPosition::ID,
+        0x47 => ID_ENTITY_DESTROY,
+        0x48 => ID_REMOVE_ENTITY_EFFECT,
+        0x4c => ID_RESPAWN,
+        0x4d => ID_ENTITY_HEAD_ROTATION,
+        0x51 => ID_ACTION_BAR,
+        0x52 => ID_WORLD_BORDER_CENTER,
+        0x53 => ID_WORLD_BORDER_LERP,
+        0x54 => ID_WORLD_BORDER_SIZE,
+        0x55 => ID_WORLD_BORDER_WARNING_DELAY,
+        0x56 => ID_WORLD_BORDER_WARNING_REACH,
+        0x5c => ID_SCOREBOARD_DISPLAY,
+        0x5d => ID_ENTITY_METADATA,
+        0x5f => ID_ENTITY_VELOCITY,
+        0x60 => ID_ENTITY_EQUIPMENT,
+        0x61 => ID_EXPERIENCE,
+        0x62 => ID_UPDATE_HEALTH,
+        0x63 => ID_SET_HELD_ITEM,
+        0x64 => ID_SCOREBOARD_OBJECTIVE,
+        0x65 => ID_SET_PASSENGERS,
+        0x67 => ID_TEAMS,
+        0x68 => ID_SCOREBOARD_SCORE,
+        0x6a => ID_TITLE_SUBTITLE,
+        0x6b => ID_UPDATE_TIME,
+        0x6c => ID_TITLE_TEXT,
+        0x6d => ID_TITLE_TIME,
+        0x6e => ID_ENTITY_SOUND,
+        0x6f => ID_SOUND,
+        0x73 => SystemChat::ID,
+        0x74 => ID_PLAYER_LIST_HEADER,
+        0x77 => ID_ENTITY_TELEPORT,
+        0x7d => ID_ENTITY_EFFECT,
+        0x7e => ID_DECLARE_RECIPES,
+        _ => -1,
+    }
+}
+
 async fn configuration_loop<S>(
     conn: &mut Connection<S>,
     shared: &Arc<Shared>,
@@ -1017,17 +1115,22 @@ async fn configuration_loop<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    conn.send(&ConfigurationClientInformation {
-        locale: "en_us".to_string(),
-        view_distance: 10,
-        chat_mode: 0,
-        chat_colors: true,
-        skin_parts: 0x7f,
-        main_hand: 1,
-        text_filtering: false,
-        server_listing: true,
-    })
-    .await?;
+    if protocol == ProtocolVersion::V1_21_2 {
+        conn.send_unmapped(&configuration768::ClientInformation::sensible_defaults())
+            .await?;
+    } else {
+        conn.send(&ConfigurationClientInformation {
+            locale: "en_us".to_string(),
+            view_distance: 10,
+            chat_mode: 0,
+            chat_colors: true,
+            skin_parts: 0x7f,
+            main_hand: 1,
+            text_filtering: false,
+            server_listing: true,
+        })
+        .await?;
+    }
     let mut choices = tokio::time::interval(Duration::from_millis(50));
     loop {
         tokio::select! {
@@ -1179,7 +1282,10 @@ where
             conn.send(&ConfigurationResourcePackStatus { status })
                 .await?;
         }
-        ProtocolVersion::V1_20_3 | ProtocolVersion::V1_20_5 | ProtocolVersion::V1_21 => {
+        ProtocolVersion::V1_20_3
+        | ProtocolVersion::V1_20_5
+        | ProtocolVersion::V1_21
+        | ProtocolVersion::V1_21_2 => {
             let uuid = shared
                 .resource_pack_request
                 .lock()
@@ -1251,7 +1357,8 @@ async fn run_inner(
         ProtocolVersion::V1_20_2
         | ProtocolVersion::V1_20_3
         | ProtocolVersion::V1_20_5
-        | ProtocolVersion::V1_21 => {
+        | ProtocolVersion::V1_21
+        | ProtocolVersion::V1_21_2 => {
             conn.send(&LoginStart764 {
                 name: name.clone(),
                 uuid: uuid.unwrap_or_else(|| offline_uuid(&name)),
@@ -1303,6 +1410,7 @@ async fn run_inner(
                         ProtocolVersion::V1_20_3 => serverbound_765_id,
                         ProtocolVersion::V1_20_5 => serverbound_766_id,
                         ProtocolVersion::V1_21 => serverbound_766_id,
+                        ProtocolVersion::V1_21_2 => serverbound_768_id,
                         ProtocolVersion::V1_20_1 => unreachable!(),
                     });
                     conn.send(&LoginAcknowledged).await?;
@@ -1366,7 +1474,12 @@ where
                     Err(e) => { tracing::info!("connection closed: {e}"); break; }
                 };
                 if protocol != ProtocolVersion::V1_20_1 && raw.id == 0x0c {
-                    if protocol.uses_split_registry() {
+                    if protocol == ProtocolVersion::V1_21_2 {
+                        conn.send_unmapped(&play768::ChunkBatchReceived {
+                            chunks_per_tick: 64.0,
+                        })
+                        .await?;
+                    } else if protocol.uses_split_registry() {
                         conn.send_unmapped(&play766::ChunkBatchReceived {
                             chunks_per_tick: 64.0,
                         })
@@ -1385,7 +1498,16 @@ where
                     conn.set_state(State::Play);
                     continue;
                 }
-                if protocol.uses_split_registry() && raw.id == 0x69 {
+                if matches!(protocol, ProtocolVersion::V1_20_5 | ProtocolVersion::V1_21)
+                    && raw.id == 0x69
+                {
+                    conn.send_unmapped(&play766::ConfigurationAcknowledged).await?;
+                    conn.set_state(State::Configuration);
+                    configuration_loop(conn, shared, protocol).await?;
+                    conn.set_state(State::Play);
+                    continue;
+                }
+                if protocol == ProtocolVersion::V1_21_2 && raw.id == 0x70 {
                     conn.send_unmapped(&play766::ConfigurationAcknowledged).await?;
                     conn.set_state(State::Configuration);
                     configuration_loop(conn, shared, protocol).await?;
@@ -1400,16 +1522,61 @@ where
                     handle_remove_resource_pack_765(&raw, shared)?;
                     continue;
                 }
-                if protocol.uses_split_registry() && raw.id == 0x44 {
+                if matches!(protocol, ProtocolVersion::V1_20_5 | ProtocolVersion::V1_21)
+                    && raw.id == 0x44
+                {
                     handle_reset_score_765(&raw, shared)?;
                     continue;
                 }
-                if protocol.uses_split_registry() && raw.id == 0x45 {
+                if matches!(protocol, ProtocolVersion::V1_20_5 | ProtocolVersion::V1_21)
+                    && raw.id == 0x45
+                {
                     handle_remove_resource_pack_765(&raw, shared)?;
                     continue;
                 }
-                if protocol.uses_split_registry() && raw.id == 0x46 {
+                if matches!(protocol, ProtocolVersion::V1_20_5 | ProtocolVersion::V1_21)
+                    && raw.id == 0x46
+                {
                     handle_resource_pack_request_765(&raw, shared)?;
+                    continue;
+                }
+                if protocol == ProtocolVersion::V1_21_2 && raw.id == 0x49 {
+                    handle_reset_score_765(&raw, shared)?;
+                    continue;
+                }
+                if protocol == ProtocolVersion::V1_21_2 && raw.id == 0x4a {
+                    handle_remove_resource_pack_765(&raw, shared)?;
+                    continue;
+                }
+                if protocol == ProtocolVersion::V1_21_2 && raw.id == 0x4b {
+                    handle_resource_pack_request_765(&raw, shared)?;
+                    continue;
+                }
+                if protocol == ProtocolVersion::V1_21_2 && raw.id == 0x5a {
+                    let mut body = raw.body.clone();
+                    let carried = if body.read_bool()? {
+                        play766::read_component_slot_768(&mut body)?.item
+                    } else {
+                        None
+                    };
+                    *shared.carried.lock().unwrap() = carried;
+                    continue;
+                }
+                if protocol == ProtocolVersion::V1_21_2 && raw.id == 0x66 {
+                    let mut body = raw.body.clone();
+                    let slot = body.read_varint()?;
+                    let item = if body.read_bool()? {
+                        play766::read_component_slot_768(&mut body)?.item
+                    } else {
+                        None
+                    };
+                    if let Ok(slot) = usize::try_from(slot) {
+                        if let Some(destination) =
+                            shared.inventory.lock().unwrap().get_mut(slot)
+                        {
+                            *destination = item;
+                        }
+                    }
                     continue;
                 }
                 let packet_id = match protocol {
@@ -1418,6 +1585,7 @@ where
                     ProtocolVersion::V1_20_3 => canonical_clientbound_765_id(raw.id),
                     ProtocolVersion::V1_20_5 => canonical_clientbound_766_id(raw.id),
                     ProtocolVersion::V1_21 => canonical_clientbound_766_id(raw.id),
+                    ProtocolVersion::V1_21_2 => canonical_clientbound_768_id(raw.id),
                 };
                 match packet_id {
                     id if id == KeepAlive::ID => {
@@ -1429,10 +1597,35 @@ where
                         conn.send(&Pong { id: ping.id }).await?;
                     }
                     id if id == SynchronizePlayerPosition::ID => {
-                        let p: SynchronizePlayerPosition = raw.decode()?;
+                        let (p, corrected_velocity) = if protocol == ProtocolVersion::V1_21_2 {
+                            let update: play768::SynchronizePlayerPosition = raw.decode()?;
+                            (
+                                SynchronizePlayerPosition {
+                                    x: update.x,
+                                    y: update.y,
+                                    z: update.z,
+                                    yaw: update.yaw,
+                                    pitch: update.pitch,
+                                    flags: update.flags as u8,
+                                    teleport_id: update.teleport_id,
+                                },
+                                Some((update.velocity, update.flags)),
+                            )
+                        } else {
+                            (raw.decode()?, None)
+                        };
                         let (just_spawned, pos) = {
                             let mut ps = shared.player.lock().unwrap();
                             ps.apply(&p);
+                            if let Some((velocity, flags)) = corrected_velocity {
+                                for (axis, relative_flag) in [0x20, 0x40, 0x80].into_iter().enumerate() {
+                                    ps.vel[axis] = if flags & relative_flag != 0 {
+                                        ps.vel[axis] + velocity[axis]
+                                    } else {
+                                        velocity[axis]
+                                    };
+                                }
+                            }
                             let js = !ps.spawned;
                             ps.spawned = true;
                             (js, *ps)
@@ -1444,7 +1637,14 @@ where
                         }).await?;
                         if just_spawned {
                             tracing::info!("spawned at ({:.1}, {:.1}, {:.1})", pos.x, pos.y, pos.z);
-                            conn.send(&ClientInformation::sensible_defaults()).await?;
+                            if protocol == ProtocolVersion::V1_21_2 {
+                                conn.send_unmapped(&play768::ClientInformation(
+                                    configuration768::ClientInformation::sensible_defaults(),
+                                ))
+                                .await?;
+                            } else {
+                                conn.send(&ClientInformation::sensible_defaults()).await?;
+                            }
                         }
                         if !greeted {
                             greeted = true;
@@ -1744,6 +1944,9 @@ where
                                     } else {
                                         None
                                     };
+                                }
+                                if protocol == ProtocolVersion::V1_21_2 && actions & 0x40 != 0 {
+                                    let _list_order = b.read_varint();
                                 }
                             }
                         }
@@ -2485,7 +2688,14 @@ where
                 let recipe_requests =
                     std::mem::take(&mut *shared.place_recipe_outbox.lock().unwrap());
                 for request in recipe_requests {
-                    conn.send(&request).await?;
+                    if protocol == ProtocolVersion::V1_21_2 {
+                        tracing::warn!(
+                            recipe = %request.recipe,
+                            "protocol 768 recipe placement awaits numeric display ID"
+                        );
+                    } else {
+                        conn.send(&request).await?;
+                    }
                 }
 
                 let clicks: Vec<(u8, i16, i8, i32)> =
@@ -2529,7 +2739,7 @@ where
                         }
                     };
                     if let Some((state_id, changed, carried)) = predicted {
-                        if protocol == ProtocolVersion::V1_21 {
+                        if matches!(protocol, ProtocolVersion::V1_21 | ProtocolVersion::V1_21_2) {
                             conn.send(&play767::ClickContainerComponents {
                                 window_id,
                                 state_id,
@@ -2599,12 +2809,24 @@ where
                         };
                         if let Some((x, y, z, yaw, height, is_boat)) = vehicle_state {
                             let flags = u8::from(controls.jump) | (u8::from(controls.sneak) << 1);
-                            conn.send(&SteerVehicle {
-                                sideways: controls.strafe,
-                                forward: controls.forward,
-                                flags,
-                            })
-                            .await?;
+                            if protocol == ProtocolVersion::V1_21_2 {
+                                let mut input = 0u8;
+                                input |= u8::from(controls.forward > 0.0);
+                                input |= u8::from(controls.forward < 0.0) << 1;
+                                input |= u8::from(controls.strafe > 0.0) << 2;
+                                input |= u8::from(controls.strafe < 0.0) << 3;
+                                input |= u8::from(controls.jump) << 4;
+                                input |= u8::from(controls.sneak) << 5;
+                                input |= u8::from(controls.sprint) << 6;
+                                conn.send_unmapped(&play768::PlayerInput { flags: input }).await?;
+                            } else {
+                                conn.send(&SteerVehicle {
+                                    sideways: controls.strafe,
+                                    forward: controls.forward,
+                                    flags,
+                                })
+                                .await?;
+                            }
                             if is_boat {
                                 conn.send(&SteerBoat {
                                     left_paddle: controls.forward != 0.0 || controls.strafe > 0.0,
@@ -2763,17 +2985,32 @@ where
                         };
                         if let Some(hit) = hit {
                             block_sequence += 1;
-                            conn.send(&UseItemOn {
-                                hand: 0,
-                                x: hit.block[0],
-                                y: hit.block[1],
-                                z: hit.block[2],
-                                direction: face_direction(hit.face),
-                                cursor: [0.5, 0.5, 0.5],
-                                inside_block: false,
-                                sequence: block_sequence,
-                            })
-                            .await?;
+                            if protocol == ProtocolVersion::V1_21_2 {
+                                conn.send_unmapped(&play768::UseItemOn {
+                                    hand: 0,
+                                    x: hit.block[0],
+                                    y: hit.block[1],
+                                    z: hit.block[2],
+                                    direction: face_direction(hit.face),
+                                    cursor: [0.5, 0.5, 0.5],
+                                    inside_block: false,
+                                    world_border_hit: false,
+                                    sequence: block_sequence,
+                                })
+                                .await?;
+                            } else {
+                                conn.send(&UseItemOn {
+                                    hand: 0,
+                                    x: hit.block[0],
+                                    y: hit.block[1],
+                                    z: hit.block[2],
+                                    direction: face_direction(hit.face),
+                                    cursor: [0.5, 0.5, 0.5],
+                                    inside_block: false,
+                                    sequence: block_sequence,
+                                })
+                                .await?;
+                            }
                             let target_name = block_name_at(shared, hit.block);
                             let may_place = snapshot.sneaking
                                 || target_name.is_none_or(|name| !is_interactable_block(name));
@@ -3032,7 +3269,7 @@ fn handle_join_game(
                 .unwrap_or(crab_protocol::nbt::Nbt::End);
             (codec, dimension_type, game_mode)
         }
-        ProtocolVersion::V1_20_5 | ProtocolVersion::V1_21 => {
+        ProtocolVersion::V1_20_5 | ProtocolVersion::V1_21 | ProtocolVersion::V1_21_2 => {
             let world_count = b.read_varint()?.max(0);
             for _ in 0..world_count {
                 let _ = b.read_string(32767)?;
@@ -3516,7 +3753,11 @@ fn read_slot_item<B: crab_protocol::BufExt>(
     b: &mut B,
     protocol: ProtocolVersion,
 ) -> Result<Option<i32>> {
-    if protocol == ProtocolVersion::V1_21 {
+    if protocol == ProtocolVersion::V1_21_2 {
+        Ok(play766::read_component_slot_768(b)?
+            .item
+            .map(|item| item.item_id))
+    } else if protocol == ProtocolVersion::V1_21 {
         Ok(play766::read_component_slot_767(b)?
             .item
             .map(|item| item.item_id))
@@ -3668,7 +3909,9 @@ fn read_data_component_slot<B: crab_protocol::BufExt>(
     b: &mut B,
     protocol: ProtocolVersion,
 ) -> Result<play766::ComponentSlot> {
-    if protocol == ProtocolVersion::V1_21 {
+    if protocol == ProtocolVersion::V1_21_2 {
+        Ok(play766::read_component_slot_768(b)?)
+    } else if protocol == ProtocolVersion::V1_21 {
         Ok(play766::read_component_slot_767(b)?)
     } else {
         Ok(play766::read_component_slot(b)?)
@@ -5373,6 +5616,23 @@ mod tests {
         assert_eq!(ProtocolVersion::V1_21.number(), 767);
         assert_eq!(canonical_clientbound_766_id(0x2b), ID_JOIN_GAME);
         assert_eq!(serverbound_766_id(State::Play, ClickContainer::ID), 0x0e);
+    }
+
+    #[test]
+    fn protocol_768_profiles_cover_bundle_packet_insertions() {
+        assert_eq!(ProtocolVersion::V1_21_2.number(), 768);
+        assert_eq!(canonical_clientbound_768_id(0x28), ID_MAP_CHUNK);
+        assert_eq!(canonical_clientbound_768_id(0x2c), ID_JOIN_GAME);
+        assert_eq!(
+            canonical_clientbound_768_id(0x42),
+            SynchronizePlayerPosition::ID
+        );
+        assert_eq!(canonical_clientbound_768_id(0x5d), ID_ENTITY_METADATA);
+        assert_eq!(canonical_clientbound_768_id(0x70), -1); // start configuration
+        assert_eq!(serverbound_768_id(State::Play, ClickContainer::ID), 0x10);
+        assert_eq!(serverbound_768_id(State::Play, SetPlayerPosition::ID), 0x1c);
+        assert_eq!(serverbound_768_id(State::Play, UseItem::ID), 0x3b);
+        assert_eq!(serverbound_768_id(State::Configuration, 0x03), 0x04);
     }
 
     #[test]

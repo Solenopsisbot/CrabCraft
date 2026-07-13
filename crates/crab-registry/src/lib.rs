@@ -19,26 +19,32 @@ mod blocks_1_20_2;
 mod blocks_1_20_3;
 mod blocks_1_20_5;
 mod blocks_1_21;
+mod blocks_1_21_3;
 mod entities_1_20_1;
 mod entities_1_20_3;
 mod entities_1_20_5;
+mod entities_1_21_3;
 mod items_1_20_1;
 mod items_1_20_3;
 mod items_1_20_5;
 mod items_1_21;
+mod items_1_21_3;
 
 pub use blocks_1_20_1::BLOCKS_1_20_1;
 pub use blocks_1_20_2::BLOCKS_1_20_2;
 pub use blocks_1_20_3::BLOCKS_1_20_3;
 pub use blocks_1_20_5::BLOCKS_1_20_5;
 pub use blocks_1_21::BLOCKS_1_21;
+pub use blocks_1_21_3::BLOCKS_1_21_3;
 pub use entities_1_20_1::ENTITIES_1_20_1;
 pub use entities_1_20_3::ENTITIES_1_20_3;
 pub use entities_1_20_5::ENTITIES_1_20_5;
+pub use entities_1_21_3::ENTITIES_1_21_3;
 pub use items_1_20_1::ITEMS_1_20_1;
 pub use items_1_20_3::ITEMS_1_20_3;
 pub use items_1_20_5::ITEMS_1_20_5;
 pub use items_1_21::ITEMS_1_21;
+pub use items_1_21_3::ITEMS_1_21_3;
 
 static REGISTRY_PROFILE: AtomicU8 = AtomicU8::new(0);
 
@@ -51,6 +57,7 @@ pub fn set_protocol(protocol: i32) {
             765 => 2,
             766 => 3,
             767 => 4,
+            768 => 5,
             _ => 0,
         },
         Ordering::Relaxed,
@@ -65,6 +72,7 @@ pub fn blocks() -> &'static [BlockDef] {
         2 => BLOCKS_1_20_3,
         3 => BLOCKS_1_20_5,
         4 => BLOCKS_1_21,
+        5 => BLOCKS_1_21_3,
         _ => BLOCKS_1_20_1,
     }
 }
@@ -76,6 +84,7 @@ pub fn items() -> &'static [ItemDef] {
         2 => ITEMS_1_20_3,
         3 => ITEMS_1_20_5,
         4 => ITEMS_1_21,
+        5 => ITEMS_1_21_3,
         _ => ITEMS_1_20_1,
     }
 }
@@ -87,6 +96,7 @@ pub fn entities() -> &'static [EntityDef] {
         2 => ENTITIES_1_20_3,
         3 => ENTITIES_1_20_5,
         4 => ENTITIES_1_20_5,
+        5 => ENTITIES_1_21_3,
         _ => ENTITIES_1_20_1,
     }
 }
@@ -1090,5 +1100,21 @@ mod tests {
             .find(|block| block.name == "minecraft:trial_spawner")
             .unwrap();
         assert_eq!(trial_spawner.default_state, 26_644);
+
+        let mace_768 = ITEMS_1_21_3
+            .iter()
+            .find(|item| item.name == "mace")
+            .unwrap();
+        assert_eq!(mace_768.id, 1135);
+        let pale_oak = BLOCKS_1_21_3
+            .iter()
+            .find(|block| block.name == "minecraft:pale_oak_planks")
+            .unwrap();
+        assert_eq!(pale_oak.default_state, 25);
+        let creaking = ENTITIES_1_21_3
+            .iter()
+            .find(|entity| entity.name == "creaking")
+            .unwrap();
+        assert_eq!(creaking.id, 29);
     }
 }
