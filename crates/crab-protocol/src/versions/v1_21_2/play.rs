@@ -92,6 +92,35 @@ pub struct PlaceRecipe {
     pub make_all: bool,
 }
 
+/// `0x02` — select an item inside the bundle under the inventory cursor.
+///
+/// Protocol 768 introduced this packet alongside interactive bundle tooltips.
+/// `selected_item_index == -1` clears the bundle selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SelectBundleItem {
+    pub slot_id: i32,
+    pub selected_item_index: i32,
+}
+
+impl Packet for SelectBundleItem {
+    const ID: i32 = 0x02;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Serverbound;
+
+    fn encode<B: BufMut>(&self, dst: &mut B) -> Result<(), ProtoError> {
+        dst.put_varint(self.slot_id);
+        dst.put_varint(self.selected_item_index);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(src: &mut B) -> Result<Self, ProtoError> {
+        Ok(Self {
+            slot_id: src.read_varint()?,
+            selected_item_index: src.read_varint()?,
+        })
+    }
+}
+
 impl Packet for PlaceRecipe {
     const ID: i32 = 0x24;
     const STATE: State = State::Play;
@@ -252,6 +281,17 @@ mod tests {
         bytes.clear();
         recipe.encode(&mut bytes).unwrap();
         assert_eq!(recipe, PlaceRecipe::decode(&mut bytes.as_slice()).unwrap());
+
+        let selection = SelectBundleItem {
+            slot_id: 36,
+            selected_item_index: 3,
+        };
+        bytes.clear();
+        selection.encode(&mut bytes).unwrap();
+        assert_eq!(
+            selection,
+            SelectBundleItem::decode(&mut bytes.as_slice()).unwrap()
+        );
     }
 
     #[test]
@@ -291,5 +331,32 @@ mod tests {
         assert_eq!(slot.item.unwrap().item_id, 1135);
         assert_eq!(slot.metadata.unwrap().get("map"), Some(&Nbt::Int(9)));
         assert_eq!(input.read_u8().unwrap(), 0xaa);
+    }
+
+    #[test]
+    fn protocol_768_bundle_contents_are_retained_for_tooltips() {
+        let mut bytes = Vec::new();
+        bytes.put_varint(1); // outer stack count
+        bytes.put_varint(1152); // bundle-like item id; identity is registry-owned
+        bytes.put_varint(1); // added component count
+        bytes.put_varint(0); // removed component count
+        bytes.put_varint(40); // bundle_contents
+        bytes.put_varint(1); // one nested item
+        bytes.put_varint(5); // nested stack count
+        bytes.put_varint(42); // nested item id
+        bytes.put_varint(0); // no added components
+        bytes.put_varint(0); // no removed components
+
+        let decoded = read_component_slot_768(&mut bytes.as_slice()).unwrap();
+        let contents = decoded
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("bundle_contents"));
+        let crate::nbt::Nbt::List(contents) = contents.unwrap() else {
+            panic!("bundle contents should be retained as a list");
+        };
+        assert_eq!(contents.len(), 1);
+        assert_eq!(contents[0].get("id"), Some(&crate::nbt::Nbt::Int(42)));
+        assert_eq!(contents[0].get("count"), Some(&crate::nbt::Nbt::Byte(5)));
     }
 }

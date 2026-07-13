@@ -239,6 +239,31 @@ fn pretty_item_name(name: &str) -> String {
         .join(" ")
 }
 
+fn bundle_items(
+    metadata: Option<&crab_protocol::nbt::Nbt>,
+) -> Vec<crab_protocol::versions::v1_20_1::play::SlotItem> {
+    use crab_protocol::nbt::Nbt;
+
+    let Some(Nbt::List(entries)) = metadata.and_then(|value| value.get("bundle_contents")) else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let Nbt::Int(item_id) = entry.get("id")? else {
+                return None;
+            };
+            let Nbt::Byte(count) = entry.get("count")? else {
+                return None;
+            };
+            Some(crab_protocol::versions::v1_20_1::play::SlotItem {
+                item_id: *item_id,
+                count: *count,
+            })
+        })
+        .collect()
+}
+
 /// Projects nearby sign block-entity text into the HUD font pass. The block
 /// model remains world geometry while the glyphs stay crisp at useful reading
 /// distances, matching the server-provided four-line front/back content.
@@ -1791,6 +1816,8 @@ struct App {
     recipe_page: usize,
     recipe_book_open: bool,
     recipe_book_page: usize,
+    /// Current protocol-768 bundle tooltip selection `(slot, nested index)`.
+    bundle_selection: Option<(i32, i32)>,
     /// Text currently entered in the focused anvil rename field.
     anvil_name: String,
     /// Per-entity smoothed render state (interpolation + walk animation).
@@ -1869,6 +1896,7 @@ impl App {
             recipe_page: 0,
             recipe_book_open: false,
             recipe_book_page: 0,
+            bundle_selection: None,
             anvil_name: String::new(),
             entity_anim: HashMap::new(),
             render_eye: None,
@@ -2480,6 +2508,17 @@ impl App {
     }
 
     fn hovered_item(&self) -> Option<crab_protocol::versions::v1_20_1::play::SlotItem> {
+        if let (Some((slot, items)), Some((selected_slot, selected))) =
+            (self.hovered_bundle(), self.bundle_selection)
+        {
+            if slot == selected_slot {
+                if let Ok(index) = usize::try_from(selected) {
+                    if let Some(item) = items.get(index) {
+                        return Some(*item);
+                    }
+                }
+            }
+        }
         let aspect = self.gfx.as_ref().map_or(1.0, Graphics::aspect);
         let (cx, cy) = self.cursor;
         if let Some(container) = self.shared.container.lock().unwrap().as_ref() {
@@ -2513,6 +2552,53 @@ impl App {
                 let bounds = crab_render::inventory_slot_rect(rect, slot);
                 if cx >= bounds.0 && cx <= bounds.2 && cy >= bounds.1 && cy <= bounds.3 {
                     return *item;
+                }
+            }
+        }
+        None
+    }
+
+    /// Returns the visible slot id and decoded contents of a hovered 1.21.2+
+    /// bundle. Bundle contents are retained as synthetic metadata by the
+    /// protocol decoder so the rendering/input layer stays version-agnostic.
+    fn hovered_bundle(
+        &self,
+    ) -> Option<(i32, Vec<crab_protocol::versions::v1_20_1::play::SlotItem>)> {
+        let aspect = self.gfx.as_ref().map_or(1.0, Graphics::aspect);
+        let (cx, cy) = self.cursor;
+        if let Some(container) = self.shared.container.lock().unwrap().as_ref() {
+            let rows = container.generic_rows();
+            let rect = if let Some(rows) = rows {
+                crab_render::container_rect(rows, aspect)
+            } else if container.furnace_texture().is_some() {
+                crab_render::inventory_rect(aspect)
+            } else {
+                crab_render::simple_container_rect(container.simple_container_texture()?, aspect)
+            };
+            for slot in 0..container.slots.len() {
+                let bounds = if let Some(rows) = rows {
+                    crab_render::container_slot_rect(rect, rows, slot)
+                } else if let Some(texture) = container.simple_container_texture() {
+                    crab_render::simple_container_slot_rect(rect, texture, slot)
+                } else {
+                    crab_render::furnace_slot_rect(rect, slot)
+                };
+                if cx >= bounds.0 && cx <= bounds.2 && cy >= bounds.1 && cy <= bounds.3 {
+                    let items =
+                        bundle_items(container.slot_metadata.get(slot).and_then(Option::as_ref));
+                    return (!items.is_empty()).then_some((i32::try_from(slot).ok()?, items));
+                }
+            }
+            return None;
+        }
+        if self.inventory_open {
+            let rect = crab_render::inventory_rect(aspect);
+            let metadata = self.shared.inventory_nbt.lock().unwrap();
+            for slot in 0..metadata.len() {
+                let bounds = crab_render::inventory_slot_rect(rect, slot);
+                if cx >= bounds.0 && cx <= bounds.2 && cy >= bounds.1 && cy <= bounds.3 {
+                    let items = bundle_items(metadata.get(slot).and_then(Option::as_ref));
+                    return (!items.is_empty()).then_some((i32::try_from(slot).ok()?, items));
                 }
             }
         }
@@ -3145,6 +3231,28 @@ impl ApplicationHandler for App {
                     winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32,
                 };
                 if self.item_screen_open() {
+                    if let Some((slot, items)) = self.hovered_bundle() {
+                        let count = i32::try_from(items.len()).unwrap_or(i32::MAX);
+                        let selected = match self.bundle_selection {
+                            Some((selected_slot, selected)) if selected_slot == slot => selected,
+                            _ if dy > 0.01 => 1,
+                            _ => -1,
+                        };
+                        let next = if dy > 0.01 {
+                            (selected - 1).rem_euclid(count)
+                        } else if dy < -0.01 {
+                            (selected + 1).rem_euclid(count)
+                        } else {
+                            return;
+                        };
+                        self.bundle_selection = Some((slot, next));
+                        self.shared
+                            .bundle_selection_outbox
+                            .lock()
+                            .unwrap()
+                            .push((slot, next));
+                        return;
+                    }
                     if self.recipe_book_open && self.crafting_recipe_context().is_some() {
                         let recipes = self
                             .visible_crafting_recipes(self.crafting_recipe_context().unwrap().grid);
@@ -3255,6 +3363,7 @@ impl ApplicationHandler for App {
                 let (mut box_v, model_v, item_v) = self.step_entities(dt);
                 let crack_v = self.crack_mesh();
                 let hotbar = hotbar_icons(&self.shared, &self.item_atlas);
+                let hovered_bundle = self.hovered_bundle();
                 let hovered_item = self.hovered_item();
                 let container = self.shared.container.lock().unwrap().clone();
                 let inv_icons = (self.inventory_open && container.is_none())
@@ -3963,20 +4072,62 @@ impl ApplicationHandler for App {
                                 .ok()
                                 .and_then(crab_registry::item_name)
                             {
-                                let label = pretty_item_name(name);
+                                let mut lines = vec![pretty_item_name(name)];
+                                if let Some((slot, contents)) = hovered_bundle.as_ref() {
+                                    let selected = self
+                                        .bundle_selection
+                                        .filter(|(selected_slot, _)| selected_slot == slot)
+                                        .and_then(|(_, index)| usize::try_from(index).ok())
+                                        .filter(|index| *index < contents.len());
+                                    lines[0] = "Bundle".to_string();
+                                    if let Some(index) = selected {
+                                        let nested = contents[index];
+                                        let nested_name = u32::try_from(nested.item_id)
+                                            .ok()
+                                            .and_then(crab_registry::item_name)
+                                            .map(pretty_item_name)
+                                            .unwrap_or_else(|| format!("Item #{}", nested.item_id));
+                                        lines.push(format!("{nested_name} x{}", nested.count));
+                                        lines.push(format!(
+                                            "Scroll to select  {} / {}",
+                                            index + 1,
+                                            contents.len()
+                                        ));
+                                    } else {
+                                        lines.push(format!(
+                                            "{} stack{}  -  scroll to select",
+                                            contents.len(),
+                                            if contents.len() == 1 { "" } else { "s" }
+                                        ));
+                                    }
+                                }
                                 let h = 0.052;
-                                let width = gui.text_width(&label) * (h / 8.0) / aspect.max(0.01);
+                                let width = lines
+                                    .iter()
+                                    .map(|line| gui.text_width(line) * (h / 8.0) / aspect.max(0.01))
+                                    .fold(0.0, f32::max);
                                 let x = (self.cursor.0 + 0.025).clamp(-0.98, 0.98 - width - 0.025);
                                 let y = (self.cursor.1 + 0.075).clamp(-0.9, 0.95);
+                                let height = h * lines.len() as f32;
                                 push_color2d(
                                     &mut hud_c,
                                     x - 0.012,
-                                    y - h - 0.012,
+                                    y - height - 0.012,
                                     x + width + 0.012,
                                     y + 0.012,
                                     [0.06, 0.02, 0.09],
                                 );
-                                crab_render::push_text(&mut hud_text, gui, &label, x, y, h, aspect);
+                                for (line, text) in lines.iter().enumerate() {
+                                    crab_render::push_text(
+                                        &mut hud_text,
+                                        gui,
+                                        text,
+                                        x,
+                                        y - h * line as f32,
+                                        h,
+                                        aspect,
+                                    );
+                                }
                             }
                         }
                         if self.inventory_open && container.is_none() {
@@ -4126,6 +4277,28 @@ mod tests {
             armour_color("diamond_chestplate"),
             armour_color("golden_chestplate")
         );
+    }
+
+    #[test]
+    fn bundle_metadata_drives_interactive_tooltip_items() {
+        use crab_protocol::nbt::Nbt;
+
+        let entry = Nbt::Compound(HashMap::from([
+            ("id".to_string(), Nbt::Int(42)),
+            ("count".to_string(), Nbt::Byte(5)),
+        ]));
+        let metadata = Nbt::Compound(HashMap::from([(
+            "bundle_contents".to_string(),
+            Nbt::List(vec![entry]),
+        )]));
+        assert_eq!(
+            bundle_items(Some(&metadata)),
+            vec![crab_protocol::versions::v1_20_1::play::SlotItem {
+                item_id: 42,
+                count: 5,
+            }]
+        );
+        assert!(bundle_items(None).is_empty());
     }
 
     #[test]

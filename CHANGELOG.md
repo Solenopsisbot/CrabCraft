@@ -51,3 +51,6 @@ remains the detailed source of truth.
   long-jump, and sitting model transforms.
 - Protocol 768 recipe-book add/remove displays now populate the existing
   crafting/stonecutter UI and send numeric display-ID placement requests.
+- Protocol 768 bundle contents are retained across inventory synchronization;
+  scrolling over a bundle selects nested stacks, updates its tooltip, and sends
+  the vanilla bundle-selection packet.

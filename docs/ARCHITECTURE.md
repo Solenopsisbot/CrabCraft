@@ -50,6 +50,12 @@ stonecutter records. Protocols through 767 use namespaced recipe IDs; protocol
 768 recursively decodes slot/recipe displays, stores numeric display IDs as the
 stable UI key, and converts the selected key back to a VarInt placement request.
 
+Inventory metadata is kept parallel to lightweight, copyable item stacks for both
+the player inventory and an open server container. Protocol 768's recursive bundle
+component decoder projects nested IDs/counts into that metadata; the window layer
+uses it for tooltip selection while the network layer owns the version-specific
+selection packet.
+
 ## Crate boundaries
 
 - `crab-protocol`: byte codecs, classic/network NBT, packet traits, per-version packets.

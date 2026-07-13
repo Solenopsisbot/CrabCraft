@@ -536,7 +536,20 @@ fn skip_component_768<B: Buf>(
                 skip_consume_effect_768(src)?;
             }
         }
-        39 | 40 | 62 => {
+        40 => {
+            let mut contents = Vec::new();
+            for _ in 0..bounded_count(src, "protocol 768 bundle item count")? {
+                let nested = read_component_slot_768(src)?;
+                if let Some(item) = nested.item {
+                    let mut entry = HashMap::new();
+                    entry.insert("id".to_string(), Nbt::Int(item.item_id));
+                    entry.insert("count".to_string(), Nbt::Byte(item.count));
+                    contents.push(Nbt::Compound(entry));
+                }
+            }
+            metadata.insert("bundle_contents".to_string(), Nbt::List(contents));
+        }
+        39 | 62 => {
             for _ in 0..bounded_count(src, "protocol 768 nested item count")? {
                 let _ = read_component_slot_768(src)?;
             }

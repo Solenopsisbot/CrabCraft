@@ -28,7 +28,8 @@ and item registries and its VarInt-count component stack revision.
 
 Protocol 768 adds the 1.21.2/1.21.3 registries, bundle-era packet maps, revised
 teleport velocity and movement/input payloads, particle preferences, split
-cursor/player-inventory updates, and the expanded 67-type component registry.
+cursor/player-inventory updates, the expanded 67-type component registry, and
+scroll-selectable bundle tooltips.
 
 Crabcraft is under active development. The feature inventory below distinguishes
 implemented behavior from the remaining parity work; it is not yet a drop-in
@@ -129,6 +130,8 @@ tested for every supported profile:
   are retained, filtered to the active 2×2 or 3×3 grid, displayed as a paged
   result-icon panel, and placed authoritatively (Shift requests craft-all),
   including protocol 768's numeric recipe-display add/remove packets
+- **Bundles**: protocol 768 retains nested component stacks, shows an interactive
+  contents tooltip, and sends the selected nested item when scrolling over a bundle
 - **Status effects**: authoritative add/remove/expiry tracking with Speed,
   Slowness, Haste, Mining Fatigue, Jump Boost, Levitation, and Slow Falling
   applied to local movement, mining, and gravity, plus vanilla HUD icons
@@ -330,7 +333,7 @@ Microsoft account. Using the official server jar:
 - [x] Protocol 768 / 1.21.2–1.21.3 registries, packet maps, movement/teleport,
   settings, inventory split packets, expanded components, and live core path
   - [x] New recipe-display/book numeric-ID UI and placement requests
-  - [ ] Bundle selection interaction
+  - [x] Bundle contents, scroll selection, tooltip feedback, and selection packets
 - [ ] Protocol 769+ (1.21.4 and newer) registries and incremental packet schemas
 - [ ] (Far future, maybe) Forge mod support — see the note below
 

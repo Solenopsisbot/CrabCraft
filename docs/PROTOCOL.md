@@ -92,6 +92,10 @@ new recipe display/book packets use numeric display IDs. Crafting-shaped,
 crafting-shapeless, stonecutter, furnace, and smithing displays are bounded and
 recursively decoded; crafting and stonecutter entries feed the existing paged UI,
 add/remove updates maintain unlock state, and placement sends the numeric ID.
+Bundle-content components retain their nested item IDs and counts as safe client
+metadata. When the inventory cursor is over a non-empty bundle, wheel input cycles
+that list, updates the tooltip, and sends protocol 768's two-VarInt
+`Select Bundle Item` packet using the visible window slot ID.
 Unresolvable tag-only displays remain safe empty alternatives rather than
 guessing registry membership.
 

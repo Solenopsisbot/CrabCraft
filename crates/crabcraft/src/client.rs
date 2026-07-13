@@ -118,6 +118,9 @@ pub struct ContainerState {
     pub menu_type: i32,
     pub title: String,
     pub slots: Vec<Option<SlotItem>>,
+    /// Data-component/NBT metadata parallel to `slots`, retained for item UI
+    /// such as interactive bundle contents.
+    pub slot_metadata: Vec<Option<crab_protocol::nbt::Nbt>>,
     pub state_id: i32,
     /// Numeric menu properties. Furnace-family menus use indices 0..=3.
     pub properties: [i16; 4],
@@ -763,6 +766,9 @@ pub struct Shared {
     pub rename_outbox: Mutex<Vec<String>>,
     pub edit_book_outbox: Mutex<Vec<EditBook>>,
     pub place_recipe_outbox: Mutex<Vec<PlaceRecipe>>,
+    /// Protocol 768 bundle selections queued by the inventory UI:
+    /// `(visible slot id, nested item index)`.
+    pub bundle_selection_outbox: Mutex<Vec<(i32, i32)>>,
     /// The block currently being mined + its crack stage, for the destroy-stage
     /// overlay (`None` when not digging).
     pub dig: Mutex<Option<DigOverlay>>,
@@ -818,6 +824,7 @@ impl Shared {
             rename_outbox: Mutex::new(Vec::new()),
             edit_book_outbox: Mutex::new(Vec::new()),
             place_recipe_outbox: Mutex::new(Vec::new()),
+            bundle_selection_outbox: Mutex::new(Vec::new()),
             dig: Mutex::new(None),
             running: AtomicBool::new(true),
         }
@@ -2391,8 +2398,9 @@ where
                             if let Ok((pkt, metadata)) =
                                 decode_component_container_content(&raw, protocol)
                             {
-                                capture_component_content_metadata(shared, pkt.window_id, metadata);
+                                let window_id = pkt.window_id;
                                 handle_container_content(shared, pkt);
+                                capture_component_content_metadata(shared, window_id, metadata);
                             }
                         } else {
                             let _ = capture_container_content_nbt(&raw, shared);
@@ -2712,6 +2720,18 @@ where
                         }
                     } else {
                         conn.send(&request).await?;
+                    }
+                }
+                let bundle_selections = std::mem::take(
+                    &mut *shared.bundle_selection_outbox.lock().unwrap(),
+                );
+                if protocol == ProtocolVersion::V1_21_2 {
+                    for (slot_id, selected_item_index) in bundle_selections {
+                        conn.send_unmapped(&play768::SelectBundleItem {
+                            slot_id,
+                            selected_item_index,
+                        })
+                        .await?;
                     }
                 }
 
@@ -4914,6 +4934,7 @@ fn handle_open_screen(shared: &Arc<Shared>, pkt: OpenScreen) {
         menu_type: pkt.menu_type,
         title: plain_text(&pkt.title),
         slots: Vec::new(),
+        slot_metadata: Vec::new(),
         state_id: 0,
         properties: [0; 4],
     });
@@ -5027,6 +5048,24 @@ fn capture_component_content_metadata(
         let mut inventory_nbt = shared.inventory_nbt.lock().unwrap();
         *inventory_nbt = metadata;
         inventory_nbt.resize(PLAYER_INVENTORY_SLOTS, None);
+    } else if let Some(container) = shared
+        .container
+        .lock()
+        .unwrap()
+        .as_mut()
+        .filter(|container| container.window_id == window_id)
+    {
+        container.slot_metadata = metadata;
+        let player_start = container.container_slot_count();
+        if container.slot_metadata.len() >= player_start + 36 {
+            let mut inventory_nbt = shared.inventory_nbt.lock().unwrap();
+            for (destination, value) in inventory_nbt[9..45]
+                .iter_mut()
+                .zip(&container.slot_metadata[player_start..player_start + 36])
+            {
+                *destination = value.clone();
+            }
+        }
     }
 }
 
@@ -5040,6 +5079,26 @@ fn capture_component_slot_metadata(
             let mut inventory_nbt = shared.inventory_nbt.lock().unwrap();
             if index < inventory_nbt.len() {
                 inventory_nbt[index] = metadata;
+            }
+        }
+    } else if pkt.window_id > 0 {
+        let Ok(index) = usize::try_from(pkt.slot) else {
+            return;
+        };
+        if let Some(container) = shared
+            .container
+            .lock()
+            .unwrap()
+            .as_mut()
+            .filter(|container| i8::try_from(container.window_id).ok() == Some(pkt.window_id))
+        {
+            if index >= container.slot_metadata.len() {
+                container.slot_metadata.resize(index + 1, None);
+            }
+            container.slot_metadata[index] = metadata.clone();
+            let player_start = container.container_slot_count();
+            if (player_start..player_start + 36).contains(&index) {
+                shared.inventory_nbt.lock().unwrap()[9 + index - player_start] = metadata;
             }
         }
     }
@@ -6445,6 +6504,7 @@ mod tests {
                 menu_type,
                 title: String::new(),
                 slots: vec![None; slots + 36],
+                slot_metadata: vec![None; slots + 36],
                 state_id: 0,
                 properties: [0; 4],
             };
