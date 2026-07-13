@@ -18,11 +18,13 @@ pub mod renderer;
 
 pub use camera::Camera;
 pub use hud::{
-    build_hud_pipelines, hotbar_slot_rect, hud_geometry, inventory_geometry, inventory_rect,
-    inventory_slot_rect, menu_button_rect, menu_geometry, push_text, render_hud_to_png, HudFrame,
-    HudPipelines,
+    build_hud_pipelines, container_geometry, container_rect, container_slot_rect,
+    enchantment_option_rect, furnace_geometry, furnace_slot_rect, hotbar_slot_rect, hud_geometry,
+    inventory_geometry, inventory_rect, inventory_slot_rect, menu_button_rect, menu_geometry,
+    push_text, render_hud_to_png, simple_container_geometry, simple_container_rect,
+    simple_container_slot_rect, status_effect_geometry, HudFrame, HudPipelines,
 };
-pub use mesh::{box_mesh, entity_mesh, mesh_region, Mesh, Vertex};
+pub use mesh::{block_item_mesh, box_mesh, entity_mesh, mesh_region, Mesh, Vertex};
 pub use renderer::{
     build_block_pipeline, render_to_png, render_to_rgba, upload_atlas, upload_texture,
     CameraUniform, ATLAS_FORMAT, DEPTH_FORMAT,

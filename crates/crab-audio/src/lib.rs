@@ -88,6 +88,8 @@ pub fn read_sound(assets_dir: &Path, index: &AssetIndex, name: &str) -> Option<V
 #[derive(Default)]
 pub struct Sounds {
     events: HashMap<String, Vec<String>>,
+    /// Registry order from the source `sounds.json`; protocol ids are one-based.
+    registry: Vec<String>,
 }
 
 impl Sounds {
@@ -98,6 +100,7 @@ impl Sounds {
         let bytes = std::fs::read(object_path(assets_dir, hash)).ok()?;
         let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
         let obj = v.as_object()?;
+        let registry = obj.keys().cloned().collect();
         let mut events = HashMap::new();
         for (event, def) in obj {
             let Some(list) = def.get("sounds").and_then(serde_json::Value::as_array) else {
@@ -124,7 +127,7 @@ impl Sounds {
                 events.insert(event.clone(), files);
             }
         }
-        Some(Self { events })
+        Some(Self { events, registry })
     }
 
     /// Number of known events.
@@ -152,6 +155,15 @@ impl Sounds {
                 Some(files[i].as_str())
             }
         }
+    }
+
+    /// Resolves a one-based 1.20.1 sound registry holder id.
+    #[must_use]
+    pub fn protocol_event(&self, id: i32) -> Option<&str> {
+        usize::try_from(id - 1)
+            .ok()
+            .and_then(|index| self.registry.get(index))
+            .map(String::as_str)
     }
 }
 
@@ -482,11 +494,16 @@ impl SoundPlayer {
     /// Decodes and plays an OGG; returns whether it decoded successfully.
     /// (Plays only if an output device exists, but always validates decoding.)
     pub fn play_ogg(&self, ogg: Vec<u8>) -> bool {
+        self.play_ogg_volume(ogg, 1.0)
+    }
+
+    /// Decodes and plays an OGG with a linear gain multiplier.
+    pub fn play_ogg_volume(&self, ogg: Vec<u8>, volume: f32) -> bool {
         match &self.handle {
             Some(handle) => match rodio::Decoder::new(Cursor::new(ogg)) {
                 Ok(source) => {
                     use rodio::Source;
-                    let _ = handle.play_raw(source.convert_samples());
+                    let _ = handle.play_raw(source.amplify(volume.max(0.0)).convert_samples());
                     true
                 }
                 Err(_) => false,
@@ -566,12 +583,17 @@ mod tests {
             }
             events.insert(event.clone(), files);
         }
-        let sounds = Sounds { events };
+        let sounds = Sounds {
+            registry: vec!["block.stone.break".into(), "block.stone.hit".into()],
+            events,
+        };
         assert!(sounds
             .pick("block.stone.break")
             .is_some_and(|f| f.starts_with("dig/stone")));
         // The `type: "event"` ref was skipped, leaving exactly one file.
         assert_eq!(sounds.pick("block.stone.hit"), Some("step/stone1"));
         assert_eq!(sounds.pick("block.unknown.break"), None);
+        assert_eq!(sounds.protocol_event(1), Some("block.stone.break"));
+        assert_eq!(sounds.protocol_event(2), Some("block.stone.hit"));
     }
 }

@@ -16,5 +16,5 @@
 pub mod chunk;
 pub mod world;
 
-pub use chunk::{BlockStates, Chunk, Section, SECTION_BIOMES, SECTION_VOLUME};
-pub use world::{dimension_extent, World};
+pub use chunk::{Biomes, BlockStates, Chunk, Section, SECTION_BIOMES, SECTION_VOLUME};
+pub use world::{biome_colors, dimension_extent, BiomeColors, TintKind, World};

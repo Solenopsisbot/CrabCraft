@@ -6,6 +6,99 @@ use crab_protocol::nbt::Nbt;
 
 use crate::chunk::Chunk;
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BiomeColors {
+    pub grass: [f32; 3],
+    pub foliage: [f32; 3],
+    pub water: [f32; 3],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TintKind {
+    Grass,
+    Foliage,
+    Water,
+}
+
+fn rgb(value: i32) -> [f32; 3] {
+    let value = value as u32;
+    [
+        ((value >> 16) & 0xff) as f32 / 255.0,
+        ((value >> 8) & 0xff) as f32 / 255.0,
+        (value & 0xff) as f32 / 255.0,
+    ]
+}
+
+fn climate_color(temperature: f32, downfall: f32, foliage: bool) -> [f32; 3] {
+    let temperature = temperature.clamp(0.0, 1.0);
+    let humidity = (downfall * temperature).clamp(0.0, 1.0);
+    let dry = if foliage {
+        [0.72, 0.70, 0.28]
+    } else {
+        [0.75, 0.72, 0.33]
+    };
+    let cool = if foliage {
+        [0.32, 0.65, 0.30]
+    } else {
+        [0.40, 0.72, 0.34]
+    };
+    let wet = if foliage {
+        [0.15, 0.72, 0.25]
+    } else {
+        [0.25, 0.78, 0.30]
+    };
+    std::array::from_fn(|index| {
+        let temperate = dry[index] + (cool[index] - dry[index]) * temperature;
+        temperate + (wet[index] - temperate) * humidity
+    })
+}
+
+/// Reads biome ids and their effect/climate colors from the Join Game registry
+/// codec. Explicit datapack colors win; otherwise grass and foliage are
+/// generated from the biome's temperature/downfall climate.
+pub fn biome_colors(codec: &Nbt) -> HashMap<u32, BiomeColors> {
+    let entries = match codec
+        .get("minecraft:worldgen/biome")
+        .and_then(|tag| tag.get("value"))
+    {
+        Some(Nbt::List(entries)) => entries,
+        _ => return HashMap::new(),
+    };
+    let mut colors = HashMap::new();
+    for entry in entries {
+        let Some(Nbt::Int(id)) = entry.get("id") else {
+            continue;
+        };
+        let Some(element) = entry.get("element") else {
+            continue;
+        };
+        let temperature = match element.get("temperature") {
+            Some(Nbt::Float(value)) => *value,
+            _ => 0.5,
+        };
+        let downfall = match element.get("downfall") {
+            Some(Nbt::Float(value)) => *value,
+            _ => 0.5,
+        };
+        let effects = element.get("effects");
+        let explicit = |key| match effects.and_then(|effects| effects.get(key)) {
+            Some(Nbt::Int(value)) => Some(rgb(*value)),
+            _ => None,
+        };
+        colors.insert(
+            *id as u32,
+            BiomeColors {
+                grass: explicit("grass_color")
+                    .unwrap_or_else(|| climate_color(temperature, downfall, false)),
+                foliage: explicit("foliage_color")
+                    .unwrap_or_else(|| climate_color(temperature, downfall, true)),
+                water: explicit("water_color").unwrap_or_else(|| rgb(0x3f76e4)),
+            },
+        );
+    }
+    colors
+}
+
 /// Extracts `(min_y, height)` for `dimension_type` (e.g. `"minecraft:overworld"`)
 /// from the dimension codec NBT carried by the Join Game packet.
 ///
@@ -43,6 +136,7 @@ pub struct World {
     pub min_y: i32,
     pub height: i32,
     chunks: HashMap<(i32, i32), Chunk>,
+    biome_colors: HashMap<u32, BiomeColors>,
 }
 
 impl Default for World {
@@ -58,6 +152,7 @@ impl World {
             min_y,
             height,
             chunks: HashMap::new(),
+            biome_colors: HashMap::new(),
         }
     }
 
@@ -79,6 +174,68 @@ impl World {
     /// Number of currently-loaded chunk columns.
     pub fn chunk_count(&self) -> usize {
         self.chunks.len()
+    }
+
+    /// Coordinates of every currently loaded chunk column. This is used by
+    /// renderer-wide invalidations such as a live resource-pack reload.
+    pub fn chunk_coords(&self) -> impl Iterator<Item = (i32, i32)> + '_ {
+        self.chunks.keys().copied()
+    }
+
+    pub fn set_biome_colors(&mut self, colors: HashMap<u32, BiomeColors>) {
+        self.biome_colors = colors;
+    }
+
+    pub fn biome_id(&self, x: i32, y: i32, z: i32) -> Option<u32> {
+        if y < self.min_y || y >= self.min_y + self.height {
+            return None;
+        }
+        let chunk = self.chunks.get(&(x >> 4, z >> 4))?;
+        let section = chunk.sections.get(((y - self.min_y) >> 4) as usize)?;
+        Some(section.biome(
+            (x & 15) as usize,
+            ((y - self.min_y) & 15) as usize,
+            (z & 15) as usize,
+        ))
+    }
+
+    /// Vanilla-style 3×3 horizontal smoothing of the biome color around a
+    /// block. Missing neighboring chunks use the center biome/fallback color.
+    pub fn biome_tint(&self, x: i32, y: i32, z: i32, kind: TintKind) -> [f32; 3] {
+        let fallback = match kind {
+            TintKind::Grass => [0.45, 0.70, 0.33],
+            TintKind::Foliage => [0.40, 0.68, 0.30],
+            TintKind::Water => rgb(0x3f76e4),
+        };
+        let center = self
+            .biome_id(x, y, z)
+            .and_then(|id| self.biome_colors.get(&id).copied());
+        let mut sum = [0.0; 3];
+        let mut count = 0.0;
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                let colors = self
+                    .biome_id(x + dx, y, z + dz)
+                    .and_then(|id| self.biome_colors.get(&id).copied())
+                    .or(center);
+                if let Some(colors) = colors {
+                    let color = match kind {
+                        TintKind::Grass => colors.grass,
+                        TintKind::Foliage => colors.foliage,
+                        TintKind::Water => colors.water,
+                    };
+                    for index in 0..3 {
+                        sum[index] += color[index];
+                    }
+                    count += 1.0;
+                }
+            }
+        }
+        if count == 0.0 {
+            fallback
+        } else {
+            std::array::from_fn(|index| sum[index] / count)
+        }
     }
 
     /// Number of 16-block sections in this dimension's height (24 for the
@@ -148,12 +305,13 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chunk::{BlockStates, Section};
+    use crate::chunk::{Biomes, BlockStates, Section};
 
     fn air_section() -> Section {
         Section {
             block_count: 0,
             blocks: BlockStates::Uniform(0),
+            biomes: Biomes::Uniform(0),
         }
     }
 
@@ -194,5 +352,64 @@ mod tests {
         world.set_block_state(8, -60, 8, 5);
         assert_eq!(world.block_state(8, -60, 8), Some(5));
         assert_eq!(world.block_state(8, -59, 8), Some(0));
+    }
+
+    #[test]
+    fn biome_registry_colors_and_quart_cells_drive_smoothed_tints() {
+        let codec = Nbt::Compound(HashMap::from([(
+            "minecraft:worldgen/biome".to_string(),
+            Nbt::Compound(HashMap::from([(
+                "value".to_string(),
+                Nbt::List(vec![Nbt::Compound(HashMap::from([
+                    ("id".to_string(), Nbt::Int(7)),
+                    (
+                        "element".to_string(),
+                        Nbt::Compound(HashMap::from([
+                            ("temperature".to_string(), Nbt::Float(0.8)),
+                            ("downfall".to_string(), Nbt::Float(0.4)),
+                            (
+                                "effects".to_string(),
+                                Nbt::Compound(HashMap::from([
+                                    ("grass_color".to_string(), Nbt::Int(0x12_34_56)),
+                                    ("water_color".to_string(), Nbt::Int(0x01_02_03)),
+                                ])),
+                            ),
+                        ])),
+                    ),
+                ]))]),
+            )])),
+        )]));
+        let colors = biome_colors(&codec);
+        assert_eq!(colors[&7].grass, rgb(0x12_34_56));
+        assert_eq!(colors[&7].water, rgb(0x01_02_03));
+
+        let mut world = World::overworld();
+        world.set_biome_colors(colors);
+        world.load_chunk(Chunk {
+            x: 0,
+            z: 0,
+            sections: (0..24)
+                .map(|_| Section {
+                    block_count: 0,
+                    blocks: BlockStates::Uniform(0),
+                    biomes: Biomes::Uniform(7),
+                })
+                .collect(),
+        });
+        assert_eq!(world.biome_id(4, 64, 4), Some(7));
+        for (actual, expected) in world
+            .biome_tint(4, 64, 4, TintKind::Grass)
+            .into_iter()
+            .zip(rgb(0x12_34_56))
+        {
+            assert!((actual - expected).abs() < 1e-6);
+        }
+        for (actual, expected) in world
+            .biome_tint(4, 64, 4, TintKind::Water)
+            .into_iter()
+            .zip(rgb(0x01_02_03))
+        {
+            assert!((actual - expected).abs() < 1e-6);
+        }
     }
 }

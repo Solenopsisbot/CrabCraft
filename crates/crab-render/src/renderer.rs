@@ -17,12 +17,21 @@ use crate::mesh::{Mesh, Vertex};
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct CameraUniform {
     pub view_proj: [[f32; 4]; 4],
+    pub lighting: [f32; 4],
 }
 
 impl CameraUniform {
     pub fn new(camera: &Camera) -> Self {
         Self {
             view_proj: camera.view_proj().to_cols_array_2d(),
+            lighting: [1.0, 0.0, 0.0, 0.0],
+        }
+    }
+
+    pub fn with_light(camera: &Camera, light: f32) -> Self {
+        Self {
+            view_proj: camera.view_proj().to_cols_array_2d(),
+            lighting: [light.clamp(0.08, 1.0), 0.0, 0.0, 0.0],
         }
     }
 }
@@ -48,7 +57,7 @@ pub fn build_block_pipeline(
         label: Some("camera bgl"),
         entries: &[wgpu::BindGroupLayoutEntry {
             binding: 0,
-            visibility: wgpu::ShaderStages::VERTEX,
+            visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Uniform,
                 has_dynamic_offset: false,
@@ -105,7 +114,7 @@ pub fn build_block_pipeline(
             entry_point: "fs_main",
             targets: &[Some(wgpu::ColorTargetState {
                 format: color_format,
-                blend: Some(wgpu::BlendState::REPLACE),
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                 write_mask: wgpu::ColorWrites::ALL,
             })],
             compilation_options: wgpu::PipelineCompilationOptions::default(),

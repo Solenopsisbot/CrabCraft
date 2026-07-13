@@ -6,9 +6,9 @@
 //!
 //! Scope: **full-cube** blocks resolve to per-face atlas textures. Blocks with
 //! `elements` (slabs, stairs, plants, lanterns, …) resolve to element geometry
-//! ([`ElementData`]) — their default model only, since blockstate variant /
-//! multipart selection (fences, walls, rotated stairs) isn't parsed yet, so
-//! those still fall back to a flat cube.
+//! ([`ElementData`]). The loader also prepares the alternate models needed by
+//! state-driven stairs, fences, walls, doors, trapdoors, rails, redstone wire,
+//! and furnace-family blocks; the renderer selects and rotates those models.
 //!
 //! Model resolution follows vanilla: walk the `parent` chain, merge `textures`
 //! maps (child wins), take the deepest `elements`, then resolve each face's
@@ -124,6 +124,19 @@ impl Atlas {
         self.non_cube.get(bare).map(Vec::as_slice)
     }
 
+    /// Alternate element model for a blockstate family (currently stair
+    /// `inner`/`outer` models loaded alongside the straight model).
+    pub fn block_elements_variant(
+        &self,
+        block_name: &str,
+        variant: &str,
+    ) -> Option<&[ElementData]> {
+        let bare = block_name.strip_prefix("minecraft:").unwrap_or(block_name);
+        self.non_cube
+            .get(&format!("{bare}#{variant}"))
+            .map(Vec::as_slice)
+    }
+
     /// Whether the block renders as a full cube (so it occludes neighbour faces).
     pub fn is_cube(&self, block_name: &str) -> bool {
         if self.assume_cube {
@@ -227,6 +240,26 @@ pub(crate) fn read_model<R: Read + std::io::Seek>(
     serde_json::from_str(&text).ok()
 }
 
+fn load_element_variant<R: Read + std::io::Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    cache: &mut HashMap<String, Option<Resolved>>,
+    block_elems: &mut HashMap<String, Vec<ParsedElem>>,
+    tex_paths: &mut BTreeSet<String>,
+    key: String,
+    model_name: String,
+) {
+    let Some(resolved) = resolve(archive, &model_name, cache) else {
+        return;
+    };
+    let elems = parse_elements(&resolved);
+    for element in &elems {
+        for face in element.faces.iter().flatten() {
+            tex_paths.insert(face.path.clone());
+        }
+    }
+    block_elems.insert(key, elems);
+}
+
 /// Loads block models + textures for `block_names` from `jar_path` and builds an
 /// atlas. Blocks that aren't full cubes get a flat fallback colour.
 pub fn load_block_atlas(jar_path: &Path, block_names: &[String]) -> Result<Atlas, AssetError> {
@@ -241,6 +274,149 @@ pub fn load_block_atlas(jar_path: &Path, block_names: &[String]) -> Result<Atlas
 
     for name in block_names {
         let bare = name.strip_prefix("minecraft:").unwrap_or(name);
+        if bare.ends_with("_door") && !bare.ends_with("_trapdoor") {
+            for half in ["bottom", "top"] {
+                for hinge in ["left", "right"] {
+                    for open in [false, true] {
+                        let suffix = if open { "_open" } else { "" };
+                        load_element_variant(
+                            &mut archive,
+                            &mut cache,
+                            &mut block_elems,
+                            &mut tex_paths,
+                            format!("{bare}#{half}_{hinge}{}", if open { "_open" } else { "" }),
+                            format!("block/{bare}_{half}_{hinge}{suffix}"),
+                        );
+                    }
+                }
+            }
+            continue;
+        }
+        if bare.ends_with("_trapdoor") {
+            for variant in ["bottom", "top", "open"] {
+                load_element_variant(
+                    &mut archive,
+                    &mut cache,
+                    &mut block_elems,
+                    &mut tex_paths,
+                    format!("{bare}#{variant}"),
+                    format!("block/{bare}_{variant}"),
+                );
+            }
+            continue;
+        }
+        if bare == "redstone_wire" {
+            for variant in ["dot", "north", "south", "east", "west", "up"] {
+                let (key, model) = match variant {
+                    "dot" => ("dot", "redstone_dust_dot"),
+                    "north" => ("north", "redstone_dust_side0"),
+                    "south" => ("south", "redstone_dust_side_alt0"),
+                    "east" => ("east", "redstone_dust_side_alt1"),
+                    "west" => ("west", "redstone_dust_side1"),
+                    _ => ("up", "redstone_dust_up"),
+                };
+                load_element_variant(
+                    &mut archive,
+                    &mut cache,
+                    &mut block_elems,
+                    &mut tex_paths,
+                    format!("{bare}#{key}"),
+                    format!("block/{model}"),
+                );
+            }
+            continue;
+        }
+        if matches!(bare, "furnace" | "blast_furnace" | "smoker") {
+            for (variant, suffix) in [("off", ""), ("on", "_on")] {
+                load_element_variant(
+                    &mut archive,
+                    &mut cache,
+                    &mut block_elems,
+                    &mut tex_paths,
+                    format!("{bare}#{variant}"),
+                    format!("block/{bare}{suffix}"),
+                );
+            }
+            continue;
+        }
+        if matches!(bare, "campfire" | "soul_campfire") {
+            for (variant, suffix) in [("on", ""), ("off", "_off")] {
+                load_element_variant(
+                    &mut archive,
+                    &mut cache,
+                    &mut block_elems,
+                    &mut tex_paths,
+                    format!("{bare}#{variant}"),
+                    format!("block/{bare}{suffix}"),
+                );
+            }
+            continue;
+        }
+        if bare.ends_with("_fence") || bare.ends_with("_pane") || bare == "iron_bars" {
+            for variant in ["post", "side"] {
+                let variant_model = format!("block/{bare}_{variant}");
+                let Some(resolved) = resolve(&mut archive, &variant_model, &mut cache) else {
+                    continue;
+                };
+                let elems = parse_elements(&resolved);
+                for element in &elems {
+                    for face in element.faces.iter().flatten() {
+                        tex_paths.insert(face.path.clone());
+                    }
+                }
+                block_elems.insert(format!("{bare}#{variant}"), elems);
+            }
+            continue;
+        }
+        if bare.ends_with("_wall") {
+            for variant in ["post", "side", "side_tall"] {
+                let variant_model = format!("block/{bare}_{variant}");
+                let Some(resolved) = resolve(&mut archive, &variant_model, &mut cache) else {
+                    continue;
+                };
+                let elems = parse_elements(&resolved);
+                for element in &elems {
+                    for face in element.faces.iter().flatten() {
+                        tex_paths.insert(face.path.clone());
+                    }
+                }
+                block_elems.insert(format!("{bare}#{variant}"), elems);
+            }
+            continue;
+        }
+        if bare.ends_with("rail") {
+            for variant in ["raised_ne", "raised_sw"] {
+                load_element_variant(
+                    &mut archive,
+                    &mut cache,
+                    &mut block_elems,
+                    &mut tex_paths,
+                    format!("{bare}#{variant}"),
+                    format!("block/{bare}_{variant}"),
+                );
+            }
+            if bare == "rail" {
+                load_element_variant(
+                    &mut archive,
+                    &mut cache,
+                    &mut block_elems,
+                    &mut tex_paths,
+                    format!("{bare}#corner"),
+                    "block/rail_corner".to_string(),
+                );
+            } else {
+                for variant in ["on", "on_raised_ne", "on_raised_sw"] {
+                    load_element_variant(
+                        &mut archive,
+                        &mut cache,
+                        &mut block_elems,
+                        &mut tex_paths,
+                        format!("{bare}#{variant}"),
+                        format!("block/{bare}_{variant}"),
+                    );
+                }
+            }
+        }
         let model_name = format!("block/{bare}");
         let Some(resolved) = resolve(&mut archive, &model_name, &mut cache) else {
             continue;
@@ -260,6 +436,21 @@ pub fn load_block_atlas(jar_path: &Path, block_names: &[String]) -> Result<Atlas
                 }
             }
             block_elems.insert(bare.to_string(), elems);
+        }
+        if bare.ends_with("_stairs") {
+            for variant in ["inner", "outer"] {
+                let variant_model = format!("block/{bare}_{variant}");
+                let Some(resolved) = resolve(&mut archive, &variant_model, &mut cache) else {
+                    continue;
+                };
+                let elems = parse_elements(&resolved);
+                for element in &elems {
+                    for face in element.faces.iter().flatten() {
+                        tex_paths.insert(face.path.clone());
+                    }
+                }
+                block_elems.insert(format!("{bare}#{variant}"), elems);
+            }
         }
     }
 

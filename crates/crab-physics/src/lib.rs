@@ -4,8 +4,9 @@
 //! voxels of a [`crab_world::World`], plus gravity. Collision is resolved one
 //! axis at a time (the classic Minecraft approach), which is simple and stable.
 //!
-//! Solidity is "not air" for now (via [`crab_registry`]); precise per-block
-//! collision shapes (slabs, stairs, fences, fluids) are a later refinement.
+//! Empty collision shapes (fluids, plants, rails, torches, etc.) are ignored.
+//! Non-empty shapes are full-cube approximations for now; precise slabs,
+//! stairs, fences and other partial shapes are a later refinement.
 
 use crab_world::World;
 use glam::DVec3;
@@ -31,6 +32,11 @@ pub struct Aabb {
 impl Aabb {
     /// The player's box given its feet position.
     pub fn player(feet: DVec3) -> Self {
+        Self::player_with_height(feet, PLAYER_HEIGHT)
+    }
+
+    /// Player-sized box with a caller-selected pose height (1.5 while sneaking).
+    pub fn player_with_height(feet: DVec3, height: f64) -> Self {
         Self {
             min: DVec3::new(
                 feet.x - PLAYER_HALF_WIDTH,
@@ -39,17 +45,25 @@ impl Aabb {
             ),
             max: DVec3::new(
                 feet.x + PLAYER_HALF_WIDTH,
-                feet.y + PLAYER_HEIGHT,
+                feet.y + height,
                 feet.z + PLAYER_HALF_WIDTH,
             ),
         }
     }
 }
 
-fn is_solid(world: &World, x: i32, y: i32, z: i32) -> bool {
-    world
-        .block_state(x, y, z)
-        .is_some_and(|s| !crab_registry::is_air(s))
+fn overlaps(a0: f64, a1: f64, b0: f64, b1: f64) -> bool {
+    a1 > b0 + EPS && a0 < b1 - EPS
+}
+
+fn is_targetable(world: &World, x: i32, y: i32, z: i32) -> bool {
+    world.block_state(x, y, z).is_some_and(|state| {
+        !crab_registry::is_air(state)
+            && !matches!(
+                crab_registry::block_name(state),
+                Some("minecraft:water" | "minecraft:lava")
+            )
+    })
 }
 
 /// Outcome of a physics step.
@@ -63,41 +77,127 @@ pub struct StepResult {
 /// Advances the player by `dt` seconds: applies gravity, then resolves motion
 /// against solid blocks one axis at a time. `feet`/`vel` are `[x, y, z]`.
 pub fn step_player(world: &World, feet: [f64; 3], vel: [f64; 3], dt: f64) -> StepResult {
+    step_player_with_height(world, feet, vel, dt, PLAYER_HEIGHT)
+}
+
+/// Advances a player using the collision height of its current pose.
+pub fn step_player_with_height(
+    world: &World,
+    feet: [f64; 3],
+    vel: [f64; 3],
+    dt: f64,
+    height: f64,
+) -> StepResult {
+    step_player_with_forces(world, feet, vel, dt, height, GRAVITY, TERMINAL_VELOCITY)
+}
+
+/// Advances a posed player with caller-selected gravity and terminal velocity.
+/// Fluid movement uses this while preserving the same collision/step solver.
+pub fn step_player_with_forces(
+    world: &World,
+    feet: [f64; 3],
+    vel: [f64; 3],
+    dt: f64,
+    height: f64,
+    gravity: f64,
+    terminal_velocity: f64,
+) -> StepResult {
     let mut pos = DVec3::from_array(feet);
     let mut v = DVec3::from_array(vel);
 
-    v.y = (v.y - GRAVITY * dt).max(TERMINAL_VELOCITY);
+    v.y = (v.y - gravity * dt).max(terminal_velocity);
 
     // Y
     let desired = v.y * dt;
-    let dy = collide_y(world, &Aabb::player(pos), desired);
+    let dy = collide_y(world, &Aabb::player_with_height(pos, height), desired);
     let on_ground = desired < 0.0 && dy > desired + EPS;
     if (dy - desired).abs() > EPS {
         v.y = 0.0;
     }
     pos.y += dy;
 
-    // X
-    let want = v.x * dt;
-    let dx = collide_x(world, &Aabb::player(pos), want);
-    if (dx - want).abs() > EPS {
+    let (want_x, want_z) = (v.x * dt, v.z * dt);
+    let direct_start = pos;
+    let dx = collide_x(world, &Aabb::player_with_height(pos, height), want_x);
+    pos.x += dx;
+    let dz = collide_z(world, &Aabb::player_with_height(pos, height), want_z);
+    pos.z += dz;
+
+    // Vanilla-style auto-step: if grounded horizontal motion was clipped, try
+    // the same move from up to 0.6 blocks higher, then settle back down.
+    let direct_dist2 = dx * dx + dz * dz;
+    let clipped = (dx - want_x).abs() > EPS || (dz - want_z).abs() > EPS;
+    if on_ground && clipped {
+        let mut stepped = direct_start;
+        let up = collide_y(world, &Aabb::player_with_height(stepped, height), 0.6);
+        stepped.y += up;
+        if up > EPS {
+            let sx = collide_x(world, &Aabb::player_with_height(stepped, height), want_x);
+            stepped.x += sx;
+            let sz = collide_z(world, &Aabb::player_with_height(stepped, height), want_z);
+            stepped.z += sz;
+            let down = collide_y(world, &Aabb::player_with_height(stepped, height), -up);
+            stepped.y += down;
+            if sx * sx + sz * sz > direct_dist2 + EPS {
+                pos = stepped;
+            }
+        }
+    }
+    if (pos.x - direct_start.x - want_x).abs() > EPS {
         v.x = 0.0;
     }
-    pos.x += dx;
-
-    // Z
-    let want = v.z * dt;
-    let dz = collide_z(world, &Aabb::player(pos), want);
-    if (dz - want).abs() > EPS {
+    if (pos.z - direct_start.z - want_z).abs() > EPS {
         v.z = 0.0;
     }
-    pos.z += dz;
 
     StepResult {
         position: pos.to_array(),
         velocity: v.to_array(),
         on_ground,
     }
+}
+
+/// Whether a player pose at `feet` can occupy the world without intersecting a
+/// collidable block. Used to prevent standing up into a low ceiling.
+#[must_use]
+pub fn can_occupy_player(world: &World, feet: [f64; 3], height: f64) -> bool {
+    let aabb = Aabb::player_with_height(DVec3::from_array(feet), height);
+    let x0 = aabb.min.x.floor() as i32;
+    let x1 = (aabb.max.x - EPS).floor() as i32;
+    let y0 = aabb.min.y.floor() as i32;
+    let y1 = (aabb.max.y - EPS).floor() as i32;
+    let z0 = aabb.min.z.floor() as i32;
+    let z1 = (aabb.max.z - EPS).floor() as i32;
+    for x in x0..=x1 {
+        for y in y0..=y1 {
+            for z in z0..=z1 {
+                let Some(state) = world.block_state(x, y, z) else {
+                    continue;
+                };
+                for part in crab_registry::collision_shape(state).boxes() {
+                    if overlaps(
+                        aabb.min.x,
+                        aabb.max.x,
+                        f64::from(x) + part.min[0],
+                        f64::from(x) + part.max[0],
+                    ) && overlaps(
+                        aabb.min.y,
+                        aabb.max.y,
+                        f64::from(y) + part.min[1],
+                        f64::from(y) + part.max[1],
+                    ) && overlaps(
+                        aabb.min.z,
+                        aabb.max.z,
+                        f64::from(z) + part.min[2],
+                        f64::from(z) + part.max[2],
+                    ) {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    true
 }
 
 /// Clamp vertical motion `dy` so the box doesn't pass through solid blocks.
@@ -116,8 +216,26 @@ pub fn collide_y(world: &World, aabb: &Aabb, dy: f64) -> f64 {
         for by in end..=start {
             for bx in x0..=x1 {
                 for bz in z0..=z1 {
-                    if is_solid(world, bx, by, bz) && aabb.min.y + dy < (by + 1) as f64 {
-                        dy = ((by + 1) as f64 - aabb.min.y).min(0.0);
+                    let Some(state) = world.block_state(bx, by, bz) else {
+                        continue;
+                    };
+                    for part in crab_registry::collision_shape(state).boxes() {
+                        let top = f64::from(by) + part.max[1];
+                        if overlaps(
+                            aabb.min.x,
+                            aabb.max.x,
+                            f64::from(bx) + part.min[0],
+                            f64::from(bx) + part.max[0],
+                        ) && overlaps(
+                            aabb.min.z,
+                            aabb.max.z,
+                            f64::from(bz) + part.min[2],
+                            f64::from(bz) + part.max[2],
+                        ) && aabb.min.y >= top - EPS
+                            && aabb.min.y + dy < top
+                        {
+                            dy = (top - aabb.min.y).min(0.0);
+                        }
                     }
                 }
             }
@@ -128,8 +246,26 @@ pub fn collide_y(world: &World, aabb: &Aabb, dy: f64) -> f64 {
         for by in start..=end {
             for bx in x0..=x1 {
                 for bz in z0..=z1 {
-                    if is_solid(world, bx, by, bz) && aabb.max.y + dy > by as f64 {
-                        dy = (by as f64 - aabb.max.y).max(0.0);
+                    let Some(state) = world.block_state(bx, by, bz) else {
+                        continue;
+                    };
+                    for part in crab_registry::collision_shape(state).boxes() {
+                        let bottom = f64::from(by) + part.min[1];
+                        if overlaps(
+                            aabb.min.x,
+                            aabb.max.x,
+                            f64::from(bx) + part.min[0],
+                            f64::from(bx) + part.max[0],
+                        ) && overlaps(
+                            aabb.min.z,
+                            aabb.max.z,
+                            f64::from(bz) + part.min[2],
+                            f64::from(bz) + part.max[2],
+                        ) && aabb.max.y <= bottom + EPS
+                            && aabb.max.y + dy > bottom
+                        {
+                            dy = (bottom - aabb.max.y).max(0.0);
+                        }
                     }
                 }
             }
@@ -154,8 +290,26 @@ pub fn collide_x(world: &World, aabb: &Aabb, dx: f64) -> f64 {
         for bx in end..=start {
             for by in y0..=y1 {
                 for bz in z0..=z1 {
-                    if is_solid(world, bx, by, bz) && aabb.min.x + dx < (bx + 1) as f64 {
-                        dx = ((bx + 1) as f64 - aabb.min.x).min(0.0);
+                    let Some(state) = world.block_state(bx, by, bz) else {
+                        continue;
+                    };
+                    for part in crab_registry::collision_shape(state).boxes() {
+                        let edge = f64::from(bx) + part.max[0];
+                        if overlaps(
+                            aabb.min.y,
+                            aabb.max.y,
+                            f64::from(by) + part.min[1],
+                            f64::from(by) + part.max[1],
+                        ) && overlaps(
+                            aabb.min.z,
+                            aabb.max.z,
+                            f64::from(bz) + part.min[2],
+                            f64::from(bz) + part.max[2],
+                        ) && aabb.min.x >= edge - EPS
+                            && aabb.min.x + dx < edge
+                        {
+                            dx = (edge - aabb.min.x).min(0.0);
+                        }
                     }
                 }
             }
@@ -166,8 +320,26 @@ pub fn collide_x(world: &World, aabb: &Aabb, dx: f64) -> f64 {
         for bx in start..=end {
             for by in y0..=y1 {
                 for bz in z0..=z1 {
-                    if is_solid(world, bx, by, bz) && aabb.max.x + dx > bx as f64 {
-                        dx = (bx as f64 - aabb.max.x).max(0.0);
+                    let Some(state) = world.block_state(bx, by, bz) else {
+                        continue;
+                    };
+                    for part in crab_registry::collision_shape(state).boxes() {
+                        let edge = f64::from(bx) + part.min[0];
+                        if overlaps(
+                            aabb.min.y,
+                            aabb.max.y,
+                            f64::from(by) + part.min[1],
+                            f64::from(by) + part.max[1],
+                        ) && overlaps(
+                            aabb.min.z,
+                            aabb.max.z,
+                            f64::from(bz) + part.min[2],
+                            f64::from(bz) + part.max[2],
+                        ) && aabb.max.x <= edge + EPS
+                            && aabb.max.x + dx > edge
+                        {
+                            dx = (edge - aabb.max.x).max(0.0);
+                        }
                     }
                 }
             }
@@ -192,8 +364,26 @@ pub fn collide_z(world: &World, aabb: &Aabb, dz: f64) -> f64 {
         for bz in end..=start {
             for bx in x0..=x1 {
                 for by in y0..=y1 {
-                    if is_solid(world, bx, by, bz) && aabb.min.z + dz < (bz + 1) as f64 {
-                        dz = ((bz + 1) as f64 - aabb.min.z).min(0.0);
+                    let Some(state) = world.block_state(bx, by, bz) else {
+                        continue;
+                    };
+                    for part in crab_registry::collision_shape(state).boxes() {
+                        let edge = f64::from(bz) + part.max[2];
+                        if overlaps(
+                            aabb.min.x,
+                            aabb.max.x,
+                            f64::from(bx) + part.min[0],
+                            f64::from(bx) + part.max[0],
+                        ) && overlaps(
+                            aabb.min.y,
+                            aabb.max.y,
+                            f64::from(by) + part.min[1],
+                            f64::from(by) + part.max[1],
+                        ) && aabb.min.z >= edge - EPS
+                            && aabb.min.z + dz < edge
+                        {
+                            dz = (edge - aabb.min.z).min(0.0);
+                        }
                     }
                 }
             }
@@ -204,8 +394,26 @@ pub fn collide_z(world: &World, aabb: &Aabb, dz: f64) -> f64 {
         for bz in start..=end {
             for bx in x0..=x1 {
                 for by in y0..=y1 {
-                    if is_solid(world, bx, by, bz) && aabb.max.z + dz > bz as f64 {
-                        dz = (bz as f64 - aabb.max.z).max(0.0);
+                    let Some(state) = world.block_state(bx, by, bz) else {
+                        continue;
+                    };
+                    for part in crab_registry::collision_shape(state).boxes() {
+                        let edge = f64::from(bz) + part.min[2];
+                        if overlaps(
+                            aabb.min.x,
+                            aabb.max.x,
+                            f64::from(bx) + part.min[0],
+                            f64::from(bx) + part.max[0],
+                        ) && overlaps(
+                            aabb.min.y,
+                            aabb.max.y,
+                            f64::from(by) + part.min[1],
+                            f64::from(by) + part.max[1],
+                        ) && aabb.max.z <= edge + EPS
+                            && aabb.max.z + dz > edge
+                        {
+                            dz = (edge - aabb.max.z).max(0.0);
+                        }
                     }
                 }
             }
@@ -256,7 +464,7 @@ pub fn raycast(world: &World, origin: [f64; 3], dir: [f64; 3], max_dist: f64) ->
     let mut face = [0i32; 3];
     let max_steps = (max_dist as i32) * 3 + 9;
     for _ in 0..max_steps {
-        if is_solid(world, cell[0], cell[1], cell[2]) {
+        if is_targetable(world, cell[0], cell[1], cell[2]) {
             return Some(RayHit { block: cell, face });
         }
         // advance along the axis with the nearest voxel boundary
@@ -346,7 +554,7 @@ pub fn ray_aabb(origin: [f64; 3], dir: [f64; 3], min: [f64; 3], max: [f64; 3]) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crab_world::{BlockStates, Chunk, Section, World};
+    use crab_world::{Biomes, BlockStates, Chunk, Section, World};
 
     const STONE: u32 = 1;
 
@@ -356,6 +564,7 @@ mod tests {
             .map(|_| Section {
                 block_count: 0,
                 blocks: BlockStates::Uniform(0),
+                biomes: Biomes::Uniform(0),
             })
             .collect();
         world.load_chunk(Chunk {
@@ -405,6 +614,31 @@ mod tests {
     }
 
     #[test]
+    fn configurable_fluid_gravity_is_gentler_and_terminal_limited() {
+        let world = world_with_floor(-60);
+        let fluid = step_player_with_forces(
+            &world,
+            [8.0, -50.0, 8.0],
+            [0.0, 0.0, 0.0],
+            0.05,
+            PLAYER_HEIGHT,
+            4.0,
+            -3.0,
+        );
+        assert!((fluid.velocity[1] - -0.2).abs() < 1e-9);
+        let terminal = step_player_with_forces(
+            &world,
+            [8.0, -50.0, 8.0],
+            [0.0, -10.0, 0.0],
+            0.05,
+            PLAYER_HEIGHT,
+            4.0,
+            -3.0,
+        );
+        assert_eq!(terminal.velocity[1], -3.0);
+    }
+
+    #[test]
     fn raycast_hits_floor_from_above() {
         let world = world_with_floor(-60); // block at y=-60, top at -59
         let hit = raycast(&world, [8.5, -50.0, 8.5], [0.0, -1.0, 0.0], 20.0).unwrap();
@@ -438,6 +672,89 @@ mod tests {
         let dx = collide_x(&world, &aabb, 2.0);
         // max.x starts at 9.3; wall face at x=10; allowed = 10 - 9.3 = 0.7
         assert!((dx - 0.7).abs() < 1e-6, "dx was {dx}");
+    }
+
+    #[test]
+    fn grounded_player_steps_onto_bottom_slab_but_not_full_block() {
+        let mut world = world_with_floor(-60);
+        let slab = crab_registry::block_by_name("oak_slab")
+            .unwrap()
+            .default_state;
+        world.set_block_state(9, -59, 8, slab);
+        let stepped = step_player_with_height(
+            &world,
+            [8.0, -59.0, 8.0],
+            [4.317, 0.0, 0.0],
+            0.25,
+            PLAYER_HEIGHT,
+        );
+        assert!(stepped.position[0] > 9.0, "x={}", stepped.position[0]);
+        assert!((stepped.position[1] - -58.5).abs() < 1e-6);
+
+        world.set_block_state(9, -59, 8, STONE);
+        let blocked = step_player_with_height(
+            &world,
+            [8.0, -59.0, 8.0],
+            [4.317, 0.0, 0.0],
+            0.25,
+            PLAYER_HEIGHT,
+        );
+        assert!((blocked.position[0] - 8.7).abs() < 1e-6);
+        assert!((blocked.position[1] - -59.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn player_walks_up_stair_in_two_half_block_steps() {
+        let mut world = world_with_floor(-60);
+        let stairs = crab_registry::block_by_name("oak_stairs")
+            .unwrap()
+            .default_state; // bottom, straight, facing north
+        world.set_block_state(8, -59, 9, stairs);
+        let first = step_player_with_height(
+            &world,
+            [8.5, -59.0, 10.4],
+            [0.0, 0.0, -4.317],
+            0.25,
+            PLAYER_HEIGHT,
+        );
+        assert!((first.position[1] - -58.5).abs() < 1e-6);
+        let second = step_player_with_height(
+            &world,
+            first.position,
+            [0.0, 0.0, -4.317],
+            0.25,
+            PLAYER_HEIGHT,
+        );
+        assert!((second.position[1] - -58.0).abs() < 1e-6);
+        assert!(second.position[2] < 9.5);
+    }
+
+    #[test]
+    fn empty_shape_blocks_do_not_stop_movement() {
+        let mut world = world_with_floor(-60);
+        let flower = crab_registry::block_by_name("dandelion")
+            .unwrap()
+            .default_state;
+        world.set_block_state(9, -59, 8, flower);
+        let aabb = Aabb::player(DVec3::new(8.0, -59.0, 8.0));
+
+        assert_eq!(collide_x(&world, &aabb, 2.0), 2.0);
+    }
+
+    #[test]
+    fn raycast_targets_plants_but_passes_through_fluids() {
+        let mut world = world_with_floor(-60);
+        let flower = crab_registry::block_by_name("dandelion")
+            .unwrap()
+            .default_state;
+        world.set_block_state(8, -59, 8, flower);
+        let hit = raycast(&world, [8.5, -57.0, 8.5], [0.0, -1.0, 0.0], 5.0).unwrap();
+        assert_eq!(hit.block, [8, -59, 8]);
+
+        let water = crab_registry::block_by_name("water").unwrap().default_state;
+        world.set_block_state(8, -59, 8, water);
+        let hit = raycast(&world, [8.5, -57.0, 8.5], [0.0, -1.0, 0.0], 5.0).unwrap();
+        assert_eq!(hit.block, [8, -60, 8]);
     }
 
     #[test]

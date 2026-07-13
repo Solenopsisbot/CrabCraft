@@ -265,9 +265,19 @@ fn init_sound(shared: &Arc<Shared>) {
         // concrete file via `sounds.json`; a name with no matching event is
         // treated as a direct file path (e.g. `random/pop`).
         while let Ok(name) = rx.recv() {
-            let file = sounds.pick(&name).unwrap_or(&name);
+            let (gain, name) = name
+                .strip_prefix("@gain:")
+                .and_then(|rest| rest.split_once(':'))
+                .and_then(|(gain, event)| gain.parse::<f32>().ok().map(|gain| (gain, event)))
+                .unwrap_or((1.0, name.as_str()));
+            let protocol_event = name
+                .strip_prefix("@protocol:")
+                .and_then(|id| id.parse::<i32>().ok())
+                .and_then(|id| sounds.protocol_event(id));
+            let event = protocol_event.unwrap_or(name);
+            let file = sounds.pick(event).unwrap_or(event);
             if let Some(bytes) = crab_audio::read_sound(&assets, &index, file) {
-                player.play_ogg(bytes);
+                player.play_ogg_volume(bytes, gain);
             }
         }
     });
@@ -276,6 +286,7 @@ fn init_sound(shared: &Arc<Shared>) {
 /// Windowed: networking on a background thread, rendering on the main thread.
 fn run_windowed(addr: String, login: LoginMode, deadline: Option<Duration>) -> Result<()> {
     let shared = Arc::new(Shared::new());
+    configure_window_assets(&shared);
     init_sound(&shared);
     let atlas = load_atlas();
     let entity_atlas = load_entity_atlas();
@@ -289,6 +300,7 @@ fn run_windowed(addr: String, login: LoginMode, deadline: Option<Duration>) -> R
 /// Windowed online: authenticate on the network thread, then connect.
 fn run_windowed_online(addr: String) -> Result<()> {
     let shared = Arc::new(Shared::new());
+    configure_window_assets(&shared);
     init_sound(&shared);
     let atlas = load_atlas();
     let entity_atlas = load_entity_atlas();
@@ -321,6 +333,14 @@ fn run_windowed_online(addr: String) -> Result<()> {
     let gui_atlas = load_gui_atlas();
     let crack = load_destroy_stages();
     window::run(shared, atlas, entity_atlas, item_atlas, gui_atlas, crack)
+}
+
+fn configure_window_assets(shared: &Shared) {
+    shared
+        .renderer_active
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    *shared.base_resource_jar.lock().unwrap() =
+        std::env::var_os("CRABCRAFT_JAR").map(std::path::PathBuf::from);
 }
 
 fn spawn_net_thread(

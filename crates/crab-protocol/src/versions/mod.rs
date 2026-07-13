@@ -5,6 +5,12 @@
 //! and field layouts live here. New versions are added as sibling modules.
 
 pub mod v1_20_1;
+pub mod v1_20_2;
+pub mod v1_20_3;
 
 /// Protocol number for Minecraft 1.20 and 1.20.1.
 pub const PROTOCOL_1_20_1: i32 = 763;
+/// Protocol number for Minecraft 1.20.2.
+pub const PROTOCOL_1_20_2: i32 = 764;
+/// Protocol number shared by Minecraft 1.20.3 and 1.20.4.
+pub const PROTOCOL_1_20_3: i32 = 765;

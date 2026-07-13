@@ -10,13 +10,64 @@ use std::path::Path;
 
 use crate::AssetError;
 
-const ATLAS_W: u32 = 512;
-const ATLAS_H: u32 = 512;
+const ATLAS_W: u32 = 1024;
+const ATLAS_H: u32 = 1280;
 // Placement of each source image within the atlas.
 const WIDGETS_AT: (u32, u32) = (0, 0);
 const INVENTORY_AT: (u32, u32) = (256, 0);
 const FONT_AT: (u32, u32) = (0, 256);
 const ICONS_AT: (u32, u32) = (256, 256);
+const GENERIC_CONTAINER_AT: (u32, u32) = (0, 384);
+const FURNACE_AT: (u32, u32) = (256, 384);
+const BLAST_FURNACE_AT: (u32, u32) = (0, 640);
+const SMOKER_AT: (u32, u32) = (256, 640);
+const DISPENSER_AT: (u32, u32) = (512, 0);
+const HOPPER_AT: (u32, u32) = (512, 256);
+const BREWING_STAND_AT: (u32, u32) = (512, 512);
+const CRAFTING_TABLE_AT: (u32, u32) = (768, 0);
+const ENCHANTING_TABLE_AT: (u32, u32) = (768, 256);
+const ANVIL_AT: (u32, u32) = (768, 512);
+const GRINDSTONE_AT: (u32, u32) = (768, 768);
+const SMITHING_AT: (u32, u32) = (512, 768);
+const CARTOGRAPHY_AT: (u32, u32) = (256, 896);
+const EFFECTS_AT: (u32, u32) = (0, 1024);
+const LOOM_AT: (u32, u32) = (512, 1024);
+const STONECUTTER_AT: (u32, u32) = (768, 1024);
+const EFFECT_NAMES: [&str; 33] = [
+    "speed",
+    "slowness",
+    "haste",
+    "mining_fatigue",
+    "strength",
+    "instant_health",
+    "instant_damage",
+    "jump_boost",
+    "nausea",
+    "regeneration",
+    "resistance",
+    "fire_resistance",
+    "water_breathing",
+    "invisibility",
+    "blindness",
+    "night_vision",
+    "hunger",
+    "weakness",
+    "poison",
+    "wither",
+    "health_boost",
+    "absorption",
+    "saturation",
+    "glowing",
+    "levitation",
+    "luck",
+    "unluck",
+    "slow_falling",
+    "conduit_power",
+    "dolphins_grace",
+    "bad_omen",
+    "hero_of_the_village",
+    "darkness",
+];
 
 /// One bitmap-font glyph: its atlas UV, drawn pixel width, and pixel advance.
 #[derive(Clone, Copy, Debug, Default)]
@@ -128,6 +179,128 @@ pub fn load_gui_atlas(jar_path: &Path) -> Result<GuiAtlas, AssetError> {
         blit(&mut rgba, &src, w, h, INVENTORY_AT);
         sprites.insert("inventory", uv(INVENTORY_AT.0, INVENTORY_AT.1, 176, 166));
     }
+    if let Some((src, w, h)) = read_png(
+        &mut archive,
+        "assets/minecraft/textures/gui/container/generic_54.png",
+    ) {
+        blit(&mut rgba, &src, w, h, GENERIC_CONTAINER_AT);
+        sprites.insert(
+            "generic_54",
+            uv(GENERIC_CONTAINER_AT.0, GENERIC_CONTAINER_AT.1, 176, 222),
+        );
+    }
+    for (path, name, at) in [
+        (
+            "assets/minecraft/textures/gui/container/furnace.png",
+            "furnace",
+            FURNACE_AT,
+        ),
+        (
+            "assets/minecraft/textures/gui/container/blast_furnace.png",
+            "blast_furnace",
+            BLAST_FURNACE_AT,
+        ),
+        (
+            "assets/minecraft/textures/gui/container/smoker.png",
+            "smoker",
+            SMOKER_AT,
+        ),
+    ] {
+        if let Some((src, w, h)) = read_png(&mut archive, path) {
+            blit(&mut rgba, &src, w, h, at);
+            sprites.insert(name, uv(at.0, at.1, 176, 166));
+            let full_name = match name {
+                "furnace" => "furnace_full",
+                "blast_furnace" => "blast_furnace_full",
+                _ => "smoker_full",
+            };
+            sprites.insert(full_name, uv(at.0, at.1, 256, 256));
+        }
+    }
+    for (path, name, at, width, height) in [
+        (
+            "assets/minecraft/textures/gui/container/dispenser.png",
+            "dispenser",
+            DISPENSER_AT,
+            176,
+            166,
+        ),
+        (
+            "assets/minecraft/textures/gui/container/hopper.png",
+            "hopper",
+            HOPPER_AT,
+            176,
+            133,
+        ),
+        (
+            "assets/minecraft/textures/gui/container/brewing_stand.png",
+            "brewing_stand",
+            BREWING_STAND_AT,
+            176,
+            166,
+        ),
+        (
+            "assets/minecraft/textures/gui/container/crafting_table.png",
+            "crafting_table",
+            CRAFTING_TABLE_AT,
+            176,
+            166,
+        ),
+        (
+            "assets/minecraft/textures/gui/container/enchanting_table.png",
+            "enchanting_table",
+            ENCHANTING_TABLE_AT,
+            176,
+            166,
+        ),
+        (
+            "assets/minecraft/textures/gui/container/anvil.png",
+            "anvil",
+            ANVIL_AT,
+            176,
+            166,
+        ),
+        (
+            "assets/minecraft/textures/gui/container/grindstone.png",
+            "grindstone",
+            GRINDSTONE_AT,
+            176,
+            166,
+        ),
+        (
+            "assets/minecraft/textures/gui/container/smithing.png",
+            "smithing",
+            SMITHING_AT,
+            176,
+            166,
+        ),
+        (
+            "assets/minecraft/textures/gui/container/cartography_table.png",
+            "cartography_table",
+            CARTOGRAPHY_AT,
+            176,
+            166,
+        ),
+        (
+            "assets/minecraft/textures/gui/container/loom.png",
+            "loom",
+            LOOM_AT,
+            176,
+            166,
+        ),
+        (
+            "assets/minecraft/textures/gui/container/stonecutter.png",
+            "stonecutter",
+            STONECUTTER_AT,
+            176,
+            166,
+        ),
+    ] {
+        if let Some((src, w, h)) = read_png(&mut archive, path) {
+            blit(&mut rgba, &src, w, h, at);
+            sprites.insert(name, uv(at.0, at.1, width, height));
+        }
+    }
     if let Some((src, w, h)) = read_png(&mut archive, "assets/minecraft/textures/gui/icons.png") {
         blit(&mut rgba, &src, w, h, ICONS_AT);
         let (ix, iy) = ICONS_AT;
@@ -140,6 +313,17 @@ pub fn load_gui_atlas(jar_path: &Path) -> Result<GuiAtlas, AssetError> {
         sprites.insert("food_half", uv(ix + 61, iy + 27, 9, 9));
         sprites.insert("xp_bg", uv(ix, iy + 64, 182, 5));
         sprites.insert("xp_full", uv(ix, iy + 69, 182, 5));
+    }
+    for (index, &name) in EFFECT_NAMES.iter().enumerate() {
+        let path = format!("assets/minecraft/textures/mob_effect/{name}.png");
+        if let Some((src, w, h)) = read_png(&mut archive, &path) {
+            let at = (
+                EFFECTS_AT.0 + (index as u32 % 16) * 18,
+                EFFECTS_AT.1 + (index as u32 / 16) * 18,
+            );
+            blit(&mut rgba, &src, w, h, at);
+            sprites.insert(name, uv(at.0, at.1, w.min(18), h.min(18)));
+        }
     }
 
     let mut glyphs = vec![Glyph::default(); 256];

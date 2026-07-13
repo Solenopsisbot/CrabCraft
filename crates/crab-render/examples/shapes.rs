@@ -6,7 +6,7 @@
 use std::path::Path;
 
 use crab_render::{mesh_region, render_to_png, Camera};
-use crab_world::{BlockStates, Chunk, Section, World};
+use crab_world::{Biomes, BlockStates, Chunk, Section, World};
 use glam::Vec3;
 
 const AIR: u32 = 0;
@@ -22,6 +22,7 @@ fn air_chunk(x: i32, z: i32) -> Chunk {
             .map(|_| Section {
                 block_count: 0,
                 blocks: BlockStates::Uniform(AIR),
+                biomes: Biomes::Uniform(0),
             })
             .collect(),
     }
