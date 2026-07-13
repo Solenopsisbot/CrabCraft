@@ -1552,6 +1552,19 @@ where
                     handle_resource_pack_request_765(&raw, shared)?;
                     continue;
                 }
+                if protocol == ProtocolVersion::V1_21_2 && raw.id == 0x44 {
+                    handle_recipe_book_add_768(&raw, shared)?;
+                    continue;
+                }
+                if protocol == ProtocolVersion::V1_21_2 && raw.id == 0x45 {
+                    handle_recipe_book_remove_768(&raw, shared)?;
+                    continue;
+                }
+                if protocol == ProtocolVersion::V1_21_2 && raw.id == 0x46 {
+                    // Recipe-book open/filter preferences are UI-local today;
+                    // consume the fixed eight booleans by ignoring this framed body.
+                    continue;
+                }
                 if protocol == ProtocolVersion::V1_21_2 && raw.id == 0x5a {
                     let mut body = raw.body.clone();
                     let carried = if body.read_bool()? {
@@ -2689,10 +2702,14 @@ where
                     std::mem::take(&mut *shared.place_recipe_outbox.lock().unwrap());
                 for request in recipe_requests {
                     if protocol == ProtocolVersion::V1_21_2 {
-                        tracing::warn!(
-                            recipe = %request.recipe,
-                            "protocol 768 recipe placement awaits numeric display ID"
-                        );
+                        if let Ok(recipe_id) = request.recipe.parse() {
+                            conn.send_unmapped(&play768::PlaceRecipe {
+                                window_id: i32::from(request.window_id),
+                                recipe_id,
+                                make_all: request.make_all,
+                            })
+                            .await?;
+                        }
                     } else {
                         conn.send(&request).await?;
                     }
@@ -4036,6 +4053,252 @@ fn parse_declared_recipes_766(
         crafting,
         stonecutting,
     })
+}
+
+#[derive(Default)]
+struct SlotDisplay768 {
+    items: Vec<i32>,
+    representative: Option<SlotItem>,
+}
+
+fn read_id_set_768<B: crab_protocol::BufExt>(body: &mut B) -> Result<Vec<i32>> {
+    let encoded = body.read_varint()?;
+    if encoded == 0 {
+        let _tag = body.read_string(32_767)?;
+        return Ok(Vec::new());
+    }
+    if !(1..=65_537).contains(&encoded) {
+        bail!("invalid protocol 768 ID-set size {encoded}");
+    }
+    (0..encoded - 1)
+        .map(|_| body.read_varint().map_err(Into::into))
+        .collect()
+}
+
+fn read_slot_display_768<B: crab_protocol::BufExt>(
+    body: &mut B,
+    depth: usize,
+) -> Result<SlotDisplay768> {
+    if depth > 32 {
+        bail!("protocol 768 slot display nesting is too deep");
+    }
+    let display_type = body.read_varint()?;
+    Ok(match display_type {
+        0 | 1 => SlotDisplay768::default(),
+        2 => {
+            let item_id = body.read_varint()?;
+            SlotDisplay768 {
+                items: vec![item_id],
+                representative: Some(SlotItem { item_id, count: 1 }),
+            }
+        }
+        3 => {
+            let representative = play766::read_component_slot_768(body)?.item;
+            SlotDisplay768 {
+                items: representative.iter().map(|item| item.item_id).collect(),
+                representative,
+            }
+        }
+        4 => {
+            let _tag = body.read_string(32_767)?;
+            SlotDisplay768::default()
+        }
+        5 => {
+            let base = read_slot_display_768(body, depth + 1)?;
+            let _material = read_slot_display_768(body, depth + 1)?;
+            let _pattern = read_slot_display_768(body, depth + 1)?;
+            base
+        }
+        6 => {
+            let input = read_slot_display_768(body, depth + 1)?;
+            let _remainder = read_slot_display_768(body, depth + 1)?;
+            input
+        }
+        7 => {
+            let count = body.read_varint()?;
+            if !(0..=4096).contains(&count) {
+                bail!("invalid protocol 768 composite display size {count}");
+            }
+            let mut combined = SlotDisplay768::default();
+            for _ in 0..count {
+                let child = read_slot_display_768(body, depth + 1)?;
+                if combined.representative.is_none() {
+                    combined.representative = child.representative;
+                }
+                combined.items.extend(child.items);
+            }
+            combined.items.sort_unstable();
+            combined.items.dedup();
+            combined
+        }
+        other => bail!("invalid protocol 768 slot display type {other}"),
+    })
+}
+
+fn read_recipe_display_768<B: crab_protocol::BufExt>(
+    body: &mut B,
+    display_id: i32,
+) -> Result<(Option<CraftingRecipe>, Option<StonecutterRecipe>)> {
+    let id = display_id.to_string();
+    Ok(match body.read_varint()? {
+        0 => {
+            let count = body.read_varint()?;
+            if !(0..=256).contains(&count) {
+                bail!("invalid shapeless display ingredient count {count}");
+            }
+            let mut ingredients = Vec::with_capacity(count as usize);
+            for _ in 0..count {
+                ingredients.push(read_slot_display_768(body, 0)?.items);
+            }
+            let result = read_slot_display_768(body, 0)?.representative;
+            let _station = read_slot_display_768(body, 0)?;
+            (
+                Some(CraftingRecipe {
+                    id,
+                    width: 0,
+                    height: 0,
+                    ingredients,
+                    result,
+                }),
+                None,
+            )
+        }
+        1 => {
+            let width = body.read_varint()?;
+            let height = body.read_varint()?;
+            if !(0..=16).contains(&width) || !(0..=16).contains(&height) {
+                bail!("invalid shaped display dimensions {width}x{height}");
+            }
+            let count = body.read_varint()?;
+            if !(0..=256).contains(&count) {
+                bail!("invalid shaped display ingredient count {count}");
+            }
+            let mut ingredients = Vec::with_capacity(count as usize);
+            for _ in 0..count {
+                ingredients.push(read_slot_display_768(body, 0)?.items);
+            }
+            let result = read_slot_display_768(body, 0)?.representative;
+            let _station = read_slot_display_768(body, 0)?;
+            (
+                Some(CraftingRecipe {
+                    id,
+                    width: width as u8,
+                    height: height as u8,
+                    ingredients,
+                    result,
+                }),
+                None,
+            )
+        }
+        2 => {
+            for _ in 0..4 {
+                let _ = read_slot_display_768(body, 0)?;
+            }
+            let _duration = body.read_varint()?;
+            let _experience = body.read_f32()?;
+            (None, None)
+        }
+        3 => {
+            let ingredient = read_slot_display_768(body, 0)?.items;
+            let result = read_slot_display_768(body, 0)?.representative;
+            let _station = read_slot_display_768(body, 0)?;
+            (
+                None,
+                Some(StonecutterRecipe {
+                    id,
+                    ingredients: ingredient,
+                    result,
+                }),
+            )
+        }
+        4 => {
+            for _ in 0..5 {
+                let _ = read_slot_display_768(body, 0)?;
+            }
+            (None, None)
+        }
+        other => bail!("invalid protocol 768 recipe display type {other}"),
+    })
+}
+
+fn handle_recipe_book_add_768(raw: &crab_net::RawPacket, shared: &Arc<Shared>) -> Result<()> {
+    let mut body = raw.body.clone();
+    let count = body.read_varint()?;
+    if !(0..=65_536).contains(&count) {
+        bail!("invalid protocol 768 recipe-book add count {count}");
+    }
+    let mut crafting = Vec::new();
+    let mut stonecutting = Vec::new();
+    let mut unlocked = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        let display_id = body.read_varint()?;
+        let (crafting_recipe, stonecutter_recipe) = read_recipe_display_768(&mut body, display_id)?;
+        let _group = body.read_varint()?;
+        let _category = body.read_varint()?;
+        if body.read_bool()? {
+            let requirement_count = body.read_varint()?;
+            if !(0..=256).contains(&requirement_count) {
+                bail!("invalid recipe requirement count {requirement_count}");
+            }
+            for _ in 0..requirement_count {
+                let _ = read_id_set_768(&mut body)?;
+            }
+        }
+        let _flags = body.read_u8()?;
+        if let Some(recipe) = crafting_recipe {
+            crafting.push(recipe);
+        }
+        if let Some(recipe) = stonecutter_recipe {
+            stonecutting.push(recipe);
+        }
+        unlocked.push(display_id.to_string());
+    }
+    let replace = body.read_bool()?;
+    if replace {
+        *shared.crafting_recipes.lock().unwrap() = crafting;
+        *shared.stonecutter_recipes.lock().unwrap() = stonecutting;
+        *shared.unlocked_recipes.lock().unwrap() = unlocked.into_iter().collect();
+    } else {
+        shared.crafting_recipes.lock().unwrap().extend(crafting);
+        shared
+            .stonecutter_recipes
+            .lock()
+            .unwrap()
+            .extend(stonecutting);
+        shared.unlocked_recipes.lock().unwrap().extend(unlocked);
+    }
+    Ok(())
+}
+
+fn handle_recipe_book_remove_768(raw: &crab_net::RawPacket, shared: &Arc<Shared>) -> Result<()> {
+    let mut body = raw.body.clone();
+    let count = body.read_varint()?;
+    if !(0..=65_536).contains(&count) {
+        bail!("invalid protocol 768 recipe-book remove count {count}");
+    }
+    let ids = (0..count)
+        .map(|_| {
+            body.read_varint()
+                .map(|id| id.to_string())
+                .map_err(Into::into)
+        })
+        .collect::<Result<HashSet<_>>>()?;
+    shared
+        .crafting_recipes
+        .lock()
+        .unwrap()
+        .retain(|recipe| !ids.contains(&recipe.id));
+    shared
+        .stonecutter_recipes
+        .lock()
+        .unwrap()
+        .retain(|recipe| !ids.contains(&recipe.id));
+    shared
+        .unlocked_recipes
+        .lock()
+        .unwrap()
+        .retain(|id| !ids.contains(id));
+    Ok(())
 }
 
 fn handle_unlock_recipes(raw: &crab_net::RawPacket, shared: &Arc<Shared>) -> Result<()> {
@@ -5853,6 +6116,81 @@ mod tests {
         assert_eq!(recipes.crafting[0].id, "minecraft:test_planks");
         assert_eq!(recipes.crafting[0].ingredients, vec![vec![12]]);
         assert_eq!(recipes.crafting[0].result, slot(13, 4));
+    }
+
+    #[test]
+    fn protocol_768_recipe_book_displays_feed_existing_recipe_ui() {
+        let shared = Arc::new(Shared::new());
+        let mut body = Vec::new();
+        body.put_varint(2); // entries
+
+        body.put_varint(17); // display id
+        body.put_varint(1); // shaped
+        body.put_varint(2); // width
+        body.put_varint(1); // height
+        body.put_varint(2); // ingredient display count
+        body.put_varint(2); // item display
+        body.put_varint(1);
+        body.put_varint(2);
+        body.put_varint(2);
+        body.put_varint(2); // result item display
+        body.put_varint(3);
+        body.put_varint(0); // empty crafting station display
+        body.put_varint(0); // no group (optvarint)
+        body.put_varint(0); // category
+        body.put_bool(false); // no requirements
+        body.put_u8(0); // flags
+
+        body.put_varint(18); // display id
+        body.put_varint(3); // stonecutter
+        body.put_varint(7); // composite ingredient display
+        body.put_varint(2);
+        body.put_varint(2);
+        body.put_varint(4);
+        body.put_varint(2);
+        body.put_varint(5);
+        body.put_varint(2); // result item display
+        body.put_varint(6);
+        body.put_varint(0); // empty station
+        body.put_varint(0); // group
+        body.put_varint(10); // stonecutter category
+        body.put_bool(false);
+        body.put_u8(0);
+        body.put_bool(true); // replace
+
+        let raw = crab_net::RawPacket {
+            id: 0x44,
+            body: body.into(),
+        };
+        handle_recipe_book_add_768(&raw, &shared).unwrap();
+        let crafting = shared.crafting_recipes.lock().unwrap();
+        assert_eq!(crafting.len(), 1);
+        assert_eq!(crafting[0].id, "17");
+        assert_eq!(crafting[0].width, 2);
+        assert_eq!(crafting[0].ingredients, vec![vec![1], vec![2]]);
+        assert_eq!(crafting[0].result, slot(3, 1));
+        drop(crafting);
+        let stonecutting = shared.stonecutter_recipes.lock().unwrap();
+        assert_eq!(stonecutting.len(), 1);
+        assert_eq!(stonecutting[0].id, "18");
+        assert_eq!(stonecutting[0].ingredients, vec![4, 5]);
+        assert_eq!(stonecutting[0].result, slot(6, 1));
+        drop(stonecutting);
+        assert_eq!(shared.unlocked_recipes.lock().unwrap().len(), 2);
+
+        let mut remove = Vec::new();
+        remove.put_varint(1);
+        remove.put_varint(17);
+        handle_recipe_book_remove_768(
+            &crab_net::RawPacket {
+                id: 0x45,
+                body: remove.into(),
+            },
+            &shared,
+        )
+        .unwrap();
+        assert!(shared.crafting_recipes.lock().unwrap().is_empty());
+        assert_eq!(shared.stonecutter_recipes.lock().unwrap().len(), 1);
     }
 
     #[test]

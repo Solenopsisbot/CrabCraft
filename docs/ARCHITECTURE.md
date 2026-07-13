@@ -45,6 +45,11 @@ uniform and a viewport derived from the vanilla inventory texture's pixel
 bounds. This keeps world depth from clipping the player and keeps slot icons and
 tooltips above the model.
 
+Recipe UI state normalizes versioned declarations into the same crafting and
+stonecutter records. Protocols through 767 use namespaced recipe IDs; protocol
+768 recursively decodes slot/recipe displays, stores numeric display IDs as the
+stable UI key, and converts the selected key back to a VarInt placement request.
+
 ## Crate boundaries
 
 - `crab-protocol`: byte codecs, classic/network NBT, packet traits, per-version packets.

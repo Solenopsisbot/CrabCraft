@@ -127,7 +127,8 @@ tested for every supported profile:
   recipes with their real result-item icons
 - **Crafting recipe book**: shaped/shapeless declarations and server unlocks
   are retained, filtered to the active 2×2 or 3×3 grid, displayed as a paged
-  result-icon panel, and placed authoritatively (Shift requests craft-all)
+  result-icon panel, and placed authoritatively (Shift requests craft-all),
+  including protocol 768's numeric recipe-display add/remove packets
 - **Status effects**: authoritative add/remove/expiry tracking with Speed,
   Slowness, Haste, Mining Fatigue, Jump Boost, Levitation, and Slow Falling
   applied to local movement, mining, and gravity, plus vanilla HUD icons
@@ -328,7 +329,8 @@ Microsoft account. Using the official server jar:
   changes, configuration additions, and live core path
 - [x] Protocol 768 / 1.21.2–1.21.3 registries, packet maps, movement/teleport,
   settings, inventory split packets, expanded components, and live core path
-  - [ ] New recipe-display/book numeric-ID UI and bundle selection interaction
+  - [x] New recipe-display/book numeric-ID UI and placement requests
+  - [ ] Bundle selection interaction
 - [ ] Protocol 769+ (1.21.4 and newer) registries and incremental packet schemas
 - [ ] (Far future, maybe) Forge mod support — see the note below
 

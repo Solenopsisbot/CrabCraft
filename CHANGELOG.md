@@ -49,3 +49,5 @@ remains the detailed source of truth.
 - Entity Pose metadata now uses the correct serializer on component-era
   protocols and drives crouching, swimming/fall-flying, sleeping, dying,
   long-jump, and sitting model transforms.
+- Protocol 768 recipe-book add/remove displays now populate the existing
+  crafting/stonecutter UI and send numeric display-ID placement requests.

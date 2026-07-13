@@ -84,6 +84,35 @@ pub struct ChunkBatchReceived {
     pub chunks_per_tick: f32,
 }
 
+/// Recipe placement switched from a namespaced string to a numeric display ID.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlaceRecipe {
+    pub window_id: i32,
+    pub recipe_id: i32,
+    pub make_all: bool,
+}
+
+impl Packet for PlaceRecipe {
+    const ID: i32 = 0x24;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Serverbound;
+
+    fn encode<B: BufMut>(&self, dst: &mut B) -> Result<(), ProtoError> {
+        dst.put_varint(self.window_id);
+        dst.put_varint(self.recipe_id);
+        dst.put_bool(self.make_all);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(src: &mut B) -> Result<Self, ProtoError> {
+        Ok(Self {
+            window_id: src.read_varint()?,
+            recipe_id: src.read_varint()?,
+            make_all: src.read_bool()?,
+        })
+    }
+}
+
 impl Packet for ChunkBatchReceived {
     const ID: i32 = 0x09;
     const STATE: State = State::Play;
@@ -214,6 +243,15 @@ mod tests {
         bytes.clear();
         use_on.encode(&mut bytes).unwrap();
         assert_eq!(use_on, UseItemOn::decode(&mut bytes.as_slice()).unwrap());
+
+        let recipe = PlaceRecipe {
+            window_id: 2,
+            recipe_id: 417,
+            make_all: true,
+        };
+        bytes.clear();
+        recipe.encode(&mut bytes).unwrap();
+        assert_eq!(recipe, PlaceRecipe::decode(&mut bytes.as_slice()).unwrap());
     }
 
     #[test]

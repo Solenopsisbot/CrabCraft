@@ -88,9 +88,12 @@ Protocol 768 expands the component registry from 57 to 67 entries. Its bounded
 codec handles inserted item-model, consumable/remainder/cooldown, resistance,
 enchantability/equippable/repairable/glider/tooltip/death-protection types,
 changed custom-model and food layouts, and recursively nested 768 stacks. The
-new recipe display/book packets use numeric display IDs and remain a documented
-UI parity item; malformed legacy recipe decoding is never allowed to corrupt the
-stream because each packet body is independently framed and ignored on failure.
+new recipe display/book packets use numeric display IDs. Crafting-shaped,
+crafting-shapeless, stonecutter, furnace, and smithing displays are bounded and
+recursively decoded; crafting and stonecutter entries feed the existing paged UI,
+add/remove updates maintain unlock state, and placement sends the numeric ID.
+Unresolvable tag-only displays remain safe empty alternatives rather than
+guessing registry membership.
 
 ## Adding a protocol
 
