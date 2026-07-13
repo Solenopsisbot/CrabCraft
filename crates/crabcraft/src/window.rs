@@ -3458,19 +3458,20 @@ impl ApplicationHandler for App {
                                 .objectives
                                 .get(objective)
                                 .map_or(objective.as_str(), String::as_str);
-                            let mut scores: Vec<(&String, &i32)> = scoreboard
+                            let mut scores: Vec<(String, i32)> = scoreboard
                                 .scores
                                 .get(objective)
                                 .into_iter()
                                 .flat_map(|scores| scores.iter())
+                                .map(|(name, score)| (scoreboard.decorated_name(name), *score))
                                 .collect();
-                            scores.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+                            scores.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
                             scores.truncate(15);
                             let text_h = 0.045;
                             let max_pixels =
                                 scores.iter().fold(gui.text_width(title), |width, row| {
                                     width.max(
-                                        gui.text_width(row.0)
+                                        gui.text_width(&row.0)
                                             + 8.0
                                             + gui.text_width(&row.1.to_string()),
                                     )
@@ -3561,7 +3562,13 @@ impl ApplicationHandler for App {
                                 let row = index % rows;
                                 let x = x0 + 0.02 + column as f32 * col_w;
                                 let y = content_top - row as f32 * row_h;
-                                let name = entry.display_name.as_ref().unwrap_or(&entry.name);
+                                let decorated;
+                                let name = if let Some(display_name) = entry.display_name.as_ref() {
+                                    display_name.as_str()
+                                } else {
+                                    decorated = scoreboard.decorated_name(&entry.name);
+                                    &decorated
+                                };
                                 crab_render::push_text(
                                     &mut hud_text,
                                     gui,

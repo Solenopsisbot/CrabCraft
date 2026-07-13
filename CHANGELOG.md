@@ -13,6 +13,8 @@ remains the detailed source of truth.
   an official vanilla server.
 - Version-selected generated block/state, item, and entity registries for the
   763, 764, and 765 wire profiles.
+- Protocol-aware entity metadata components and scoreboard teams, including
+  team prefixes/suffixes in sidebar and Tab-list names.
 - Live validated resource-pack layering and renderer atlas replacement.
 - Signs, editable/readable books, maps, recipe books, biome tinting, transparent
   fluids, sky rendering, particles, expanded menus, vehicles, swimming/Elytra,

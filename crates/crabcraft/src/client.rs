@@ -85,6 +85,7 @@ const ID_WORLD_BORDER_WARNING_DELAY: i32 = 0x4a;
 const ID_WORLD_BORDER_WARNING_REACH: i32 = 0x4b;
 const ID_SCOREBOARD_DISPLAY: i32 = 0x51;
 const ID_SCOREBOARD_OBJECTIVE: i32 = 0x58;
+const ID_TEAMS: i32 = 0x5a;
 const ID_SCOREBOARD_SCORE: i32 = 0x5b;
 const ID_PLAYER_REMOVE: i32 = 0x39;
 const ID_PLAYER_INFO: i32 = 0x3a;
@@ -281,6 +282,29 @@ pub struct ScoreboardState {
     pub objectives: HashMap<String, String>,
     pub sidebar: Option<String>,
     pub scores: HashMap<String, HashMap<String, i32>>,
+    pub teams: HashMap<String, TeamState>,
+}
+
+impl ScoreboardState {
+    #[must_use]
+    pub fn decorated_name(&self, name: &str) -> String {
+        self.teams
+            .values()
+            .find(|team| team.members.contains(name))
+            .map_or_else(
+                || name.to_owned(),
+                |team| format!("{}{}{}", team.prefix, name, team.suffix),
+            )
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TeamState {
+    pub display_name: String,
+    pub prefix: String,
+    pub suffix: String,
+    pub formatting: i32,
+    pub members: HashSet<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1511,6 +1535,9 @@ where
                             }
                         }
                     }
+                    id if id == ID_TEAMS => {
+                        let _ = handle_team_packet(&raw, shared, protocol);
+                    }
                     id if id == ID_PLAYER_INFO => {
                         let mut b = raw.body.clone();
                         if let (Ok(actions), Ok(count)) = (b.read_u8(), b.read_varint()) {
@@ -1749,7 +1776,7 @@ where
                         let _ = handle_entity_destroy(&raw, shared);
                     }
                     id if id == ID_ENTITY_METADATA => {
-                        let _ = handle_entity_metadata(&raw, shared);
+                        let _ = handle_entity_metadata(&raw, shared, protocol);
                     }
                     id if id == ID_ENTITY_ANIMATION => {
                         let mut b = raw.body.clone();
@@ -3038,7 +3065,11 @@ fn handle_vehicle_move(raw: &crab_net::RawPacket, shared: &Arc<Shared>) -> Resul
 /// Parses Set Entity Metadata, extracting the fields we render: slime/magma
 /// cube `size` (index 16, VarInt) and the dropped-item stack (index 8, Slot).
 /// Other fields are skipped by type; parsing stops at an unsupported type.
-fn handle_entity_metadata(raw: &crab_net::RawPacket, shared: &Arc<Shared>) -> Result<()> {
+fn handle_entity_metadata(
+    raw: &crab_net::RawPacket,
+    shared: &Arc<Shared>,
+    protocol: ProtocolVersion,
+) -> Result<()> {
     let mut b = raw.body.clone();
     let id = b.read_varint()?;
     let is_sizable = {
@@ -3078,12 +3109,15 @@ fn handle_entity_metadata(raw: &crab_net::RawPacket, shared: &Arc<Shared>) -> Re
             3 => {
                 b.read_f32()?;
             }
-            4 | 5 => {
+            4 => {
                 b.read_string(32767)?;
+            }
+            5 => {
+                let _ = read_text_component(&mut b, protocol)?;
             }
             6 => {
                 if b.read_bool()? {
-                    b.read_string(32767)?;
+                    let _ = read_text_component(&mut b, protocol)?;
                 }
             }
             7 => {
@@ -3132,7 +3166,11 @@ fn handle_entity_metadata(raw: &crab_net::RawPacket, shared: &Arc<Shared>) -> Re
                 }
             }
             16 => {
-                let _ = crab_protocol::nbt::read_nbt(&mut b)?;
+                let _ = if protocol == ProtocolVersion::V1_20_3 {
+                    crab_protocol::nbt::read_anonymous_nbt(&mut b)?
+                } else {
+                    crab_protocol::nbt::read_nbt(&mut b)?
+                };
             }
             18 => {
                 b.read_varint()?;
@@ -4566,6 +4604,66 @@ fn handle_reset_score_765(raw: &crab_net::RawPacket, shared: &Arc<Shared>) -> Re
     Ok(())
 }
 
+fn handle_team_packet(
+    raw: &crab_net::RawPacket,
+    shared: &Arc<Shared>,
+    protocol: ProtocolVersion,
+) -> Result<()> {
+    let mut body = raw.body.clone();
+    let team_name = body.read_string(32767)?;
+    let mode = body.read_i8()?;
+    if mode == 1 {
+        shared.scoreboard.lock().unwrap().teams.remove(&team_name);
+        return Ok(());
+    }
+
+    let properties = if matches!(mode, 0 | 2) {
+        let display_name = read_text_component(&mut body, protocol)?;
+        let _friendly_fire = body.read_i8()?;
+        let _name_tag_visibility = body.read_string(32767)?;
+        let _collision_rule = body.read_string(32767)?;
+        let formatting = body.read_varint()?;
+        let prefix = read_text_component(&mut body, protocol)?;
+        let suffix = read_text_component(&mut body, protocol)?;
+        Some((display_name, formatting, prefix, suffix))
+    } else {
+        None
+    };
+
+    let members = if matches!(mode, 0 | 3 | 4) {
+        let count = body.read_varint()?;
+        if !(0..=65_536).contains(&count) {
+            bail!("invalid team member count {count}");
+        }
+        (0..count)
+            .map(|_| body.read_string(32767).map_err(Into::into))
+            .collect::<Result<Vec<_>>>()?
+    } else {
+        Vec::new()
+    };
+
+    let mut scoreboard = shared.scoreboard.lock().unwrap();
+    let team = scoreboard.teams.entry(team_name).or_default();
+    if let Some((display_name, formatting, prefix, suffix)) = properties {
+        team.display_name = display_name;
+        team.formatting = formatting;
+        team.prefix = prefix;
+        team.suffix = suffix;
+    }
+    match mode {
+        0 => team.members = members.into_iter().collect(),
+        2 => {}
+        3 => team.members.extend(members),
+        4 => {
+            for member in members {
+                team.members.remove(&member);
+            }
+        }
+        _ => bail!("invalid team mode {mode}"),
+    }
+    Ok(())
+}
+
 fn split_host_port(addr: &str) -> (String, u16) {
     match addr.rsplit_once(':') {
         Some((host, port)) => (host.to_string(), port.parse().unwrap_or(25565)),
@@ -4667,6 +4765,39 @@ mod tests {
         let player = shared.player.lock().unwrap();
         assert_eq!(player.entity_id, 1234);
         assert_eq!(player.gamemode, 1);
+    }
+
+    #[test]
+    fn teams_765_apply_nbt_prefixes_and_suffixes_to_names() {
+        fn put_nbt_string(body: &mut Vec<u8>, text: &str) {
+            body.push(8); // unnamed TAG_String
+            body.put_u16(text.len() as u16);
+            body.extend_from_slice(text.as_bytes());
+        }
+
+        let shared = Arc::new(Shared::new());
+        let mut body = Vec::new();
+        body.put_string("builders");
+        body.push(0); // create
+        put_nbt_string(&mut body, "Builders");
+        body.push(3); // friendly fire flags
+        body.put_string("always");
+        body.put_string("always");
+        body.put_varint(10);
+        put_nbt_string(&mut body, "[");
+        put_nbt_string(&mut body, "]");
+        body.put_varint(1);
+        body.put_string("Ferris");
+        let raw = crab_net::RawPacket {
+            id: ID_TEAMS,
+            body: body.into(),
+        };
+
+        handle_team_packet(&raw, &shared, ProtocolVersion::V1_20_3).unwrap();
+        assert_eq!(
+            shared.scoreboard.lock().unwrap().decorated_name("Ferris"),
+            "[Ferris]"
+        );
     }
 
     #[test]

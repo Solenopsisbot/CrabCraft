@@ -126,7 +126,7 @@ supported 1.20.x profile:
   Chat Command packets) and incoming system chat shows in an on-screen log
 - **Server overlays**: action-bar text, timed titles/subtitles, stacked boss
   bars with health/style updates, synchronized world-border warnings, sidebar
-  scoreboards, and a latency-aware Tab player list
+  scoreboards with team prefixes/suffixes, and a latency-aware Tab player list
 - **Sounds**: per-block **break / place / mining-hit / footstep** plus hurt /
    attack sounds, resolved through the real `sounds.json` events
    (`block.<group>.<event>`) so each block uses its correct sound group — loaded
