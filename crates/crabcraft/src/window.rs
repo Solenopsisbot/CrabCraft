@@ -15,10 +15,11 @@ use std::time::{Duration, Instant};
 use crab_assets::{Atlas, EntityAtlas, GuiAtlas, ItemAtlas};
 use crab_protocol::versions::v1_20_1::play::PlaceRecipe;
 use crab_render::{
-    block_item_mesh, box_mesh, build_block_pipeline, build_hud_pipelines, container_geometry,
-    entity_mesh, entity_mesh_with_pose, furnace_geometry, hud_geometry, inventory_geometry,
-    mesh_region, simple_container_geometry, status_effect_geometry, upload_atlas, upload_texture,
-    CameraUniform, HudPipelines, Vertex, DEPTH_FORMAT,
+    block_item_mesh, block_state_item_mesh, box_mesh, build_block_pipeline, build_hud_pipelines,
+    container_geometry, entity_armour_mesh, entity_mesh, entity_mesh_with_pose, furnace_geometry,
+    hud_geometry, inventory_geometry, item_model_mesh, mesh_region, simple_container_geometry,
+    status_effect_geometry, upload_atlas, upload_texture, CameraUniform, HudPipelines, Vertex,
+    DEPTH_FORMAT,
 };
 use glam::Vec3;
 use wgpu::util::DeviceExt;
@@ -26,7 +27,7 @@ use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, DeviceId, ElementState, KeyEvent, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
-use winit::window::{CursorGrabMode, Window, WindowId};
+use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
 
 use crate::client::{ContainerState, CraftingRecipe, EnvironmentState, Shared};
 
@@ -44,9 +45,11 @@ struct RecipeContext {
     grid: usize,
 }
 /// Pause-menu button labels (index 0 resumes; the rest match `menu_click`).
-const MENU_BUTTONS: [&str; 3] = ["Back to Game", "Controls...", "Quit"];
+const MENU_BUTTONS: [&str; 4] = ["Back to Game", "Options...", "Controls...", "Quit"];
 const DONE_BUTTON: [&str; 1] = ["Done"];
-const CONTROL_HELP: [&str; 8] = [
+const FOV_CHOICES: [f32; 4] = [60.0, 70.0, 90.0, 110.0];
+const SENSITIVITY_CHOICES: [f32; 5] = [0.06, 0.09, 0.12, 0.18, 0.24];
+const CONTROL_HELP: [&str; 9] = [
     "W A S D    Move",
     "Space    Jump / double-tap flight",
     "Control    Sprint       Shift    Sneak",
@@ -55,7 +58,16 @@ const CONTROL_HELP: [&str; 8] = [
     "F    Swap main hand and offhand",
     "E    Inventory       T or /    Chat",
     "Tab    Player list       F3    Debug",
+    "F5    Cycle camera perspective",
 ];
+
+fn next_choice(current: f32, choices: &[f32]) -> f32 {
+    let index = choices
+        .iter()
+        .position(|choice| (*choice - current).abs() < f32::EPSILON)
+        .unwrap_or(0);
+    choices[(index + 1) % choices.len()]
+}
 
 /// Approximates vanilla's day/night and storm sky brightness from server state.
 fn sky_color(environment: EnvironmentState) -> [f64; 3] {
@@ -141,28 +153,97 @@ fn celestial_mesh(eye: Vec3, environment: EnvironmentState, white_uv: [f32; 4]) 
 /// First-person camera: eye at the player's head, looking along yaw/pitch
 /// (Minecraft convention, degrees). Position comes from the player; this just
 /// holds the look angles.
+#[allow(clippy::too_many_arguments)]
 fn first_person_camera(
     player_pos: Vec3,
     yaw_deg: f32,
     pitch_deg: f32,
     aspect: f32,
     eye_height: f32,
+    fov_degrees: f32,
+    perspective: Perspective,
+    third_person_distance: f32,
 ) -> crab_render::Camera {
-    let eye = player_pos + Vec3::new(0.0, eye_height, 0.0);
+    let player_eye = player_pos + Vec3::new(0.0, eye_height, 0.0);
     let (yaw, pitch) = (yaw_deg.to_radians(), pitch_deg.to_radians());
     let dir = Vec3::new(
         -yaw.sin() * pitch.cos(),
         -pitch.sin(),
         yaw.cos() * pitch.cos(),
     );
+    let (eye, target) = match perspective {
+        Perspective::FirstPerson => (player_eye, player_eye + dir),
+        Perspective::ThirdPersonBack => (player_eye - dir * third_person_distance, player_eye),
+        Perspective::ThirdPersonFront => (player_eye + dir * third_person_distance, player_eye),
+    };
     crab_render::Camera {
         eye,
-        target: eye + dir,
+        target,
         up: Vec3::Y,
         aspect,
-        fovy_radians: 70f32.to_radians(),
+        fovy_radians: fov_degrees.to_radians(),
         znear: 0.1,
         zfar: 1000.0,
+    }
+}
+
+fn third_person_camera_distance(
+    world: &crab_world::World,
+    player_pos: Vec3,
+    eye_height: f32,
+    yaw_deg: f32,
+    pitch_deg: f32,
+    perspective: Perspective,
+) -> f32 {
+    if perspective == Perspective::FirstPerson {
+        return 0.0;
+    }
+    let (yaw, pitch) = (yaw_deg.to_radians(), pitch_deg.to_radians());
+    let view = Vec3::new(
+        -yaw.sin() * pitch.cos(),
+        -pitch.sin(),
+        yaw.cos() * pitch.cos(),
+    );
+    let direction = if perspective == Perspective::ThirdPersonBack {
+        -view
+    } else {
+        view
+    };
+    let origin = player_pos + Vec3::Y * eye_height;
+    let Some(hit) = crab_physics::raycast(
+        world,
+        origin.as_dvec3().to_array(),
+        direction.as_dvec3().to_array(),
+        4.0,
+    ) else {
+        return 4.0;
+    };
+    let min = hit.block.map(f64::from);
+    let max = min.map(|value| value + 1.0);
+    crab_physics::ray_aabb(
+        origin.as_dvec3().to_array(),
+        direction.as_dvec3().to_array(),
+        min,
+        max,
+    )
+    .map_or(4.0, |distance| (distance as f32 - 0.2).clamp(0.25, 4.0))
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Perspective {
+    #[default]
+    FirstPerson,
+    ThirdPersonBack,
+    ThirdPersonFront,
+}
+
+impl Perspective {
+    fn next(self) -> Self {
+        match self {
+            Self::FirstPerson => Self::ThirdPersonBack,
+            Self::ThirdPersonBack => Self::ThirdPersonFront,
+            Self::ThirdPersonFront => Self::FirstPerson,
+        }
     }
 }
 
@@ -225,6 +306,23 @@ fn armour_color(item_name: &str) -> [f32; 3] {
     } else {
         [0.72, 0.74, 0.76]
     }
+}
+
+fn entity_item_sprite(entity_name: &str) -> Option<&'static str> {
+    Some(match entity_name {
+        "egg" => "egg",
+        "ender_pearl" => "ender_pearl",
+        "experience_bottle" => "experience_bottle",
+        "eye_of_ender" => "ender_eye",
+        "fireball" | "small_fireball" => "fire_charge",
+        "firework_rocket" => "firework_rocket",
+        "item_frame" => "item_frame",
+        "glow_item_frame" => "glow_item_frame",
+        "lingering_potion" => "lingering_potion",
+        "snowball" => "snowball",
+        "splash_potion" => "splash_potion",
+        _ => return None,
+    })
 }
 
 fn pretty_item_name(name: &str) -> String {
@@ -1812,6 +1910,11 @@ struct App {
     /// Whether the pause menu is open (Esc).
     menu_open: bool,
     controls_help_open: bool,
+    options_open: bool,
+    fov_degrees: f32,
+    mouse_sensitivity: f32,
+    perspective: Perspective,
+    local_walk_phase: f32,
     /// Scroll page for loom patterns and stonecutter recipes.
     recipe_page: usize,
     recipe_book_open: bool,
@@ -1893,6 +1996,11 @@ impl App {
             cursor: (0.0, 0.0),
             menu_open: false,
             controls_help_open: false,
+            options_open: false,
+            fov_degrees: 70.0,
+            mouse_sensitivity: 0.12,
+            perspective: Perspective::FirstPerson,
+            local_walk_phase: 0.0,
             recipe_page: 0,
             recipe_book_open: false,
             recipe_book_page: 0,
@@ -1953,7 +2061,9 @@ impl App {
             }
             let (dx, dz) = (a.pos[0] - before[0], a.pos[2] - before[2]);
             let moved = (dx * dx + dz * dz).sqrt();
-            a.phase += moved * 2.2;
+            // Keep an animation clock running for wings, fins, tails, and
+            // vehicle paddles; horizontal distance adds walk-cycle cadence.
+            a.phase += dt * 4.0 + moved * 2.2;
             let target_amount = (moved / dt.max(1e-3) * 0.10).min(0.7);
             a.amount += (target_amount - a.amount) * ease;
             // Ease the facing yaw along the shortest arc (wrap at +-180).
@@ -1981,10 +2091,10 @@ impl App {
             // Falling Block's Spawn Entity data is a global block-state ID.
             // Render it at full block scale instead of using a generic entity
             // bounds box; gravity/position remain server-authoritative.
-            if let Some(block_name) = e.block_state.and_then(crab_registry::block_name) {
-                box_v.extend(block_item_mesh(
+            if let Some(state) = e.block_state {
+                box_v.extend(block_state_item_mesh(
                     &self.atlas,
-                    block_name,
+                    state,
                     [a.pos[0], a.pos[1] + 0.5, a.pos[2]],
                     1.0,
                     0.0,
@@ -1997,6 +2107,19 @@ impl App {
                     .ok()
                     .and_then(crab_registry::item_name)
                 {
+                    if let Some(vertices) = item_model_mesh(
+                        &self.item_atlas,
+                        name,
+                        [
+                            a.pos[0],
+                            a.pos[1] + 0.18 + (a.age * 2.0).sin() * 0.05,
+                            a.pos[2],
+                        ],
+                        a.age * 45.0,
+                    ) {
+                        item_v.extend(vertices);
+                        continue;
+                    }
                     if crab_registry::block_by_name(name).is_some() {
                         box_v.extend(block_item_mesh(
                             &self.atlas,
@@ -2016,6 +2139,28 @@ impl App {
                         continue;
                     }
                 }
+            }
+            let entity_name = u32::try_from(e.type_id)
+                .ok()
+                .and_then(crab_registry::entity_name);
+            if entity_name == Some("tnt") {
+                if let Some(tnt) = crab_registry::block_by_name("tnt") {
+                    box_v.extend(block_state_item_mesh(
+                        &self.atlas,
+                        tnt.default_state,
+                        [a.pos[0], a.pos[1] + 0.5, a.pos[2]],
+                        1.0,
+                        0.0,
+                    ));
+                }
+                continue;
+            }
+            if let Some(uv) = entity_name
+                .and_then(entity_item_sprite)
+                .and_then(|item| self.item_atlas.icon(item))
+            {
+                push_item_billboard(&mut item_v, a.pos, uv, self.yaw);
+                continue;
             }
             if !e.invisible || e.glowing {
                 if let Some(m) = self.entity_atlas.models.get(&e.type_id) {
@@ -2095,6 +2240,31 @@ impl App {
                 else {
                     continue;
                 };
+                if let Some(model) = self.entity_atlas.models.get(&e.type_id) {
+                    let hurt_wobble = if a.hurt_time > 0.0 {
+                        (a.hurt_time * 45.0).sin() * 8.0
+                    } else {
+                        0.0
+                    };
+                    let armour = entity_armour_mesh(
+                        &model.geo,
+                        a.pos,
+                        white,
+                        a.phase,
+                        a.amount,
+                        e.scale,
+                        a.yaw + hurt_wobble,
+                        a.head_yaw,
+                        (a.swing_time / 0.35).clamp(0.0, 1.0),
+                        e.pose,
+                        slot,
+                        armour_color(name),
+                    );
+                    if !armour.is_empty() {
+                        box_v.extend(armour);
+                        continue;
+                    }
+                }
                 let radius = e.half_width * (1.0 - inset);
                 box_v.extend(box_mesh(
                     [
@@ -2625,6 +2795,34 @@ impl App {
     fn menu_click(&mut self, event_loop: &ActiveEventLoop) {
         let aspect = self.gfx.as_ref().map_or(1.0, Graphics::aspect);
         let (cx, cy) = self.cursor;
+        if self.options_open {
+            for i in 0..4 {
+                let (x0, y0, x1, y1) = crab_render::menu_button_rect(aspect, i, 4);
+                if cx < x0 || cx > x1 || cy < y0 || cy > y1 {
+                    continue;
+                }
+                match i {
+                    0 => self.fov_degrees = next_choice(self.fov_degrees, &FOV_CHOICES),
+                    1 => {
+                        self.mouse_sensitivity =
+                            next_choice(self.mouse_sensitivity, &SENSITIVITY_CHOICES);
+                    }
+                    2 => {
+                        if let Some(gfx) = self.gfx.as_ref() {
+                            let fullscreen = if gfx.window.fullscreen().is_some() {
+                                None
+                            } else {
+                                Some(Fullscreen::Borderless(None))
+                            };
+                            gfx.window.set_fullscreen(fullscreen);
+                        }
+                    }
+                    _ => self.options_open = false,
+                }
+                return;
+            }
+            return;
+        }
         let buttons: &[&str] = if self.controls_help_open {
             &DONE_BUTTON
         } else {
@@ -2642,7 +2840,8 @@ impl App {
                         self.menu_open = false;
                         self.set_cursor_free(false);
                     }
-                    1 => self.controls_help_open = true,
+                    1 => self.options_open = true,
+                    2 => self.controls_help_open = true,
                     _ => event_loop.exit(),
                 }
                 return;
@@ -2934,9 +3133,8 @@ impl ApplicationHandler for App {
             return; // don't turn the view while a UI is focused
         }
         if let DeviceEvent::MouseMotion { delta } = event {
-            const SENSITIVITY: f32 = 0.12; // degrees per pixel
-            self.yaw += delta.0 as f32 * SENSITIVITY;
-            self.pitch = (self.pitch + delta.1 as f32 * SENSITIVITY).clamp(-89.0, 89.0);
+            self.yaw += delta.0 as f32 * self.mouse_sensitivity;
+            self.pitch = (self.pitch + delta.1 as f32 * self.mouse_sensitivity).clamp(-89.0, 89.0);
         }
     }
 
@@ -3105,6 +3303,8 @@ impl ApplicationHandler for App {
                         self.choose_resource_pack(false);
                     } else if self.controls_help_open {
                         self.controls_help_open = false;
+                    } else if self.options_open {
+                        self.options_open = false;
                     } else if self.item_screen_open() {
                         self.close_item_screen();
                     } else {
@@ -3116,6 +3316,10 @@ impl ApplicationHandler for App {
                 } else if pressed {
                     if !repeat && code == KeyCode::F3 {
                         self.debug_open = !self.debug_open;
+                        return;
+                    }
+                    if !repeat && code == KeyCode::F5 && !self.item_screen_open() {
+                        self.perspective = self.perspective.next();
                         return;
                     }
                     if !self.item_screen_open()
@@ -3347,9 +3551,13 @@ impl ApplicationHandler for App {
                     self.selected_name_time = (self.selected_name_time - dt).max(0.0);
                 }
                 self.update_input(dt);
-                let (attacking, using_item) = {
+                let (attacking, using_item, moving) = {
                     let controls = self.shared.controls.lock().unwrap();
-                    (controls.attack, controls.use_item)
+                    (
+                        controls.attack,
+                        controls.use_item,
+                        controls.forward != 0.0 || controls.strafe != 0.0,
+                    )
                 };
                 if (attacking && !self.was_attacking) || (using_item && !self.was_using_item) {
                     self.hand_swing_time = 0.32;
@@ -3360,7 +3568,7 @@ impl ApplicationHandler for App {
                 self.was_using_item = using_item;
                 self.process_meshes();
 
-                let (mut box_v, model_v, item_v) = self.step_entities(dt);
+                let (mut box_v, mut model_v, item_v) = self.step_entities(dt);
                 let crack_v = self.crack_mesh();
                 let hotbar = hotbar_icons(&self.shared, &self.item_atlas);
                 let hovered_bundle = self.hovered_bundle();
@@ -3405,7 +3613,8 @@ impl ApplicationHandler for App {
                 } else {
                     0.0
                 };
-                let show_first_person_items = !self.item_screen_open();
+                let show_first_person_items =
+                    !self.item_screen_open() && self.perspective == Perspective::FirstPerson;
                 let selected_name = (self.selected_name_time > 0.0)
                     .then(|| {
                         self.shared
@@ -3432,7 +3641,55 @@ impl ApplicationHandler for App {
                     _ => target_eye,
                 };
                 self.render_eye = Some(eye);
+                if self.perspective != Perspective::FirstPerson {
+                    self.local_walk_phase += dt * if moving { 8.0 } else { 2.0 };
+                    let player_model = crab_registry::entities()
+                        .iter()
+                        .find(|entity| entity.name == "player")
+                        .and_then(|entity| self.entity_atlas.models.get(&(entity.id as i32)));
+                    if let Some(model) = player_model {
+                        let pose = if player.gliding {
+                            4
+                        } else if player.swimming {
+                            3
+                        } else if player.sneaking {
+                            5
+                        } else {
+                            0
+                        };
+                        model_v.extend(entity_mesh_with_pose(
+                            &model.geo,
+                            [eye.x, eye.y, eye.z],
+                            [model.atlas_x, model.atlas_y],
+                            [
+                                self.entity_atlas.width as f32,
+                                self.entity_atlas.height as f32,
+                            ],
+                            self.local_walk_phase,
+                            if moving { 0.65 } else { 0.0 },
+                            1.0,
+                            self.yaw,
+                            self.yaw,
+                            hand_swing,
+                            pose,
+                        ));
+                    }
+                }
                 box_v.extend(celestial_mesh(eye, environment, self.atlas.white_uv()));
+                let third_person_distance = third_person_camera_distance(
+                    &self.shared.world.lock().unwrap(),
+                    eye,
+                    if player.swimming || player.gliding {
+                        0.4
+                    } else if player.sneaking {
+                        1.27
+                    } else {
+                        EYE_HEIGHT
+                    },
+                    self.yaw,
+                    self.pitch,
+                    self.perspective,
+                );
                 if let Some(gfx) = self.gfx.as_mut() {
                     // Reconcile the surface with the window's real drawable size
                     // every frame. winit/macOS can deliver a stale initial size
@@ -3456,7 +3713,16 @@ impl ApplicationHandler for App {
                     } else {
                         EYE_HEIGHT
                     };
-                    let camera = first_person_camera(eye, self.yaw, self.pitch, aspect, eye_height);
+                    let camera = first_person_camera(
+                        eye,
+                        self.yaw,
+                        self.pitch,
+                        aspect,
+                        eye_height,
+                        self.fov_degrees,
+                        self.perspective,
+                        third_person_distance,
+                    );
                     gfx.box_entity_buffer = gfx.make_vertex_buffer(&box_v);
                     gfx.model_entity_buffer = gfx.make_vertex_buffer(&model_v);
                     gfx.item_entity_buffer = gfx.make_vertex_buffer(&item_v);
@@ -3514,7 +3780,27 @@ impl ApplicationHandler for App {
                         gfx.render(&camera, clear);
                     } else if self.menu_open {
                         // Pause menu replaces the HUD; highlight the hovered button.
-                        let buttons: &[&str] = if self.controls_help_open {
+                        let option_labels = [
+                            format!("FOV: {}", self.fov_degrees as i32),
+                            format!(
+                                "Sensitivity: {}%",
+                                (self.mouse_sensitivity / 0.12 * 100.0).round() as i32
+                            ),
+                            format!(
+                                "Fullscreen: {}",
+                                if gfx.window.fullscreen().is_some() {
+                                    "On"
+                                } else {
+                                    "Off"
+                                }
+                            ),
+                            "Done".to_string(),
+                        ];
+                        let option_refs: Vec<&str> =
+                            option_labels.iter().map(String::as_str).collect();
+                        let buttons: &[&str] = if self.options_open {
+                            &option_refs
+                        } else if self.controls_help_open {
                             &DONE_BUTTON
                         } else {
                             &MENU_BUTTONS
@@ -3527,8 +3813,12 @@ impl ApplicationHandler for App {
                         });
                         let (mc, mut mg, _) =
                             crab_render::menu_geometry(gui, buttons, hovered, aspect);
-                        if self.controls_help_open {
-                            let title = "Controls";
+                        if self.controls_help_open || self.options_open {
+                            let title = if self.options_open {
+                                "Options"
+                            } else {
+                                "Controls"
+                            };
                             let title_h = 0.085;
                             let title_w =
                                 gui.text_width(title) * (title_h / 8.0) / aspect.max(0.01);
@@ -3541,7 +3831,11 @@ impl ApplicationHandler for App {
                                 title_h,
                                 aspect,
                             );
-                            for (line, text) in CONTROL_HELP.iter().enumerate() {
+                            for (line, text) in CONTROL_HELP
+                                .iter()
+                                .enumerate()
+                                .filter(|_| !self.options_open)
+                            {
                                 let h = 0.043;
                                 let width = gui.text_width(text) * (h / 8.0) / aspect.max(0.01);
                                 crab_render::push_text(
@@ -4225,6 +4519,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn options_cycle_and_camera_apply_selected_fov() {
+        assert_eq!(next_choice(70.0, &FOV_CHOICES), 90.0);
+        assert_eq!(next_choice(110.0, &FOV_CHOICES), 60.0);
+        assert_eq!(next_choice(0.12, &SENSITIVITY_CHOICES), 0.18);
+
+        let camera = first_person_camera(
+            Vec3::ZERO,
+            0.0,
+            0.0,
+            16.0 / 9.0,
+            1.62,
+            90.0,
+            Perspective::FirstPerson,
+            0.0,
+        );
+        assert!((camera.fovy_radians - 90f32.to_radians()).abs() < f32::EPSILON);
+        let rear = first_person_camera(
+            Vec3::ZERO,
+            0.0,
+            0.0,
+            1.0,
+            1.62,
+            70.0,
+            Perspective::ThirdPersonBack,
+            2.0,
+        );
+        assert!(rear.eye.z < rear.target.z);
+        assert!((rear.target.z - rear.eye.z - 2.0).abs() < f32::EPSILON);
+        assert_eq!(
+            Perspective::FirstPerson.next(),
+            Perspective::ThirdPersonBack
+        );
+        assert_eq!(
+            Perspective::ThirdPersonFront.next(),
+            Perspective::FirstPerson
+        );
+    }
+
+    #[test]
     fn sky_tracks_day_night_and_storm_darkening() {
         let noon = sky_color(EnvironmentState {
             time_of_day: 6_000,
@@ -4327,6 +4660,14 @@ mod tests {
         );
         assert_eq!(vertices.len(), 12);
         assert!(vertices.iter().all(|vertex| vertex[0].is_finite()));
+    }
+
+    #[test]
+    fn item_shaped_entities_use_their_vanilla_item_sprite() {
+        assert_eq!(entity_item_sprite("ender_pearl"), Some("ender_pearl"));
+        assert_eq!(entity_item_sprite("eye_of_ender"), Some("ender_eye"));
+        assert_eq!(entity_item_sprite("small_fireball"), Some("fire_charge"));
+        assert_eq!(entity_item_sprite("zombie"), None);
     }
 
     #[test]

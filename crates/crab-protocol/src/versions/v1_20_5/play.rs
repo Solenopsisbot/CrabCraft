@@ -20,7 +20,10 @@ pub struct ComponentSlot {
     pub metadata: Option<Nbt>,
 }
 
-fn bounded_count<B: Buf>(src: &mut B, type_name: &'static str) -> Result<usize, ProtoError> {
+pub(crate) fn bounded_count<B: Buf>(
+    src: &mut B,
+    type_name: &'static str,
+) -> Result<usize, ProtoError> {
     let count = src.read_varint()?;
     if !(0..=MAX_COMPONENT_ENTRIES).contains(&count) {
         return Err(ProtoError::InvalidEnum {
@@ -31,12 +34,12 @@ fn bounded_count<B: Buf>(src: &mut B, type_name: &'static str) -> Result<usize, 
     Ok(count as usize)
 }
 
-fn skip_string<B: Buf>(src: &mut B) -> Result<(), ProtoError> {
+pub(crate) fn skip_string<B: Buf>(src: &mut B) -> Result<(), ProtoError> {
     let _ = src.read_string(32_767)?;
     Ok(())
 }
 
-fn skip_optional<B: Buf>(
+pub(crate) fn skip_optional<B: Buf>(
     src: &mut B,
     f: impl FnOnce(&mut B) -> Result<(), ProtoError>,
 ) -> Result<(), ProtoError> {
@@ -46,7 +49,7 @@ fn skip_optional<B: Buf>(
     Ok(())
 }
 
-fn skip_holder_set<B: Buf>(src: &mut B) -> Result<(), ProtoError> {
+pub(crate) fn skip_holder_set<B: Buf>(src: &mut B) -> Result<(), ProtoError> {
     let count = src.read_varint()?;
     if count == 0 {
         skip_string(src)
@@ -63,7 +66,7 @@ fn skip_holder_set<B: Buf>(src: &mut B) -> Result<(), ProtoError> {
     }
 }
 
-fn skip_block_predicate<B: Buf>(src: &mut B) -> Result<(), ProtoError> {
+pub(crate) fn skip_block_predicate<B: Buf>(src: &mut B) -> Result<(), ProtoError> {
     skip_optional(src, skip_holder_set)?;
     skip_optional(src, |src| {
         for _ in 0..bounded_count(src, "block predicate property count")? {
@@ -81,7 +84,7 @@ fn skip_block_predicate<B: Buf>(src: &mut B) -> Result<(), ProtoError> {
     Ok(())
 }
 
-fn skip_effect_detail<B: Buf>(src: &mut B, depth: usize) -> Result<(), ProtoError> {
+pub(crate) fn skip_effect_detail<B: Buf>(src: &mut B, depth: usize) -> Result<(), ProtoError> {
     if depth > 32 {
         return Err(ProtoError::NbtTooDeep);
     }
@@ -96,7 +99,7 @@ fn skip_effect_detail<B: Buf>(src: &mut B, depth: usize) -> Result<(), ProtoErro
     Ok(())
 }
 
-fn skip_firework_explosion<B: Buf>(src: &mut B) -> Result<(), ProtoError> {
+pub(crate) fn skip_firework_explosion<B: Buf>(src: &mut B) -> Result<(), ProtoError> {
     let _ = src.read_varint()?;
     for _ in 0..bounded_count(src, "firework color count")? {
         let _ = src.read_i32()?;
@@ -109,7 +112,7 @@ fn skip_firework_explosion<B: Buf>(src: &mut B) -> Result<(), ProtoError> {
     Ok(())
 }
 
-fn skip_inline_trim_material<B: Buf>(src: &mut B) -> Result<(), ProtoError> {
+pub(crate) fn skip_inline_trim_material<B: Buf>(src: &mut B) -> Result<(), ProtoError> {
     skip_string(src)?;
     let _ = src.read_varint()?;
     for _ in 0..bounded_count(src, "trim override count")? {
@@ -120,7 +123,7 @@ fn skip_inline_trim_material<B: Buf>(src: &mut B) -> Result<(), ProtoError> {
     Ok(())
 }
 
-fn skip_inline_trim_pattern<B: Buf>(src: &mut B) -> Result<(), ProtoError> {
+pub(crate) fn skip_inline_trim_pattern<B: Buf>(src: &mut B) -> Result<(), ProtoError> {
     skip_string(src)?;
     let _ = src.read_varint()?;
     let _ = nbt::read_anonymous_nbt(src)?;
@@ -128,7 +131,7 @@ fn skip_inline_trim_pattern<B: Buf>(src: &mut B) -> Result<(), ProtoError> {
     Ok(())
 }
 
-fn skip_registry_holder<B: Buf>(
+pub(crate) fn skip_registry_holder<B: Buf>(
     src: &mut B,
     inline: impl FnOnce(&mut B) -> Result<(), ProtoError>,
 ) -> Result<(), ProtoError> {
@@ -138,7 +141,7 @@ fn skip_registry_holder<B: Buf>(
     Ok(())
 }
 
-fn skip_sound_holder<B: Buf>(src: &mut B) -> Result<(), ProtoError> {
+pub(crate) fn skip_sound_holder<B: Buf>(src: &mut B) -> Result<(), ProtoError> {
     skip_registry_holder(src, |src| {
         skip_string(src)?;
         skip_optional(src, |src| {
@@ -449,7 +452,7 @@ pub fn read_component_slot_768<B: Buf>(src: &mut B) -> Result<ComponentSlot, Pro
     })
 }
 
-fn skip_consume_effect_768<B: Buf>(src: &mut B) -> Result<(), ProtoError> {
+pub(crate) fn skip_consume_effect_768<B: Buf>(src: &mut B) -> Result<(), ProtoError> {
     match src.read_varint()? {
         0 => {
             for _ in 0..bounded_count(src, "consume potion effect count")? {

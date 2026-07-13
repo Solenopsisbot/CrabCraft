@@ -210,6 +210,66 @@ pub fn player_geometry() -> EntityGeometry {
     }
 }
 
+/// Built-in Java-style boat hull used because Mojang's Bedrock sample pack
+/// does not publish boat geometry. Textures still come from the user's Java
+/// client jar. Chest boats add a separate cargo box to the shared hull.
+#[must_use]
+pub fn boat_geometry(chest: bool) -> EntityGeometry {
+    let cube = |name: &str, origin, size, uv| Bone {
+        name: name.to_string(),
+        pivot: [0.0; 3],
+        rotation: [0.0; 3],
+        cubes: vec![Cube {
+            origin,
+            size,
+            uv,
+            mirror: false,
+        }],
+    };
+    let mut bones = vec![
+        cube("bottom", [-14.0, 0.0, -8.0], [28.0, 2.0, 16.0], [0.0, 0.0]),
+        cube(
+            "left_side",
+            [-14.0, 2.0, -8.0],
+            [2.0, 6.0, 16.0],
+            [0.0, 18.0],
+        ),
+        cube(
+            "right_side",
+            [12.0, 2.0, -8.0],
+            [2.0, 6.0, 16.0],
+            [36.0, 18.0],
+        ),
+        cube("front", [-12.0, 2.0, -8.0], [24.0, 6.0, 2.0], [0.0, 40.0]),
+        cube("back", [-12.0, 2.0, 6.0], [24.0, 6.0, 2.0], [52.0, 40.0]),
+        cube(
+            "left_paddle",
+            [-18.0, 4.0, -1.0],
+            [18.0, 1.0, 2.0],
+            [0.0, 52.0],
+        ),
+        cube(
+            "right_paddle",
+            [0.0, 4.0, -1.0],
+            [18.0, 1.0, 2.0],
+            [40.0, 52.0],
+        ),
+    ];
+    if chest {
+        bones.push(cube(
+            "chest",
+            [-7.0, 3.0, -5.0],
+            [14.0, 10.0, 10.0],
+            [80.0, 0.0],
+        ));
+    }
+    EntityGeometry {
+        texture_width: 128.0,
+        texture_height: 64.0,
+        bones,
+    }
+}
+
 /// Maps a registry entity name to its bedrock geometry file base name and jar
 /// texture path (relative to `textures/entity/`), for the mobs whose asset
 /// names differ from the entity name — shared models (e.g. `cave_spider` uses
@@ -242,6 +302,18 @@ pub fn entity_alias(name: &str) -> Option<(&'static str, &'static str)> {
         "ocelot" => ("ocelot", "cat/ocelot"),
         "leash_knot" => ("leash_knot", "lead_knot"),
         "shulker_bullet" => ("shulker_bullet", "shulker/spark"),
+        "breeze_wind_charge" => ("wind_charge", "projectiles/wind_charge"),
+        "wind_charge" => ("wind_charge", "projectiles/wind_charge"),
+        "evoker_fangs" => ("evocation_fang", "illager/evoker_fangs"),
+        "wither_skull" => ("wither_skull", "wither/wither_invulnerable"),
+        "bogged" => ("bogged", "skeleton/bogged"),
+        // 1.21.5 split these classic textures into climate variants. The
+        // loader still tries the old direct paths after these aliases for
+        // earlier supported jars.
+        "chicken" => ("chicken", "chicken/temperate_chicken"),
+        "cow" => ("cow", "cow/temperate_cow"),
+        "pig" => ("pig", "pig/temperate_pig"),
+        "llama_spit" => ("llama_spit", "llama/spit"),
         // Fish textures share the `fish` directory in Java resource packs.
         "cod" => ("cod", "fish/cod"),
         "pufferfish" => ("pufferfish", "fish/pufferfish"),
@@ -279,6 +351,26 @@ pub fn entity_alias(name: &str) -> Option<(&'static str, &'static str)> {
         "turtle" => ("turtle", "turtle/big_sea_turtle"),
         "vex" => ("vex", "illager/vex"),
         "armor_stand" => ("armor_stand", "armorstand/wood"),
+        "acacia_boat" => ("boat", "boat/acacia"),
+        "birch_boat" => ("boat", "boat/birch"),
+        "cherry_boat" => ("boat", "boat/cherry"),
+        "dark_oak_boat" => ("boat", "boat/dark_oak"),
+        "jungle_boat" => ("boat", "boat/jungle"),
+        "mangrove_boat" => ("boat", "boat/mangrove"),
+        "oak_boat" => ("boat", "boat/oak"),
+        "pale_oak_boat" => ("boat", "boat/pale_oak"),
+        "spruce_boat" => ("boat", "boat/spruce"),
+        "bamboo_raft" => ("boat", "boat/bamboo"),
+        "acacia_chest_boat" => ("chest_boat", "chest_boat/acacia"),
+        "birch_chest_boat" => ("chest_boat", "chest_boat/birch"),
+        "cherry_chest_boat" => ("chest_boat", "chest_boat/cherry"),
+        "dark_oak_chest_boat" => ("chest_boat", "chest_boat/dark_oak"),
+        "jungle_chest_boat" => ("chest_boat", "chest_boat/jungle"),
+        "mangrove_chest_boat" => ("chest_boat", "chest_boat/mangrove"),
+        "oak_chest_boat" => ("chest_boat", "chest_boat/oak"),
+        "pale_oak_chest_boat" => ("chest_boat", "chest_boat/pale_oak"),
+        "spruce_chest_boat" => ("chest_boat", "chest_boat/spruce"),
+        "bamboo_chest_raft" => ("chest_boat", "chest_boat/bamboo"),
         _ => return None,
     })
 }
@@ -362,8 +454,12 @@ pub fn load_entity_atlas(
         // The player has no bedrock geo file; use the hardcoded humanoid.
         // Shared-model mobs (cave_spider, horses, …) load an aliased geo file.
         let geo_name = entity_alias(name).map_or(name.as_str(), |(g, _)| g);
-        let geo = load_geometry(models_dir, geo_name)
-            .or_else(|| (name == "player").then(player_geometry));
+        let geo = match geo_name {
+            "boat" => Some(boat_geometry(false)),
+            "chest_boat" => Some(boat_geometry(true)),
+            _ => load_geometry(models_dir, geo_name)
+                .or_else(|| (name == "player").then(player_geometry)),
+        };
         if let (Some(geo), Some((rgba, w, h))) = (geo, load_entity_texture(jar_path, name)) {
             max_w = max_w.max(w);
             max_h = max_h.max(h);
@@ -461,8 +557,11 @@ mod tests {
             Some(("arrow", "projectiles/spectral_arrow"))
         );
         assert_eq!(entity_alias("tnt_minecart"), Some(("minecart", "minecart")));
+        assert_eq!(entity_alias("oak_boat"), Some(("boat", "boat/oak")));
+        assert_eq!(boat_geometry(false).cube_count(), 7);
+        assert_eq!(boat_geometry(true).cube_count(), 8);
+        assert_eq!(entity_alias("cow"), Some(("cow", "cow/temperate_cow")));
         // Unaliased mobs fall through to the name-based defaults.
-        assert_eq!(entity_alias("cow"), None);
         assert_eq!(entity_alias("zombie"), None);
     }
 }

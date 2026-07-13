@@ -11,6 +11,7 @@ pub mod v1_20_5;
 pub mod v1_21;
 pub mod v1_21_2;
 pub mod v1_21_4;
+pub mod v1_21_5;
 
 /// Protocol number for Minecraft 1.20 and 1.20.1.
 pub const PROTOCOL_1_20_1: i32 = 763;
@@ -26,3 +27,5 @@ pub const PROTOCOL_1_21: i32 = 767;
 pub const PROTOCOL_1_21_2: i32 = 768;
 /// Java Edition 1.21.4.
 pub const PROTOCOL_1_21_4: i32 = 769;
+/// Java Edition 1.21.5.
+pub const PROTOCOL_1_21_5: i32 = 770;
