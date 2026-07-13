@@ -63,6 +63,14 @@ the 768 map; packets with new bodies or semantic timing use dedicated codecs and
 unmapped sends. This keeps older packet structs honest and makes the next-version
 diff auditable.
 
+Protocol 770 has its own allow-listed clientbound and serverbound maps because
+the experience-orb removal and game-test insertions shift separate numeric
+ranges. Changed bodies stay at explicit version boundaries: chunk decoding owns
+the typed heightmap-array prefix, the chat codec owns its checksum trailer, and
+the item codec owns the reorganized 96-entry component registry. Generated
+1.21.5 block/state, item, and entity tables are selected before either world or
+presentation code resolves numeric IDs.
+
 ## Crate boundaries
 
 - `crab-protocol`: byte codecs, classic/network NBT, packet traits, per-version packets.

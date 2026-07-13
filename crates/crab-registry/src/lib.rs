@@ -21,17 +21,20 @@ mod blocks_1_20_5;
 mod blocks_1_21;
 mod blocks_1_21_3;
 mod blocks_1_21_4;
+mod blocks_1_21_5;
 mod entities_1_20_1;
 mod entities_1_20_3;
 mod entities_1_20_5;
 mod entities_1_21_3;
 mod entities_1_21_4;
+mod entities_1_21_5;
 mod items_1_20_1;
 mod items_1_20_3;
 mod items_1_20_5;
 mod items_1_21;
 mod items_1_21_3;
 mod items_1_21_4;
+mod items_1_21_5;
 
 pub use blocks_1_20_1::BLOCKS_1_20_1;
 pub use blocks_1_20_2::BLOCKS_1_20_2;
@@ -40,17 +43,20 @@ pub use blocks_1_20_5::BLOCKS_1_20_5;
 pub use blocks_1_21::BLOCKS_1_21;
 pub use blocks_1_21_3::BLOCKS_1_21_3;
 pub use blocks_1_21_4::BLOCKS_1_21_4;
+pub use blocks_1_21_5::BLOCKS_1_21_5;
 pub use entities_1_20_1::ENTITIES_1_20_1;
 pub use entities_1_20_3::ENTITIES_1_20_3;
 pub use entities_1_20_5::ENTITIES_1_20_5;
 pub use entities_1_21_3::ENTITIES_1_21_3;
 pub use entities_1_21_4::ENTITIES_1_21_4;
+pub use entities_1_21_5::ENTITIES_1_21_5;
 pub use items_1_20_1::ITEMS_1_20_1;
 pub use items_1_20_3::ITEMS_1_20_3;
 pub use items_1_20_5::ITEMS_1_20_5;
 pub use items_1_21::ITEMS_1_21;
 pub use items_1_21_3::ITEMS_1_21_3;
 pub use items_1_21_4::ITEMS_1_21_4;
+pub use items_1_21_5::ITEMS_1_21_5;
 
 static REGISTRY_PROFILE: AtomicU8 = AtomicU8::new(0);
 
@@ -65,6 +71,7 @@ pub fn set_protocol(protocol: i32) {
             767 => 4,
             768 => 5,
             769 => 6,
+            770 => 7,
             _ => 0,
         },
         Ordering::Relaxed,
@@ -81,6 +88,7 @@ pub fn blocks() -> &'static [BlockDef] {
         4 => BLOCKS_1_21,
         5 => BLOCKS_1_21_3,
         6 => BLOCKS_1_21_4,
+        7 => BLOCKS_1_21_5,
         _ => BLOCKS_1_20_1,
     }
 }
@@ -94,6 +102,7 @@ pub fn items() -> &'static [ItemDef] {
         4 => ITEMS_1_21,
         5 => ITEMS_1_21_3,
         6 => ITEMS_1_21_4,
+        7 => ITEMS_1_21_5,
         _ => ITEMS_1_20_1,
     }
 }
@@ -107,6 +116,7 @@ pub fn entities() -> &'static [EntityDef] {
         4 => ENTITIES_1_20_5,
         5 => ENTITIES_1_21_3,
         6 => ENTITIES_1_21_4,
+        7 => ENTITIES_1_21_5,
         _ => ENTITIES_1_20_1,
     }
 }
@@ -1150,5 +1160,33 @@ mod tests {
                 .id,
             29
         );
+
+        assert_eq!(
+            ITEMS_1_21_5
+                .iter()
+                .find(|item| item.name == "blue_egg")
+                .unwrap()
+                .id,
+            970
+        );
+        assert_eq!(
+            ITEMS_1_21_5
+                .iter()
+                .find(|item| item.name == "mace")
+                .unwrap()
+                .id,
+            1155
+        );
+        assert_eq!(
+            BLOCKS_1_21_5
+                .iter()
+                .find(|block| block.name == "minecraft:firefly_bush")
+                .unwrap()
+                .default_state,
+            27_913
+        );
+        assert!(ENTITIES_1_21_5
+            .iter()
+            .any(|entity| entity.name == "lingering_potion"));
     }
 }

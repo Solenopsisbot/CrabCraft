@@ -23,7 +23,11 @@ remains the detailed source of truth.
   split inventory updates, all 67 item components, and official 1.21.3 live
   core/component validation.
 - Version-selected generated block/state, item, and entity registries for the
-  763 through 769 wire profiles.
+  763 through 770 wire profiles.
+- Protocol 770 for Java Edition 1.21.5, including Spring to Life registries,
+  shifted game-test/play packet maps, typed chunk heightmap arrays, the chat
+  checksum trailer, all 96 reorganized item components, and official-server
+  core plus component-rich inventory validation.
 - Protocol-aware entity metadata components and scoreboard teams, including
   team prefixes/suffixes in sidebar and Tab-list names.
 - UUID-addressed server resource-pack stacks that can remove and rebuild any

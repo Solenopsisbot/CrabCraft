@@ -121,6 +121,35 @@ impl Chunk {
         Self::parse_with_nbt(buf, section_count, true)
     }
 
+    /// Decodes protocol 770's chunk form. Heightmaps are a bounded array of
+    /// typed long arrays rather than network NBT; the section byte array is
+    /// otherwise unchanged.
+    pub fn parse_770<B: Buf>(buf: &mut B, section_count: usize) -> Result<Self, ProtoError> {
+        let x = buf.read_i32()?;
+        let z = buf.read_i32()?;
+        let heightmap_count = buf.read_varint()?;
+        if !(0..=256).contains(&heightmap_count) {
+            return Err(ProtoError::InvalidEnum {
+                type_name: "protocol 770 chunk heightmap count",
+                value: i64::from(heightmap_count),
+            });
+        }
+        for _ in 0..heightmap_count {
+            let _heightmap_type = buf.read_varint()?;
+            let data_count = buf.read_varint()?;
+            if !(0..=4096).contains(&data_count) {
+                return Err(ProtoError::InvalidEnum {
+                    type_name: "protocol 770 heightmap long count",
+                    value: i64::from(data_count),
+                });
+            }
+            for _ in 0..data_count {
+                let _ = buf.read_i64()?;
+            }
+        }
+        Self::parse_section_data(buf, x, z, section_count)
+    }
+
     fn parse_with_nbt<B: Buf>(
         buf: &mut B,
         section_count: usize,
@@ -135,6 +164,15 @@ impl Chunk {
             nbt::read_nbt(buf)?
         };
 
+        Self::parse_section_data(buf, x, z, section_count)
+    }
+
+    fn parse_section_data<B: Buf>(
+        buf: &mut B,
+        x: i32,
+        z: i32,
+        section_count: usize,
+    ) -> Result<Self, ProtoError> {
         let data = buf.read_byte_array()?;
         let mut cursor: &[u8] = &data;
         let mut sections = Vec::with_capacity(section_count);
@@ -325,5 +363,24 @@ mod tests {
         assert_eq!(s.block_state(1, 2, 3), 42);
         assert_eq!(s.block_state(0, 0, 0), 0);
         assert!(matches!(s.blocks, BlockStates::Array(_)));
+    }
+
+    #[test]
+    fn protocol_770_heightmap_arrays_preserve_chunk_alignment() {
+        let mut bytes = Vec::new();
+        bytes.put_i32(-4);
+        bytes.put_i32(7);
+        bytes.put_varint(1); // one heightmap
+        bytes.put_varint(2); // registry type id
+        bytes.put_varint(2); // two packed longs
+        bytes.put_i64(11);
+        bytes.put_i64(22);
+        bytes.put_varint(0); // empty section byte array (zero sections in fixture)
+
+        let mut input = bytes.as_slice();
+        let chunk = Chunk::parse_770(&mut input, 0).unwrap();
+        assert_eq!((chunk.x, chunk.z), (-4, 7));
+        assert!(chunk.sections.is_empty());
+        assert!(input.is_empty());
     }
 }
