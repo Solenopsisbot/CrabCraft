@@ -25,7 +25,8 @@ pub use hud::{
     simple_container_slot_rect, status_effect_geometry, HudFrame, HudPipelines,
 };
 pub use mesh::{
-    block_item_mesh, box_mesh, entity_mesh, entity_mesh_with_pose, mesh_region, Mesh, Vertex,
+    block_item_mesh, block_state_item_mesh, box_mesh, entity_armour_mesh, entity_mesh,
+    entity_mesh_with_pose, item_model_mesh, mesh_region, Mesh, Vertex,
 };
 pub use renderer::{
     build_block_pipeline, render_to_png, render_to_rgba, upload_atlas, upload_texture,

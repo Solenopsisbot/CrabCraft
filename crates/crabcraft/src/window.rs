@@ -15,10 +15,11 @@ use std::time::{Duration, Instant};
 use crab_assets::{Atlas, EntityAtlas, GuiAtlas, ItemAtlas};
 use crab_protocol::versions::v1_20_1::play::PlaceRecipe;
 use crab_render::{
-    block_item_mesh, box_mesh, build_block_pipeline, build_hud_pipelines, container_geometry,
-    entity_mesh, entity_mesh_with_pose, furnace_geometry, hud_geometry, inventory_geometry,
-    mesh_region, simple_container_geometry, status_effect_geometry, upload_atlas, upload_texture,
-    CameraUniform, HudPipelines, Vertex, DEPTH_FORMAT,
+    block_item_mesh, block_state_item_mesh, box_mesh, build_block_pipeline, build_hud_pipelines,
+    container_geometry, entity_armour_mesh, entity_mesh, entity_mesh_with_pose, furnace_geometry,
+    hud_geometry, inventory_geometry, item_model_mesh, mesh_region, simple_container_geometry,
+    status_effect_geometry, upload_atlas, upload_texture, CameraUniform, HudPipelines, Vertex,
+    DEPTH_FORMAT,
 };
 use glam::Vec3;
 use wgpu::util::DeviceExt;
@@ -2071,10 +2072,10 @@ impl App {
             // Falling Block's Spawn Entity data is a global block-state ID.
             // Render it at full block scale instead of using a generic entity
             // bounds box; gravity/position remain server-authoritative.
-            if let Some(block_name) = e.block_state.and_then(crab_registry::block_name) {
-                box_v.extend(block_item_mesh(
+            if let Some(state) = e.block_state {
+                box_v.extend(block_state_item_mesh(
                     &self.atlas,
-                    block_name,
+                    state,
                     [a.pos[0], a.pos[1] + 0.5, a.pos[2]],
                     1.0,
                     0.0,
@@ -2087,6 +2088,19 @@ impl App {
                     .ok()
                     .and_then(crab_registry::item_name)
                 {
+                    if let Some(vertices) = item_model_mesh(
+                        &self.item_atlas,
+                        name,
+                        [
+                            a.pos[0],
+                            a.pos[1] + 0.18 + (a.age * 2.0).sin() * 0.05,
+                            a.pos[2],
+                        ],
+                        a.age * 45.0,
+                    ) {
+                        item_v.extend(vertices);
+                        continue;
+                    }
                     if crab_registry::block_by_name(name).is_some() {
                         box_v.extend(block_item_mesh(
                             &self.atlas,
@@ -2185,6 +2199,31 @@ impl App {
                 else {
                     continue;
                 };
+                if let Some(model) = self.entity_atlas.models.get(&e.type_id) {
+                    let hurt_wobble = if a.hurt_time > 0.0 {
+                        (a.hurt_time * 45.0).sin() * 8.0
+                    } else {
+                        0.0
+                    };
+                    let armour = entity_armour_mesh(
+                        &model.geo,
+                        a.pos,
+                        white,
+                        a.phase,
+                        a.amount,
+                        e.scale,
+                        a.yaw + hurt_wobble,
+                        a.head_yaw,
+                        (a.swing_time / 0.35).clamp(0.0, 1.0),
+                        e.pose,
+                        slot,
+                        armour_color(name),
+                    );
+                    if !armour.is_empty() {
+                        box_v.extend(armour);
+                        continue;
+                    }
+                }
                 let radius = e.half_width * (1.0 - inset);
                 box_v.extend(box_mesh(
                     [
