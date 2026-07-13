@@ -54,6 +54,8 @@ Camera perspective is also window-local. F5 cycles first person and two
 third-person orbit directions; third-person views append the local humanoid to
 the model vertex stream using the same pose/walk/swing transforms as remote
 players while suppressing first-person hand quads.
+The camera arm is ray-tested against the world and shortened before projection,
+so both third-person directions stay on the player side of nearby solid blocks.
 
 Recipe UI state normalizes versioned declarations into the same crafting and
 stonecutter records. Protocols through 767 use namespaced recipe IDs; protocol

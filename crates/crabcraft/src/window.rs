@@ -160,6 +160,7 @@ fn first_person_camera(
     eye_height: f32,
     fov_degrees: f32,
     perspective: Perspective,
+    third_person_distance: f32,
 ) -> crab_render::Camera {
     let player_eye = player_pos + Vec3::new(0.0, eye_height, 0.0);
     let (yaw, pitch) = (yaw_deg.to_radians(), pitch_deg.to_radians());
@@ -170,8 +171,8 @@ fn first_person_camera(
     );
     let (eye, target) = match perspective {
         Perspective::FirstPerson => (player_eye, player_eye + dir),
-        Perspective::ThirdPersonBack => (player_eye - dir * 4.0, player_eye),
-        Perspective::ThirdPersonFront => (player_eye + dir * 4.0, player_eye),
+        Perspective::ThirdPersonBack => (player_eye - dir * third_person_distance, player_eye),
+        Perspective::ThirdPersonFront => (player_eye + dir * third_person_distance, player_eye),
     };
     crab_render::Camera {
         eye,
@@ -182,6 +183,48 @@ fn first_person_camera(
         znear: 0.1,
         zfar: 1000.0,
     }
+}
+
+fn third_person_camera_distance(
+    world: &crab_world::World,
+    player_pos: Vec3,
+    eye_height: f32,
+    yaw_deg: f32,
+    pitch_deg: f32,
+    perspective: Perspective,
+) -> f32 {
+    if perspective == Perspective::FirstPerson {
+        return 0.0;
+    }
+    let (yaw, pitch) = (yaw_deg.to_radians(), pitch_deg.to_radians());
+    let view = Vec3::new(
+        -yaw.sin() * pitch.cos(),
+        -pitch.sin(),
+        yaw.cos() * pitch.cos(),
+    );
+    let direction = if perspective == Perspective::ThirdPersonBack {
+        -view
+    } else {
+        view
+    };
+    let origin = player_pos + Vec3::Y * eye_height;
+    let Some(hit) = crab_physics::raycast(
+        world,
+        origin.as_dvec3().to_array(),
+        direction.as_dvec3().to_array(),
+        4.0,
+    ) else {
+        return 4.0;
+    };
+    let min = hit.block.map(f64::from);
+    let max = min.map(|value| value + 1.0);
+    crab_physics::ray_aabb(
+        origin.as_dvec3().to_array(),
+        direction.as_dvec3().to_array(),
+        min,
+        max,
+    )
+    .map_or(4.0, |distance| (distance as f32 - 0.2).clamp(0.25, 4.0))
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -3552,6 +3595,20 @@ impl ApplicationHandler for App {
                     }
                 }
                 box_v.extend(celestial_mesh(eye, environment, self.atlas.white_uv()));
+                let third_person_distance = third_person_camera_distance(
+                    &self.shared.world.lock().unwrap(),
+                    eye,
+                    if player.swimming || player.gliding {
+                        0.4
+                    } else if player.sneaking {
+                        1.27
+                    } else {
+                        EYE_HEIGHT
+                    },
+                    self.yaw,
+                    self.pitch,
+                    self.perspective,
+                );
                 if let Some(gfx) = self.gfx.as_mut() {
                     // Reconcile the surface with the window's real drawable size
                     // every frame. winit/macOS can deliver a stale initial size
@@ -3583,6 +3640,7 @@ impl ApplicationHandler for App {
                         eye_height,
                         self.fov_degrees,
                         self.perspective,
+                        third_person_distance,
                     );
                     gfx.box_entity_buffer = gfx.make_vertex_buffer(&box_v);
                     gfx.model_entity_buffer = gfx.make_vertex_buffer(&model_v);
@@ -4393,6 +4451,7 @@ mod tests {
             1.62,
             90.0,
             Perspective::FirstPerson,
+            0.0,
         );
         assert!((camera.fovy_radians - 90f32.to_radians()).abs() < f32::EPSILON);
         let rear = first_person_camera(
@@ -4403,8 +4462,10 @@ mod tests {
             1.62,
             70.0,
             Perspective::ThirdPersonBack,
+            2.0,
         );
         assert!(rear.eye.z < rear.target.z);
+        assert!((rear.target.z - rear.eye.z - 2.0).abs() < f32::EPSILON);
         assert_eq!(
             Perspective::FirstPerson.next(),
             Perspective::ThirdPersonBack

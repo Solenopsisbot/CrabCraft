@@ -71,7 +71,8 @@ tested for every supported profile:
   Spectator noclip, and **F main/offhand swapping** with local prediction
 - **Camera perspectives**: **F5** cycles first person, third-person rear, and
   third-person front views; third person renders the local animated player and
-  hides first-person hand overlays
+  hides first-person hand overlays, with camera distance pulled forward by
+  nearby blocks to avoid wall clipping
 - **Advanced movement**: sprint-swimming with low pose/eye height and
   equipped-Elytra fall-flying initiation with reduced glide gravity
 - **Vehicles**: local mount/dismount tracking, camera/seat synchronization,
