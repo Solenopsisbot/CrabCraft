@@ -6,6 +6,14 @@ repository contain only names, numeric IDs, dimensions, and state metadata.
 
 ## Runtime inputs
 
+For automatic setup, `cargo run -p crabcraft-launcher -- client` resolves the
+selected version through Mojang's version manifest, verifies downloads by their
+published SHA-1, downloads only the indexed audio objects needed by Crabcraft,
+and supplies all variables below. It also makes a sparse checkout of the entity
+model directory from Mojang's public `bedrock-samples` repository. Everything
+is stored under the gitignored `assets-cache/`; no Mojang content is copied into
+the source tree or included in builds.
+
 | Variable | Input | Used for |
 |---|---|---|
 | `CRABCRAFT_JAR` | A Java Edition client jar | Block/item textures and models, entity skins, GUI sprites, fonts, particles, and destroy stages |
@@ -36,16 +44,29 @@ Legacy family-specific model lookups remain a non-fatal fallback for incomplete
 or custom packs. A missing blockstate, model, or texture never causes a client
 jar to be copied or extracted into the repository.
 
+Water, bubble columns, and lava are vanilla special renderers and therefore do
+not have ordinary block model JSON. The atlas loader explicitly maps their
+`*_still` textures to top/bottom faces and `*_flow` textures to side faces;
+water retains biome tint and the renderer's translucent opacity.
+
 Item models use the same parent-chain resolver. For 1.21.4 and newer assets the
 loader starts at `assets/<namespace>/items/<path>.json`, follows plain models,
 and selects the context-free fallback of condition, select, and range-dispatch
 definitions. Generated flat models alpha-compose every declared `layerN`
 texture in order instead of discarding overlays. Items with resolved element
 geometry retain their inherited `ground` display rotation, translation, and
-scale when rendered as dropped entities; generated flat-layer items remain
+scale when rendered as dropped entities. The live window also fits resolved
+element and block-state meshes into depth-cleared inventory, hotbar, recipe,
+cursor, and first-person overlay passes; handheld tools receive their narrow
+vanilla-style presentation transform. Generated flat-layer items remain
 camera-facing sprites. Falling-block entities are different from dropped items:
 their Spawn Entity data is an exact global block-state ID, so they select that
 state's variant/multipart geometry rather than an inventory item model.
+
+The GUI atlas includes the vanilla `recipe_book.png` and `recipe_button.png`
+sheets from the user-provided client jar. Recipe backgrounds, cells, hover
+states, and the toggle use exact source rectangles; missing sheets retain a
+non-fatal colored fallback.
 
 At startup Crabcraft reports unresolved block/item model counts and missing or
 undecodable texture counts, with examples. A non-zero count usually means that

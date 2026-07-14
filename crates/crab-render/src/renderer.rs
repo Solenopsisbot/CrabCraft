@@ -89,19 +89,56 @@ pub fn build_block_pipeline(
         ],
     });
 
+    let pipeline = create_block_pipeline(
+        device,
+        color_format,
+        &camera_bgl,
+        &texture_bgl,
+        "block pipeline",
+        true,
+    );
+
+    (pipeline, camera_bgl, texture_bgl)
+}
+
+/// Builds an alpha-blended block pipeline that tests, but does not write,
+/// depth. Draw translucent geometry back-to-front with this pipeline after the
+/// opaque pass.
+pub fn build_translucent_pipeline(
+    device: &wgpu::Device,
+    color_format: wgpu::TextureFormat,
+    camera_bgl: &wgpu::BindGroupLayout,
+    texture_bgl: &wgpu::BindGroupLayout,
+) -> wgpu::RenderPipeline {
+    create_block_pipeline(
+        device,
+        color_format,
+        camera_bgl,
+        texture_bgl,
+        "translucent block pipeline",
+        false,
+    )
+}
+
+fn create_block_pipeline(
+    device: &wgpu::Device,
+    color_format: wgpu::TextureFormat,
+    camera_bgl: &wgpu::BindGroupLayout,
+    texture_bgl: &wgpu::BindGroupLayout,
+    label: &str,
+    depth_write_enabled: bool,
+) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("block shader"),
         source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
     });
-
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("pipeline layout"),
-        bind_group_layouts: &[&camera_bgl, &texture_bgl],
+        label: Some("block pipeline layout"),
+        bind_group_layouts: &[camera_bgl, texture_bgl],
         push_constant_ranges: &[],
     });
-
-    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("block pipeline"),
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(label),
         layout: Some(&pipeline_layout),
         vertex: wgpu::VertexState {
             module: &shader,
@@ -126,7 +163,7 @@ pub fn build_block_pipeline(
         },
         depth_stencil: Some(wgpu::DepthStencilState {
             format: DEPTH_FORMAT,
-            depth_write_enabled: true,
+            depth_write_enabled,
             depth_compare: wgpu::CompareFunction::Less,
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
@@ -134,9 +171,7 @@ pub fn build_block_pipeline(
         multisample: wgpu::MultisampleState::default(),
         multiview: None,
         cache: None,
-    });
-
-    (pipeline, camera_bgl, texture_bgl)
+    })
 }
 
 /// Uploads `atlas` as a GPU texture and builds its bind group for `layout`.

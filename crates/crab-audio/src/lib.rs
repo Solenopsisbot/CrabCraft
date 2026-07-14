@@ -458,6 +458,12 @@ pub fn attack_event() -> &'static str {
     "entity.player.attack.weak"
 }
 
+/// The sound event played when the local player collects an item entity.
+#[must_use]
+pub fn pickup_event() -> &'static str {
+    "entity.item.pickup"
+}
+
 /// Fire-and-forget OGG playback. A no-op (but still decode-checkable) when no
 /// audio output device is available.
 pub struct SoundPlayer {
@@ -554,6 +560,7 @@ mod tests {
         assert_eq!(hit_event("minecraft:oak_log"), "block.wood.hit");
         assert_eq!(place_event("minecraft:sand"), "block.sand.place");
         assert_eq!(step_event("minecraft:grass_block"), "block.grass.step");
+        assert_eq!(pickup_event(), "entity.item.pickup");
     }
 
     #[test]

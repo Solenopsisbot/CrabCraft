@@ -72,8 +72,12 @@ yaw, and Pose metadata are combined when CPU mesh vertices are rebuilt. Protocol
 766+ uses the shifted Pose metadata serializer introduced with the 1.20.5
 particle-list insertion; older profiles retain the preceding serializer ID.
 
-The window renderer orders its frame as world geometry, HUD backgrounds, the
-inventory's depth-cleared 3D player viewport, then HUD item/text foregrounds.
+The window renderer partitions each chunk's triangles by vertex opacity. Opaque
+chunks and entities write depth first; translucent chunks are then sorted
+back-to-front and depth-tested without writing depth. This prevents hash-map
+iteration or camera motion from changing overlapping water/glass results. The
+rest of the frame is HUD backgrounds, depth-cleared 3D block/item overlays and
+the inventory player viewport, then HUD item/text foregrounds.
 The preview reuses the entity atlas and humanoid mesh but owns a separate camera
 uniform and a viewport derived from the vanilla inventory texture's pixel
 bounds. This keeps world depth from clipping the player and keeps slot icons and
@@ -82,12 +86,24 @@ tooltips above the model.
 Window-local presentation preferences stay outside authoritative game state.
 The pause/options UI updates camera FOV, mouse sensitivity, and the winit
 fullscreen mode immediately; none of those settings mutate network-owned
-`Shared` data or packet behavior.
+`Shared` data or packet behavior. The selected base FOV is eased toward a
+movement modifier for sneaking, sprinting, and flying so camera acceleration
+does not introduce an abrupt projection change. Focus regain resets frame/key
+timing, resizes the surface to the current drawable, and requests a frame
+immediately; a lost or outdated surface is reconfigured and reacquired in the
+same render attempt.
+
+Fluid and climbable detection resolve the active session's generated block
+registry, including the explicit `waterlogged` state property. Movement intent
+still crosses into the network thread through `Controls`; the window owns the
+double-tap-W timing latch, while the simulation owns sprint eligibility and
+vine/ladder vertical velocity.
 
 Camera perspective is also window-local. F5 cycles first person and two
 third-person orbit directions; third-person views append the local humanoid to
 the model vertex stream using the same pose/walk/swing transforms as remote
-players while suppressing first-person hand quads.
+players while suppressing first-person hand quads. Its body and head yaw both
+consume the live camera yaw, so rotating the view also rotates the local model.
 The camera arm is ray-tested against the world and shortened before projection,
 so both third-person directions stay on the player side of nearby solid blocks.
 
@@ -100,7 +116,16 @@ Inventory metadata is kept parallel to lightweight, copyable item stacks for bot
 the player inventory and an open server container. Protocol 768's recursive bundle
 component decoder projects nested IDs/counts into that metadata; the window layer
 uses it for tooltip selection while the network layer owns the version-specific
-selection packet.
+selection packet. Local click prediction mirrors the player-owned tail of an
+open container back into the persistent inventory snapshot immediately, so a
+crafted result updates the visible hotbar before the server confirmation.
+
+Dropped-item rendering keeps the server entity position authoritative while a
+short, bounded ballistic lookahead uses its decoded velocity and vanilla item
+gravity between 20 Hz updates. Collect-item packets remain network-owned and
+only enqueue `entity.item.pickup` when their collector ID matches the local
+player. Particle packets similarly append bounded presentation records to
+`Shared`; the window consumes those records as visible world meshes.
 
 Protocol 769 reuses 768's allow-listed clientbound ID map because the numeric IDs
 are stable, but branches at the payload boundary for changed fields. Its

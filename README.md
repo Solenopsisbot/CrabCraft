@@ -64,9 +64,11 @@ tested for every supported profile:
   with **textures loaded from your client jar** (atlas-stitched cube models +
   **element models** so slabs/stairs/plants/lanterns render as real shapes +
   vanilla-derived omitted-face UVs + namespaced resource-pack references +
-  grass/foliage tint); offscreen mode + a live windowed viewer
+  grass/foliage tint), with opaque-first and back-to-front translucent passes
+  so water/glass appearance is stable while moving the camera; offscreen mode
+  + a live windowed viewer
 - **Player control**: first-person WASD/jump/look in the window, driven through
-  the physics sim and sent to the server, with **Control sprint** and
+  the physics sim and sent to the server, with **Control or double-tap W sprint** and
   **Shift sneak** (including crouched speed, eye height, and server pose state),
   plus reliable vanilla-style **double-Space Creative/Spectator flight**,
   Spectator noclip, and **F main/offhand swapping** with local prediction
@@ -74,18 +76,20 @@ tested for every supported profile:
   third-person front views; third person renders the local animated player and
   hides first-person hand overlays, with camera distance pulled forward by
   nearby blocks to avoid wall clipping
-- **Advanced movement**: sprint-swimming with low pose/eye height and
-  equipped-Elytra fall-flying initiation with reduced glide gravity
+- **Advanced movement**: sprint-swimming with low pose/eye height,
+  vine/ladder climbing, speed-sensitive camera FOV, and equipped-Elytra
+  fall-flying initiation with reduced glide gravity
 - **Vehicles**: local mount/dismount tracking, camera/seat synchronization,
   server-authoritative ridden-entity movement, horse-style steering/jump input,
   and predicted boat turning, travel, and individual paddle controls
-- **Fluid movement**: water/lava detection, reduced movement, buoyant gravity,
-  terminal speed, **Space** ascent, and **Shift** descent
+- **Fluid movement**: water/lava and waterlogged-block detection, reduced
+  movement, buoyant gravity, terminal speed, **Space** ascent, and **Shift** descent
 - **World ambience**: server-synchronized day/night sky brightness plus
   rain/thunder darkening from vanilla game-state events, with matching dynamic
   terrain illumination and depth-tested moving sun/moon geometry
 - **Particles and fluids**: bounded server-particle simulation with motion,
-  gravity, lifetime, and distance filtering, plus alpha-blended water/lava
+  gravity, lifetime, distance filtering, and visible world geometry, plus
+  alpha-blended water/lava and inset water surfaces inside waterlogged blocks
  - **Block editing**: raycast-targeted **breaking** and **placing**, reconciled
    with the server, with the **destroy-stage crack overlay** animating on the
    block you're mining
@@ -102,10 +106,12 @@ tested for every supported profile:
 - **Entity presentation**: packet-driven arm swings, hurt reactions, independent
   head rotation, metadata-driven crouch/swim/glide/sleep/death/sit poses,
   main/offhand items, visible material-coloured armour layers,
-  bobbing/rotating 3D per-face dropped block models, and full-scale falling
-  blocks selected from the server's exact block-state ID
-- **First-person presentation**: visible main/offhand items with attack/use swing
-  motion, including immediate feedback when swapping hands
+  bobbing/rotating 3D per-face dropped block models with short-horizon fall
+  prediction, and full-scale falling blocks selected from the server's exact
+  block-state ID
+- **First-person presentation**: resolved 3D block/item models in both hands,
+  tool-specific transforms, and attack/use swing motion, including immediate
+  feedback when swapping hands
 - **Maps**: authoritative map IDs, scale/lock state, partial pixel updates,
   markers and labels, plus a two-handed filled-map view using vanilla map-color
   shading when a map is held
@@ -124,10 +130,13 @@ tested for every supported profile:
   request automatically
 - **HUD**: rendered with the **real Minecraft GUI textures** + bitmap font —
   hotbar widget (number-key/scroll selection), **hearts/hunger + XP bar & level**
-  (from `icons.png`), and **stack-size numbers** on items
+  (from `icons.png`) with pixel-correct aspect, and **stack-size numbers** on
+  slot and cursor-held items
 - **Inventory**: open with **E** (real container texture); **click or Shift-click
   to move/swap items** (left/right-click semantics) across all 46 slots — including the
-  **2×2 crafting** grid (the server returns the result) and **armour** slots
+  **2×2 crafting** grid (the server returns the result) and **armour** slots;
+  predicted crafting/container changes immediately mirror into the hotbar and
+  every resolved block/item uses its depth-bearing model in slots
 - **Containers**: server-opened chests, barrels, ender chests, and shulker boxes
   use their vanilla 1–6 row GUI, with clicks, Shift-click, and close synchronization
 - **Furnaces**: furnace, blast-furnace, and smoker GUIs with input/fuel/output
@@ -145,8 +154,9 @@ tested for every supported profile:
   recipes with their real result-item icons
 - **Crafting recipe book**: shaped/shapeless declarations and server unlocks
   are retained, filtered to the active 2×2 or 3×3 grid, displayed as a paged
-  result-icon panel, and placed authoritatively (Shift requests craft-all),
-  including protocol 768's numeric recipe-display add/remove packets
+  panel using the vanilla recipe-book/button sheets and 3D result models, and
+  placed authoritatively (Shift requests craft-all), including protocol 768's
+  numeric recipe-display add/remove packets
 - **Bundles**: protocol 768 retains nested component stacks, shows an interactive
   contents tooltip, and sends the selected nested item when scrolling over a bundle
 - **Status effects**: authoritative add/remove/expiry tracking with Speed,
@@ -156,7 +166,8 @@ tested for every supported profile:
   holding blocks, air-use for food/bows/buckets/shields, and release-use packets
 - **Pause/options menus**: **Esc** opens a menu with the vanilla button sprites,
   an in-game controls reference, and live FOV, mouse-sensitivity, and fullscreen
-  settings
+  settings; focus regain immediately refreshes the drawable and resets stale
+  frame/key timing after Alt-Tab
 - **Chat & commands**: **T** to chat, **/** for a command; messages send (chat +
   Chat Command packets) and incoming system chat shows in an on-screen log
 - **Server overlays**: action-bar text, timed titles/subtitles, stacked boss
@@ -167,7 +178,8 @@ tested for every supported profile:
    (`block.<group>.<event>`) so each block uses its correct sound group — loaded
    from your launcher's asset store via `rodio` (set `CRABCRAFT_ASSETS`)
   plus server-issued registered/custom sound events (mob ambience, weather,
-  portals, UI, and world effects) resolved through the 1.20.1 sound registry
+  portals, UI, and world effects) resolved through the 1.20.1 sound registry,
+  plus the local item-pickup event from the authoritative collect-item packet
 - **Online mode**: AES-128-CFB8 encryption + the Minecraft server hash + RSA
   handshake, with Microsoft device-code login (see caveats below)
 
@@ -208,6 +220,38 @@ See [Architecture](docs/ARCHITECTURE.md) for data flow and crate boundaries,
 
 Requires a recent stable Rust toolchain.
 
+The easiest way to launch a fully textured client with sounds and 3D entity
+models is the asset-aware launcher. On its first run it downloads the selected
+official client jar and sound objects plus Mojang's public Bedrock samples into
+the ignored `assets-cache/` directory; later runs reuse SHA-1-verified files.
+
+```sh
+cargo run -p crabcraft-launcher -- client
+cargo run -p crabcraft-launcher -- client play.example.net:25565 Ferris
+```
+
+It can also download and run the matching vanilla Java server. Read the
+[Minecraft EULA](https://www.minecraft.net/eula), then explicitly accept it on
+the first run. `--offline` is convenient for a private localhost test server;
+do not expose an offline-mode server to untrusted networks.
+
+```sh
+cargo run -p crabcraft-launcher -- server --accept-eula --offline
+```
+
+Start a private offline-mode localhost server and the client together with
+`both`. It waits until the server is ready and stops the server cleanly when the
+client exits:
+
+```sh
+cargo run -p crabcraft-launcher -- both --accept-eula
+cargo run -p crabcraft-launcher -- both --accept-eula --username Ferris
+```
+
+Both commands accept `--version VERSION` (default `1.20.1`). The client command
+forwards remaining arguments as `[ADDR] [USERNAME]`; the server command forwards
+remaining arguments to Java. Java must be installed to run a server.
+
 ```sh
 cargo build
 cargo test --workspace
@@ -243,7 +287,7 @@ models, and minecart variants are resolved explicitly; entities without both a
 loaded model and texture render as coloured registry-sized boxes. See the
 [asset pipeline](docs/ASSETS.md) for resolution and licensing details.
 
-Windowed controls: **WASD** move · **Space** jump / double-tap to fly when allowed
+Windowed controls: **WASD** move · **Control / double-tap W** sprint · **Space** jump / double-tap to fly when allowed
 · **F** swap main/offhand
 · **mouse** (or arrow keys)
 look · **left-click** attack a mob in your sights, else break the targeted block

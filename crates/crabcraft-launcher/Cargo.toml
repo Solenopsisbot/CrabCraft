@@ -1,0 +1,19 @@
+[package]
+name = "crabcraft-launcher"
+description = "Asset-aware launcher for the Crabcraft client and a local vanilla server."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "crabcraft-launcher"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde.workspace = true
+serde_json.workspace = true
+sha1 = "0.10"
+tokio.workspace = true

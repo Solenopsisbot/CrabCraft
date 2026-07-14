@@ -29,6 +29,6 @@ pub use mesh::{
     entity_mesh_with_pose, item_model_mesh, mesh_region, mesh_region_with_registry, Mesh, Vertex,
 };
 pub use renderer::{
-    build_block_pipeline, render_to_png, render_to_rgba, upload_atlas, upload_texture,
-    CameraUniform, ATLAS_FORMAT, DEPTH_FORMAT,
+    build_block_pipeline, build_translucent_pipeline, render_to_png, render_to_rgba, upload_atlas,
+    upload_texture, CameraUniform, ATLAS_FORMAT, DEPTH_FORMAT,
 };

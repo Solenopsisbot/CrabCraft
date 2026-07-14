@@ -58,6 +58,7 @@ const TITLE_TIME: i32 = 0x60;
 const ENTITY_SOUND: i32 = 0x61;
 const SOUND: i32 = 0x62;
 const PLAYER_LIST_HEADER: i32 = 0x65;
+const COLLECT_ITEM: i32 = 0x67;
 const ENTITY_TELEPORT: i32 = 0x68;
 const ENTITY_EFFECT: i32 = 0x6c;
 const DECLARE_RECIPES: i32 = 0x6d;
@@ -307,6 +308,7 @@ fn clientbound_768(wire: i32) -> i32 {
         0x6f => SOUND,
         0x73 => SystemChat::ID,
         0x74 => PLAYER_LIST_HEADER,
+        0x76 => COLLECT_ITEM,
         0x77 => ENTITY_TELEPORT,
         0x7d => ENTITY_EFFECT,
         0x7e => DECLARE_RECIPES,

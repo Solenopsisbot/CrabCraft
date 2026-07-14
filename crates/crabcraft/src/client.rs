@@ -63,6 +63,7 @@ const ID_MOVE_LOOK: i32 = 0x2c;
 const ID_VEHICLE_MOVE: i32 = 0x2e;
 const ID_ENTITY_ROTATION: i32 = 0x2d;
 const ID_ENTITY_TELEPORT: i32 = 0x68;
+const ID_COLLECT_ITEM: i32 = 0x67;
 const ID_ENTITY_HEAD_ROTATION: i32 = 0x42;
 const ID_ENTITY_VELOCITY: i32 = 0x54;
 const ID_ENTITY_EQUIPMENT: i32 = 0x55;
@@ -616,7 +617,12 @@ enum FluidKind {
     Lava,
 }
 
-fn fluid_kind_at(world: &World, feet: [f64; 3], height: f64) -> Option<FluidKind> {
+fn fluid_kind_at(
+    registries: crab_registry::RegistrySet,
+    world: &World,
+    feet: [f64; 3],
+    height: f64,
+) -> Option<FluidKind> {
     let x0 = (feet[0] - crab_physics::PLAYER_HALF_WIDTH).floor() as i32;
     let x1 = (feet[0] + crab_physics::PLAYER_HALF_WIDTH - 1e-7).floor() as i32;
     let y0 = (feet[1] + 0.1).floor() as i32;
@@ -627,18 +633,45 @@ fn fluid_kind_at(world: &World, feet: [f64; 3], height: f64) -> Option<FluidKind
     for x in x0..=x1 {
         for y in y0..=y1 {
             for z in z0..=z1 {
-                match world
-                    .block_state(x, y, z)
-                    .and_then(crab_registry::block_name)
-                {
+                let Some(state) = world.block_state(x, y, z) else {
+                    continue;
+                };
+                match registries.block_name(state) {
                     Some("minecraft:lava") => return Some(FluidKind::Lava),
                     Some("minecraft:water") => water = true,
+                    _ if registries.block_state_property(state, "waterlogged") == Some("true") => {
+                        water = true;
+                    }
                     _ => {}
                 }
             }
         }
     }
     water.then_some(FluidKind::Water)
+}
+
+fn touching_climbable(
+    registries: crab_registry::RegistrySet,
+    world: &World,
+    feet: [f64; 3],
+    height: f64,
+) -> bool {
+    let x0 = (feet[0] - crab_physics::PLAYER_HALF_WIDTH).floor() as i32;
+    let x1 = (feet[0] + crab_physics::PLAYER_HALF_WIDTH - 1e-7).floor() as i32;
+    let y0 = feet[1].floor() as i32;
+    let y1 = (feet[1] + height - 1e-7).floor() as i32;
+    let z0 = (feet[2] - crab_physics::PLAYER_HALF_WIDTH).floor() as i32;
+    let z1 = (feet[2] + crab_physics::PLAYER_HALF_WIDTH - 1e-7).floor() as i32;
+    (x0..=x1).any(|x| {
+        (y0..=y1).any(|y| {
+            (z0..=z1).any(|z| {
+                world
+                    .block_state(x, y, z)
+                    .and_then(|state| registries.block_name(state))
+                    .is_some_and(|name| matches!(name, "minecraft:vine" | "minecraft:ladder"))
+            })
+        })
+    })
 }
 
 fn movement_speed(sneaking: bool, sprinting: bool, fluid: Option<FluidKind>) -> f64 {
@@ -669,6 +702,12 @@ fn effect_movement_multiplier(effects: &HashMap<i32, ActiveEffect>) -> f64 {
     let speed = 1.0 + 0.2 * f64::from(effect_level(effects, 1));
     let slowness = (1.0 - 0.15 * f64::from(effect_level(effects, 2))).max(0.0);
     speed * slowness
+}
+
+fn jump_velocity(jump_boost_level: u32) -> f64 {
+    // Vanilla starts a jump at 0.42 blocks/tick and adds 0.1 blocks/tick per
+    // Jump Boost level. Crabcraft physics stores velocity in blocks/second.
+    8.4 + 2.0 * f64::from(jump_boost_level)
 }
 
 fn effect_mining_multiplier(effects: &HashMap<i32, ActiveEffect>) -> f64 {
@@ -2265,6 +2304,9 @@ where
                     id if id == ID_SET_PASSENGERS => {
                         let _ = handle_set_passengers(&raw, shared);
                     }
+                    id if id == ID_COLLECT_ITEM => {
+                        let _ = handle_collect_item(&raw, shared);
+                    }
                     id if id == ID_ENTITY_DESTROY => {
                         let _ = handle_entity_destroy(&raw, shared);
                     }
@@ -2643,7 +2685,12 @@ where
                     }
                     let in_water = {
                         let world = shared.world.lock().unwrap();
-                        fluid_kind_at(&world, [snapshot.x, snapshot.y, snapshot.z], 1.8)
+                        fluid_kind_at(
+                            shared.context.registries,
+                            &world,
+                            [snapshot.x, snapshot.y, snapshot.z],
+                            1.8,
+                        )
                             == Some(FluidKind::Water)
                     };
                     snapshot.swimming = in_water
@@ -3121,12 +3168,20 @@ where
                             let fluid = (!snapshot.flying)
                                 .then(|| {
                                     fluid_kind_at(
+                                        shared.context.registries,
                                         &world,
                                         [snapshot.x, snapshot.y, snapshot.z],
                                         pose_height,
                                     )
                                 })
                                 .flatten();
+                            let climbable = !snapshot.flying
+                                && touching_climbable(
+                                    shared.context.registries,
+                                    &world,
+                                    [snapshot.x, snapshot.y, snapshot.z],
+                                    pose_height,
+                                );
                             let speed = if snapshot.flying {
                                 flight_speed(snapshot.flying_speed, snapshot.sprinting)
                             } else if snapshot.swimming {
@@ -3180,10 +3235,18 @@ where
                                         vel[1] = (vel[1] - 0.15 + (-pitch.sin()).max(0.0) * 0.12)
                                             .max(-12.0);
                                         (2.5, -12.0)
+                                    } else if climbable {
+                                        vel[1] = if controls.sneak {
+                                            0.0
+                                        } else if controls.jump || controls.forward > 0.0 {
+                                            3.0
+                                        } else {
+                                            vel[1].max(-3.0)
+                                        };
+                                        (0.0, -3.0)
                                     } else {
                                     if controls.jump && snapshot.on_ground {
-                                        vel[1] =
-                                            8.5 + 2.0 * f64::from(effect_level(&effects, 8));
+                                        vel[1] = jump_velocity(effect_level(&effects, 8));
                                     }
                                     let levitation = effect_level(&effects, 25);
                                     if levitation > 0 {
@@ -3474,6 +3537,11 @@ where
                             container_slots,
                             container.menu_type,
                         );
+                        // The final 36 menu slots alias the persistent player
+                        // inventory. Mirror prediction immediately so the
+                        // always-visible hotbar and a subsequently reopened
+                        // inventory cannot lag behind a crafting/container click.
+                        sync_player_inventory_from_container(shared, &container.slots);
                         Some((container.state_id, changed, *carried))
                     }
                     _ => None,
@@ -5153,6 +5221,35 @@ fn handle_entity_teleport(raw: &crab_net::RawPacket, shared: &Arc<Shared>) -> Re
     Ok(())
 }
 
+fn handle_collect_item(raw: &crab_net::RawPacket, shared: &Arc<Shared>) -> Result<()> {
+    let mut b = raw.body.clone();
+    let collected_entity_id = b.read_varint()?;
+    let collector_entity_id = b.read_varint()?;
+    let _pickup_item_count = b.read_varint()?;
+    if collector_entity_id != shared.player.lock().unwrap().entity_id {
+        return Ok(());
+    }
+
+    let position = shared
+        .entities
+        .lock()
+        .unwrap()
+        .get(&collected_entity_id)
+        .map(|entity| [entity.x, entity.y, entity.z])
+        .unwrap_or_else(|| {
+            let player = *shared.player.lock().unwrap();
+            [player.x, player.y, player.z]
+        });
+    queue_sound_at(
+        shared,
+        crab_audio::pickup_event().to_string(),
+        position,
+        0.2,
+        None,
+    );
+    Ok(())
+}
+
 fn handle_entity_destroy(raw: &crab_net::RawPacket, shared: &Arc<Shared>) -> Result<()> {
     let mut b = raw.body.clone();
     let count = b.read_varint()?.max(0);
@@ -6178,6 +6275,7 @@ mod tests {
         assert_eq!(canonical_clientbound_764_id(0x25), ID_MAP_CHUNK);
         assert_eq!(canonical_clientbound_764_id(0x29), ID_JOIN_GAME);
         assert_eq!(canonical_clientbound_764_id(0x42), ID_RESOURCE_PACK);
+        assert_eq!(canonical_clientbound_764_id(0x6a), ID_COLLECT_ITEM);
         assert_eq!(canonical_clientbound_764_id(0x6f), ID_DECLARE_RECIPES);
         assert_eq!(canonical_clientbound_764_id(0x0c), -1);
         assert_eq!(serverbound_764_id(State::Play, PlaceRecipe::ID), 0x1e);
@@ -6195,6 +6293,7 @@ mod tests {
         assert_eq!(canonical_clientbound_765_id(0x29), ID_JOIN_GAME);
         assert_eq!(canonical_clientbound_765_id(0x42), -1); // reset score
         assert_eq!(canonical_clientbound_765_id(0x44), ID_RESOURCE_PACK);
+        assert_eq!(canonical_clientbound_765_id(0x6c), ID_COLLECT_ITEM);
         assert_eq!(canonical_clientbound_765_id(0x67), -1); // start configuration
         assert_eq!(canonical_clientbound_765_id(0x73), ID_DECLARE_RECIPES);
         assert_eq!(serverbound_765_id(State::Play, PlaceRecipe::ID), 0x1f);
@@ -6211,6 +6310,7 @@ mod tests {
         assert_eq!(canonical_clientbound_766_id(0x27), ID_MAP_CHUNK);
         assert_eq!(canonical_clientbound_766_id(0x2b), ID_JOIN_GAME);
         assert_eq!(canonical_clientbound_766_id(0x46), -1); // transfer
+        assert_eq!(canonical_clientbound_766_id(0x6f), ID_COLLECT_ITEM);
         assert_eq!(canonical_clientbound_766_id(0x69), -1); // start configuration
         assert_eq!(canonical_clientbound_766_id(0x79), -1); // recipe declarations moved
         assert_eq!(serverbound_766_id(State::Play, ClientChatMessage::ID), 0x06);
@@ -6234,6 +6334,7 @@ mod tests {
             SynchronizePlayerPosition::ID
         );
         assert_eq!(canonical_clientbound_768_id(0x5d), ID_ENTITY_METADATA);
+        assert_eq!(canonical_clientbound_768_id(0x76), ID_COLLECT_ITEM);
         assert_eq!(canonical_clientbound_768_id(0x70), -1); // start configuration
         assert_eq!(serverbound_768_id(State::Play, ClickContainer::ID), 0x10);
         assert_eq!(serverbound_768_id(State::Play, SetPlayerPosition::ID), 0x1c);
@@ -6260,6 +6361,7 @@ mod tests {
         assert_eq!(ProtocolVersion::V1_21_5.number(), 770);
         assert_eq!(canonical_clientbound_770_id(0x27), ID_MAP_CHUNK);
         assert_eq!(canonical_clientbound_770_id(0x2b), ID_JOIN_GAME);
+        assert_eq!(canonical_clientbound_770_id(0x75), ID_COLLECT_ITEM);
         assert_eq!(
             canonical_clientbound_770_id(0x41),
             SynchronizePlayerPosition::ID
@@ -6343,6 +6445,49 @@ mod tests {
             offline_uuid("Notch").to_string(),
             "b50ad385-829d-3141-a216-7e7d7539ba7f"
         );
+    }
+
+    #[test]
+    fn collect_item_packet_queues_pickup_sound_for_local_player() {
+        let shared = Arc::new(Shared::new());
+        shared.player.lock().unwrap().entity_id = 42;
+        let (tx, rx) = std::sync::mpsc::channel();
+        *shared.sfx.lock().unwrap() = Some(tx);
+
+        let mut body = Vec::new();
+        body.put_varint(7);
+        body.put_varint(42);
+        body.put_varint(3);
+        handle_collect_item(
+            &crab_net::RawPacket {
+                id: ID_COLLECT_ITEM,
+                body: body.into(),
+            },
+            &shared,
+        )
+        .unwrap();
+        assert_eq!(rx.recv().unwrap(), "@gain:0.200:entity.item.pickup");
+
+        let mut body = Vec::new();
+        body.put_varint(7);
+        body.put_varint(99);
+        body.put_varint(1);
+        handle_collect_item(
+            &crab_net::RawPacket {
+                id: ID_COLLECT_ITEM,
+                body: body.into(),
+            },
+            &shared,
+        )
+        .unwrap();
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn jump_velocity_matches_vanilla_tick_units() {
+        assert!((jump_velocity(0) - 8.4).abs() < f64::EPSILON);
+        assert!((jump_velocity(1) - 10.4).abs() < f64::EPSILON);
+        assert!((jump_velocity(3) - 14.4).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -6843,6 +6988,24 @@ mod tests {
     }
 
     #[test]
+    fn predicted_crafting_click_mirrors_player_hotbar_immediately() {
+        let shared = Arc::new(Shared::new());
+        let mut slots = vec![None; 10 + 36];
+        slots[10 + 27] = slot(1, 4);
+        let mut carried = None;
+        apply_container_click(&mut slots, &mut carried, 10 + 27, 0, 0, 10, 11);
+        assert_eq!(carried, slot(1, 4));
+        assert_eq!(slots[10 + 27], None);
+
+        sync_player_inventory_from_container(&shared, &slots);
+        assert_eq!(shared.inventory.lock().unwrap()[36], None);
+
+        slots[10 + 27] = carried.take();
+        sync_player_inventory_from_container(&shared, &slots);
+        assert_eq!(shared.inventory.lock().unwrap()[36], slot(1, 4));
+    }
+
+    #[test]
     fn sprint_and_sneak_speeds_match_player_modes() {
         assert!((movement_speed(false, false, None) - 4.317).abs() < 1e-9);
         assert!((movement_speed(false, true, None) - 5.612).abs() < 1e-9);
@@ -6897,15 +7060,54 @@ mod tests {
         let water = crab_registry::block_by_name("water").unwrap().default_state;
         world.set_block_state(8, -59, 8, water);
         assert_eq!(
-            fluid_kind_at(&world, [8.5, -59.0, 8.5], 1.8),
+            fluid_kind_at(
+                crab_registry::RegistrySet::global(),
+                &world,
+                [8.5, -59.0, 8.5],
+                1.8,
+            ),
             Some(FluidKind::Water)
         );
         let lava = crab_registry::block_by_name("lava").unwrap().default_state;
         world.set_block_state(8, -59, 8, lava);
         assert_eq!(
-            fluid_kind_at(&world, [8.5, -59.0, 8.5], 1.8),
+            fluid_kind_at(
+                crab_registry::RegistrySet::global(),
+                &world,
+                [8.5, -59.0, 8.5],
+                1.8,
+            ),
             Some(FluidKind::Lava)
         );
+
+        let registries = crab_registry::RegistrySet::global();
+        let stairs = registries
+            .blocks()
+            .iter()
+            .find(|block| block.name == "minecraft:oak_stairs")
+            .unwrap();
+        let waterlogged = (stairs.min_state..=stairs.max_state)
+            .find(|state| registries.block_state_property(*state, "waterlogged") == Some("true"))
+            .unwrap();
+        world.set_block_state(8, -59, 8, waterlogged);
+        assert_eq!(
+            fluid_kind_at(registries, &world, [8.5, -59.0, 8.5], 1.8),
+            Some(FluidKind::Water)
+        );
+
+        let vine = registries
+            .blocks()
+            .iter()
+            .find(|block| block.name == "minecraft:vine")
+            .unwrap()
+            .default_state;
+        world.set_block_state(8, -59, 8, vine);
+        assert!(touching_climbable(
+            registries,
+            &world,
+            [8.5, -59.0, 8.5],
+            1.8
+        ));
     }
 
     #[test]

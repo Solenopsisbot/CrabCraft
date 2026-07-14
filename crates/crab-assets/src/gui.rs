@@ -11,7 +11,7 @@ use std::path::Path;
 use crate::AssetError;
 
 const ATLAS_W: u32 = 1024;
-const ATLAS_H: u32 = 1280;
+const ATLAS_H: u32 = 1536;
 // Placement of each source image within the atlas.
 const WIDGETS_AT: (u32, u32) = (0, 0);
 const INVENTORY_AT: (u32, u32) = (256, 0);
@@ -33,6 +33,8 @@ const CARTOGRAPHY_AT: (u32, u32) = (256, 896);
 const EFFECTS_AT: (u32, u32) = (0, 1024);
 const LOOM_AT: (u32, u32) = (512, 1024);
 const STONECUTTER_AT: (u32, u32) = (768, 1024);
+const RECIPE_BOOK_AT: (u32, u32) = (0, 1280);
+const RECIPE_BUTTON_AT: (u32, u32) = (256, 1280);
 const EFFECT_NAMES: [&str; 33] = [
     "speed",
     "slowness",
@@ -178,6 +180,25 @@ pub fn load_gui_atlas(jar_path: &Path) -> Result<GuiAtlas, AssetError> {
     ) {
         blit(&mut rgba, &src, w, h, INVENTORY_AT);
         sprites.insert("inventory", uv(INVENTORY_AT.0, INVENTORY_AT.1, 176, 166));
+    }
+    if let Some((src, w, h)) = read_png(
+        &mut archive,
+        "assets/minecraft/textures/gui/recipe_book.png",
+    ) {
+        blit(&mut rgba, &src, w, h, RECIPE_BOOK_AT);
+        let (x, y) = RECIPE_BOOK_AT;
+        sprites.insert("recipe_book", uv(x + 1, y + 1, 147, 166));
+        sprites.insert("recipe_cell", uv(x + 29, y + 206, 25, 25));
+        sprites.insert("recipe_cell_hover", uv(x + 55, y + 206, 25, 25));
+    }
+    if let Some((src, w, h)) = read_png(
+        &mut archive,
+        "assets/minecraft/textures/gui/recipe_button.png",
+    ) {
+        blit(&mut rgba, &src, w, h, RECIPE_BUTTON_AT);
+        let (x, y) = RECIPE_BUTTON_AT;
+        sprites.insert("recipe_toggle", uv(x, y, 20, 18));
+        sprites.insert("recipe_toggle_hover", uv(x, y + 18, 20, 18));
     }
     if let Some((src, w, h)) = read_png(
         &mut archive,
@@ -362,4 +383,52 @@ pub fn load_gui_atlas(jar_path: &Path) -> Result<GuiAtlas, AssetError> {
         glyphs,
         loaded,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+
+    #[test]
+    fn recipe_book_sheets_are_exposed_as_gui_sprites() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "crabcraft-recipe-gui-{}-{nonce}.jar",
+            std::process::id()
+        ));
+        let file = File::create(&path).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        for (name, color) in [
+            ("recipe_book", [120, 110, 90, 255]),
+            ("recipe_button", [80, 160, 80, 255]),
+        ] {
+            writer
+                .start_file(format!("assets/minecraft/textures/gui/{name}.png"), options)
+                .unwrap();
+            let image = image::RgbaImage::from_pixel(256, 256, image::Rgba(color));
+            let mut png = std::io::Cursor::new(Vec::new());
+            image.write_to(&mut png, image::ImageFormat::Png).unwrap();
+            writer.write_all(png.get_ref()).unwrap();
+        }
+        writer.finish().unwrap();
+
+        let atlas = load_gui_atlas(&path).unwrap();
+        for sprite in [
+            "recipe_book",
+            "recipe_cell",
+            "recipe_cell_hover",
+            "recipe_toggle",
+            "recipe_toggle_hover",
+        ] {
+            assert!(atlas.sprite(sprite).is_some(), "missing {sprite}");
+        }
+        std::fs::remove_file(path).unwrap();
+    }
 }

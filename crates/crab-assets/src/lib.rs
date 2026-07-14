@@ -683,6 +683,34 @@ pub fn load_block_atlas_with_registry(
 
     for name in block_names {
         let bare = name.strip_prefix("minecraft:").unwrap_or(name);
+        // Fluids have no block model JSON in the vanilla client jar. Their
+        // renderer is special-cased by vanilla, so provide the equivalent
+        // still/top and flowing/side texture mapping explicitly instead of
+        // leaving them on the opaque hashed-colour fallback.
+        if matches!(bare, "water" | "bubble_column" | "lava") {
+            let fluid = if bare == "bubble_column" {
+                "water"
+            } else {
+                bare
+            };
+            let still = format!("minecraft:block/{fluid}_still");
+            let flow = format!("minecraft:block/{fluid}_flow");
+            tex_paths.insert(still.clone());
+            tex_paths.insert(flow.clone());
+            let tinted = fluid == "water";
+            block_faces.insert(
+                bare.to_string(),
+                [
+                    (Some(flow.clone()), tinted),
+                    (Some(flow.clone()), tinted),
+                    (Some(still.clone()), tinted),
+                    (Some(still), tinted),
+                    (Some(flow.clone()), tinted),
+                    (Some(flow), tinted),
+                ],
+            );
+            continue;
+        }
         let selected_models =
             load_state_models(&mut archive, &mut cache, &mut tex_paths, bare, registries);
         let resolved_by_state = !selected_models.is_empty();
@@ -1429,6 +1457,47 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
+
+    #[test]
+    fn fluids_use_vanilla_texture_fallback_without_block_models() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "crabcraft-fluid-atlas-{}-{nonce}.jar",
+            std::process::id()
+        ));
+        let file = File::create(&path).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        for (name, color) in [
+            ("water_still", [20, 40, 200, 160]),
+            ("water_flow", [30, 60, 220, 160]),
+        ] {
+            writer
+                .start_file(
+                    format!("assets/minecraft/textures/block/{name}.png"),
+                    options,
+                )
+                .unwrap();
+            let image = image::RgbaImage::from_pixel(16, 16, image::Rgba(color));
+            let mut png = std::io::Cursor::new(Vec::new());
+            image.write_to(&mut png, image::ImageFormat::Png).unwrap();
+            writer.write_all(png.get_ref()).unwrap();
+        }
+        writer.finish().unwrap();
+
+        let atlas = load_block_atlas(&path, &["minecraft:water".to_string()]).unwrap();
+        assert!(atlas.model("water").textured);
+        assert!(atlas.unresolved_models().is_empty());
+        assert!(atlas.missing_textures().is_empty());
+        assert!(atlas
+            .rgba
+            .chunks_exact(4)
+            .any(|pixel| pixel == [20, 40, 200, 160]));
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn blockstate_conditions_support_vanilla_boolean_forms() {

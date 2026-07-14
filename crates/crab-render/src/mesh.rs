@@ -147,6 +147,65 @@ fn biome_tint(world: &World, name: &str, cell: [i32; 3], model_tint: [f32; 3]) -
     world.biome_tint(cell[0], cell[1], cell[2], kind)
 }
 
+fn contains_water(registries: crab_registry::RegistrySet, state: u32) -> bool {
+    registries
+        .block_name(state)
+        .is_some_and(|name| matches!(name, "minecraft:water" | "minecraft:bubble_column"))
+        || registries.block_state_property(state, "waterlogged") == Some("true")
+}
+
+fn emit_fluid_cube(
+    vertices: &mut Vec<Vertex>,
+    world: &World,
+    atlas: &Atlas,
+    registries: crab_registry::RegistrySet,
+    cell: [i32; 3],
+    fluid_name: &str,
+    waterlogged: bool,
+) {
+    let model = atlas.model(fluid_name);
+    let base = cell.map(|coordinate| coordinate as f32);
+    let inset = if waterlogged { 0.002 } else { 0.0 };
+    let height = if waterlogged { 0.888 } else { 0.9 };
+    for (face_index, face) in FACES.iter().enumerate() {
+        let direction = face.normal.map(|axis| axis as i32);
+        let neighbor = world.block_state(
+            cell[0] + direction[0],
+            cell[1] + direction[1],
+            cell[2] + direction[2],
+        );
+        if neighbor.is_some_and(|state| {
+            contains_water(registries, state) || occludes(registries, atlas, state)
+        }) {
+            continue;
+        }
+        let texture = model.faces[face_index];
+        let [u0, v0, u1, v1] = texture.uv;
+        for &corner_index in &[0usize, 1, 2, 0, 2, 3] {
+            let mut corner = face.corners[corner_index];
+            corner[0] = inset + corner[0] * (1.0 - inset * 2.0);
+            corner[2] = inset + corner[2] * (1.0 - inset * 2.0);
+            corner[1] *= height;
+            let [u, v] = face.uvs[corner_index];
+            vertices.push(Vertex {
+                position: [
+                    base[0] + corner[0],
+                    base[1] + corner[1],
+                    base[2] + corner[2],
+                ],
+                normal: face.normal,
+                uv: [u0 + u * (u1 - u0), v0 + v * (v1 - v0)],
+                tint: biome_tint(world, fluid_name, cell, texture.tint),
+                opacity: if fluid_name == "minecraft:lava" {
+                    0.88
+                } else {
+                    0.58
+                },
+            });
+        }
+    }
+}
+
 fn door_visual(offset: usize) -> (&'static str, f32) {
     let facing = (offset / 16).min(3);
     let upper = (offset % 16) / 8 == 0;
@@ -329,6 +388,39 @@ pub fn mesh_region_with_registry(
                 }
                 let name = registries.block_name(state).unwrap_or("");
                 let base = [x as f32, y as f32, z as f32];
+
+                if matches!(
+                    name,
+                    "minecraft:water" | "minecraft:bubble_column" | "minecraft:lava"
+                ) {
+                    let fluid_name = if name == "minecraft:bubble_column" {
+                        "minecraft:water"
+                    } else {
+                        name
+                    };
+                    emit_fluid_cube(
+                        &mut vertices,
+                        world,
+                        atlas,
+                        registries,
+                        [x, y, z],
+                        fluid_name,
+                        false,
+                    );
+                    continue;
+                }
+
+                if registries.block_state_property(state, "waterlogged") == Some("true") {
+                    emit_fluid_cube(
+                        &mut vertices,
+                        world,
+                        atlas,
+                        registries,
+                        [x, y, z],
+                        "minecraft:water",
+                        true,
+                    );
+                }
 
                 if let Some(parts) = atlas.block_state_model(state) {
                     for (part_index, part) in parts.iter().enumerate() {
@@ -1619,6 +1711,40 @@ mod tests {
         let atlas = Atlas::debug_uniform();
         let mesh = mesh_region(&world, &atlas, [5, -60, 5], [5, -60, 5]);
         assert_eq!(mesh.vertices.len(), 36); // 6 faces * 2 tris * 3 verts
+    }
+
+    #[test]
+    fn fluid_and_waterlogged_states_emit_translucent_inset_geometry() {
+        let registries = crab_registry::RegistrySet::global();
+        let atlas = Atlas::debug_uniform();
+        let mut world = world_with_chunk0();
+        let water = registries
+            .blocks()
+            .iter()
+            .find(|block| block.name == "minecraft:water")
+            .unwrap()
+            .default_state;
+        world.set_block_state(5, -60, 5, water);
+        let mesh = mesh_region_with_registry(&world, &atlas, [5, -60, 5], [5, -60, 5], registries);
+        assert_eq!(mesh.vertices.len(), 36);
+        assert!(mesh.vertices.iter().all(|vertex| vertex.opacity < 1.0));
+        assert!(mesh
+            .vertices
+            .iter()
+            .all(|vertex| vertex.position[1] <= -59.1));
+
+        let stairs = registries
+            .blocks()
+            .iter()
+            .find(|block| block.name == "minecraft:oak_stairs")
+            .unwrap();
+        let waterlogged = (stairs.min_state..=stairs.max_state)
+            .find(|state| registries.block_state_property(*state, "waterlogged") == Some("true"))
+            .unwrap();
+        world.set_block_state(5, -60, 5, waterlogged);
+        let mesh = mesh_region_with_registry(&world, &atlas, [5, -60, 5], [5, -60, 5], registries);
+        assert!(mesh.vertices.iter().any(|vertex| vertex.opacity < 1.0));
+        assert!(mesh.vertices.iter().any(|vertex| vertex.opacity == 1.0));
     }
 
     #[test]

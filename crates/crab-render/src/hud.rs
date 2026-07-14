@@ -288,12 +288,13 @@ pub fn hud_geometry(
     }
 
     // Status bars above the hotbar, drawn from icons.png if available.
-    let ppx = (bar.2 - bar.0) / 182.0; // NDC per bar pixel
-                                       // sprite at bar-pixel x, `y_up` px above the hotbar top, size (w,h) px.
+    let (ppx, ppy) = ((bar.2 - bar.0) / 182.0, (bar.3 - bar.1) / 22.0);
+    // Sprite at bar-pixel x, `y_up` px above the hotbar top, size (w,h) px.
+    // X and Y need separate NDC scales on non-square framebuffers.
     let spr = |buf: &mut Vec<TexVertex>, px: f32, y_up: f32, w: f32, h: f32, uv: [f32; 4]| {
         let x0 = bar.0 + px * ppx;
-        let y0 = bar.3 + y_up * ppx;
-        push_tex_quad(buf, x0, y0, x0 + w * ppx, y0 + h * ppx, uv);
+        let y0 = bar.3 + y_up * ppy;
+        push_tex_quad(buf, x0, y0, x0 + w * ppx, y0 + h * ppy, uv);
     };
 
     if let (Some(xbg), Some(xfg)) = (gui.sprite("xp_bg"), gui.sprite("xp_full")) {
@@ -349,10 +350,10 @@ pub fn hud_geometry(
     // XP level number, centred just above the xp bar (green, in the gui/font).
     if xp_level > 0 && gui.sprite("xp_full").is_some() {
         let s = xp_level.to_string();
-        let th = 7.0 * ppx; // ~7px tall
+        let th = 7.0 * ppy; // ~7px tall
         let tw = gui.text_width(&s) * ppx;
         let cx = bar.0 + (91.0 * ppx) - tw / 2.0;
-        let top = bar.3 + 11.0 * ppx;
+        let top = bar.3 + 11.0 * ppy;
         push_text(&mut g, gui, &s, cx, top, th, aspect);
     }
 
@@ -384,8 +385,8 @@ fn slot_px(slot: usize) -> (f32, f32) {
 #[must_use]
 pub fn inventory_slot_rect(rect: (f32, f32, f32, f32), slot: usize) -> (f32, f32, f32, f32) {
     let (px, py) = slot_px(slot);
-    let (lx, ty) = px_to_ndc(rect, 176.0, 166.0, px + 1.0, py + 1.0);
-    let (rx, by) = px_to_ndc(rect, 176.0, 166.0, px + 17.0, py + 17.0);
+    let (lx, ty) = px_to_ndc(rect, 176.0, 166.0, px, py);
+    let (rx, by) = px_to_ndc(rect, 176.0, 166.0, px + 16.0, py + 16.0);
     (lx, by, rx, ty)
 }
 
@@ -591,8 +592,8 @@ pub fn container_slot_rect(
         }
     };
     let height = 114.0 + rows as f32 * 18.0;
-    let (lx, ty) = px_to_ndc(rect, 176.0, height, px + 1.0, py + 1.0);
-    let (rx, by) = px_to_ndc(rect, 176.0, height, px + 17.0, py + 17.0);
+    let (lx, ty) = px_to_ndc(rect, 176.0, height, px, py);
+    let (rx, by) = px_to_ndc(rect, 176.0, height, px + 16.0, py + 16.0);
     (lx, by, rx, ty)
 }
 
@@ -682,8 +683,8 @@ pub fn furnace_slot_rect(rect: (f32, f32, f32, f32), slot: usize) -> (f32, f32, 
         }
         _ => (8.0 + (slot.min(38) - 30) as f32 * 18.0, 142.0),
     };
-    let (lx, ty) = px_to_ndc(rect, 176.0, 166.0, px + 1.0, py + 1.0);
-    let (rx, by) = px_to_ndc(rect, 176.0, 166.0, px + 17.0, py + 17.0);
+    let (lx, ty) = px_to_ndc(rect, 176.0, 166.0, px, py);
+    let (rx, by) = px_to_ndc(rect, 176.0, 166.0, px + 16.0, py + 16.0);
     (lx, by, rx, ty)
 }
 
@@ -767,7 +768,7 @@ pub fn simple_container_slot_rect(
             (8.0 + (player.min(35) - 27) as f32 * 18.0, hotbar_y)
         }
     };
-    panel_pixel_rect(rect, 176.0, panel_h, px + 1.0, py + 1.0, 16.0, 16.0)
+    panel_pixel_rect(rect, 176.0, panel_h, px, py, 16.0, 16.0)
 }
 
 /// Clickable bounds of enchanting offer `0..=2`.
@@ -1147,6 +1148,26 @@ mod tests {
         assert_eq!([t[0][2], t[0][3]], [0.1, 0.2]);
         // Third vertex is bottom-right -> (u1, v1).
         assert_eq!([t[2][2], t[2][3]], [0.3, 0.4]);
+    }
+
+    #[test]
+    fn hotbar_pixels_remain_square_on_widescreen() {
+        let aspect = 16.0 / 9.0;
+        let bar = sprite_rect(0.0, -0.915, 0.13, 182.0, 22.0, aspect);
+        let ppx = (bar.2 - bar.0) / 182.0;
+        let ppy = (bar.3 - bar.1) / 22.0;
+        // NDC X spans `aspect` times as many physical pixels as NDC Y.
+        assert!((ppx * aspect - ppy).abs() < 1e-6);
+    }
+
+    #[test]
+    fn inventory_icons_start_at_vanilla_slot_coordinates() {
+        let panel = inventory_rect(1.0);
+        let expected_top_left = px_to_ndc(panel, 176.0, 166.0, 8.0, 84.0);
+        let expected_bottom_right = px_to_ndc(panel, 176.0, 166.0, 24.0, 100.0);
+        let rect = inventory_slot_rect(panel, 9);
+        assert_eq!((rect.0, rect.3), expected_top_left);
+        assert_eq!((rect.2, rect.1), expected_bottom_right);
     }
 
     #[test]

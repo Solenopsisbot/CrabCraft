@@ -16,10 +16,10 @@ use crab_assets::{Atlas, EntityAtlas, GuiAtlas, ItemAtlas};
 use crab_core::{ClientCommand, ConnectionPhase, RecipeKey, ScreenStack, UiScreen};
 use crab_render::{
     block_item_mesh, block_state_item_mesh, box_mesh, build_block_pipeline, build_hud_pipelines,
-    container_geometry, entity_armour_mesh, entity_mesh, entity_mesh_with_pose, furnace_geometry,
-    hud_geometry, inventory_geometry, item_model_mesh, mesh_region_with_registry,
-    simple_container_geometry, status_effect_geometry, upload_atlas, upload_texture, CameraUniform,
-    HudPipelines, Vertex, DEPTH_FORMAT,
+    build_translucent_pipeline, container_geometry, entity_armour_mesh, entity_mesh,
+    entity_mesh_with_pose, furnace_geometry, hud_geometry, inventory_geometry, item_model_mesh,
+    mesh_region_with_registry, simple_container_geometry, status_effect_geometry, upload_atlas,
+    upload_texture, CameraUniform, HudPipelines, Vertex, DEPTH_FORMAT,
 };
 use crab_world::WorldSnapshot;
 use glam::Vec3;
@@ -30,7 +30,7 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
 
-use crate::client::{ContainerState, CraftingRecipe, EnvironmentState, Shared};
+use crate::client::{ContainerState, CraftingRecipe, EnvironmentState, Particle, Shared};
 use crate::resource::ResourceManager;
 
 /// Max chunk columns re-meshed per frame (bounds per-frame CPU during loads).
@@ -38,7 +38,7 @@ const REMESH_BUDGET: usize = 4;
 const LOOK_SPEED: f32 = 110.0; // degrees/sec (arrow-key look)
 const EYE_HEIGHT: f32 = 1.62;
 type HudRect = (f32, f32, f32, f32);
-type RecipeBookGeometry = (Vec<[f32; 5]>, Vec<[f32; 4]>, Vec<[f32; 4]>);
+type RecipeBookGeometry = (Vec<[f32; 5]>, Vec<[f32; 4]>, Vec<[f32; 4]>, Vec<[f32; 4]>);
 
 #[derive(Clone, Copy)]
 struct RecipeContext {
@@ -69,6 +69,21 @@ fn next_choice(current: f32, choices: &[f32]) -> f32 {
         .position(|choice| (*choice - current).abs() < f32::EPSILON)
         .unwrap_or(0);
     choices[(index + 1) % choices.len()]
+}
+
+fn movement_fov(base: f32, sneaking: bool, sprinting: bool, flying: bool) -> f32 {
+    let multiplier = if sprinting || flying {
+        1.1
+    } else if sneaking {
+        0.95
+    } else {
+        1.0
+    };
+    (base * multiplier).clamp(30.0, 110.0)
+}
+
+fn is_double_tap(previous: Option<Instant>, now: Instant) -> bool {
+    previous.is_some_and(|press| now.duration_since(press) <= Duration::from_millis(250))
 }
 
 /// Approximates vanilla's day/night and storm sky brightness from server state.
@@ -660,24 +675,21 @@ fn recipe_book_geometry(
 ) -> RecipeBookGeometry {
     let rect = recipe_book_panel_rect(panel, aspect);
     let mut color = Vec::new();
+    let mut gui_vertices = Vec::new();
     let mut items = Vec::new();
     let mut text = Vec::new();
-    push_color2d(
-        &mut color,
-        rect.0,
-        rect.1,
-        rect.2,
-        rect.3,
-        [0.28, 0.25, 0.20],
-    );
-    push_color2d(
-        &mut color,
-        rect.0 + 0.012,
-        rect.1 + 0.012,
-        rect.2 - 0.012,
-        rect.3 - 0.012,
-        [0.72, 0.68, 0.56],
-    );
+    if let Some(uv) = gui.sprite("recipe_book") {
+        push_tex2d(&mut gui_vertices, rect.0, rect.1, rect.2, rect.3, uv);
+    } else {
+        push_color2d(
+            &mut color,
+            rect.0,
+            rect.1,
+            rect.2,
+            rect.3,
+            [0.72, 0.68, 0.56],
+        );
+    }
     crab_render::push_text(
         &mut text,
         gui,
@@ -692,23 +704,31 @@ fn recipe_book_geometry(
         let cell = recipe_book_cell_rect(rect, visible);
         let hovered =
             cursor.0 >= cell.0 && cursor.0 <= cell.2 && cursor.1 >= cell.1 && cursor.1 <= cell.3;
-        push_color2d(
-            &mut color,
-            cell.0,
-            cell.1,
-            cell.2,
-            cell.3,
-            if hovered {
-                [0.85, 0.78, 0.45]
-            } else {
-                [0.48, 0.43, 0.32]
-            },
-        );
+        if let Some(uv) = gui.sprite(if hovered {
+            "recipe_cell_hover"
+        } else {
+            "recipe_cell"
+        }) {
+            push_tex2d(&mut gui_vertices, cell.0, cell.1, cell.2, cell.3, uv);
+        } else {
+            push_color2d(
+                &mut color,
+                cell.0,
+                cell.1,
+                cell.2,
+                cell.3,
+                if hovered {
+                    [0.85, 0.78, 0.45]
+                } else {
+                    [0.48, 0.43, 0.32]
+                },
+            );
+        }
         if let Some(uv) = recipe
             .result
             .and_then(|item| u32::try_from(item.item_id).ok())
             .and_then(crab_registry::item_name)
-            .and_then(|name| item_atlas.icon(name))
+            .and_then(|name| flat_item_icon(item_atlas, name))
         {
             let inset = (cell.2 - cell.0) * 0.14;
             push_tex2d(
@@ -732,17 +752,25 @@ fn recipe_book_geometry(
         0.038,
         aspect,
     );
-    (color, items, text)
+    (color, gui_vertices, items, text)
 }
 
 /// Builds the 9 hotbar item-icon UVs from the player's inventory (slots 36..44).
+fn flat_item_icon(item_atlas: &ItemAtlas, name: &str) -> Option<[f32; 4]> {
+    if item_atlas.model(name).is_some() || crab_registry::block_by_name(name).is_some() {
+        None
+    } else {
+        item_atlas.icon(name)
+    }
+}
+
 fn hotbar_icons(shared: &Shared, item_atlas: &ItemAtlas) -> Vec<Option<[f32; 4]>> {
     let inv = shared.inventory.lock().unwrap();
     (0..9)
         .map(|i| {
             inv.get(36 + i).and_then(|s| *s).and_then(|it| {
                 let id = u32::try_from(it.item_id).ok()?;
-                item_atlas.icon(crab_registry::item_name(id)?)
+                flat_item_icon(item_atlas, crab_registry::item_name(id)?)
             })
         })
         .collect()
@@ -832,30 +860,161 @@ fn inventory_item_icon(shared: &Shared, item_atlas: &ItemAtlas, slot: usize) -> 
     item_atlas.icon(name)
 }
 
+fn inventory_item_name(shared: &Shared, slot: usize) -> Option<&'static str> {
+    let item = shared
+        .inventory
+        .lock()
+        .unwrap()
+        .get(slot)
+        .copied()
+        .flatten()?;
+    crab_registry::item_name(u32::try_from(item.item_id).ok()?)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HudModelAtlas {
+    Blocks,
+    Items,
+}
+
+fn fit_item_mesh_to_rect(vertices: &mut [Vertex], rect: HudRect, aspect: f32, tilt_degrees: f32) {
+    if vertices.is_empty() {
+        return;
+    }
+    if tilt_degrees != 0.0 {
+        let (sin, cos) = tilt_degrees.to_radians().sin_cos();
+        for vertex in vertices.iter_mut() {
+            let [x, y, z] = vertex.position;
+            vertex.position = [x, y * cos - z * sin, y * sin + z * cos];
+            let [nx, ny, nz] = vertex.normal;
+            vertex.normal = [nx, ny * cos - nz * sin, ny * sin + nz * cos];
+        }
+    }
+    let min = std::array::from_fn::<_, 3, _>(|axis| {
+        vertices
+            .iter()
+            .map(|vertex| vertex.position[axis])
+            .fold(f32::INFINITY, f32::min)
+    });
+    let max = std::array::from_fn::<_, 3, _>(|axis| {
+        vertices
+            .iter()
+            .map(|vertex| vertex.position[axis])
+            .fold(f32::NEG_INFINITY, f32::max)
+    });
+    let size = [
+        (max[0] - min[0]).max(1e-4),
+        (max[1] - min[1]).max(1e-4),
+        (max[2] - min[2]).max(1e-4),
+    ];
+    let scale = (0.9 * (rect.3 - rect.1) / size[1])
+        .min(0.9 * (rect.2 - rect.0) * aspect.max(0.01) / size[0]);
+    let center = [
+        (min[0] + max[0]) * 0.5,
+        (min[1] + max[1]) * 0.5,
+        (min[2] + max[2]) * 0.5,
+    ];
+    let target = [(rect.0 + rect.2) * 0.5, (rect.1 + rect.3) * 0.5];
+    for vertex in vertices {
+        vertex.position[0] = target[0] + (vertex.position[0] - center[0]) * scale / aspect;
+        vertex.position[1] = target[1] + (vertex.position[1] - center[1]) * scale;
+        vertex.position[2] = 0.3 - (vertex.position[2] - center[2]) / size[2] * 0.1;
+    }
+}
+
+fn hud_item_model(
+    block_atlas: &Atlas,
+    item_atlas: &ItemAtlas,
+    name: &str,
+    rect: HudRect,
+    aspect: f32,
+) -> Option<(HudModelAtlas, Vec<Vertex>)> {
+    if item_atlas.model(name).is_some() {
+        let mut vertices = item_model_mesh(item_atlas, name, [0.0; 3], 0.0)?;
+        fit_item_mesh_to_rect(&mut vertices, rect, aspect, 0.0);
+        return Some((HudModelAtlas::Items, vertices));
+    }
+    if crab_registry::block_by_name(name).is_some() {
+        let mut vertices = block_item_mesh(block_atlas, name, [0.0; 3], 1.0, 45.0);
+        fit_item_mesh_to_rect(&mut vertices, rect, aspect, -30.0);
+        return Some((HudModelAtlas::Blocks, vertices));
+    }
+    None
+}
+
+fn push_hud_item_model(
+    block_vertices: &mut Vec<Vertex>,
+    item_vertices: &mut Vec<Vertex>,
+    block_atlas: &Atlas,
+    item_atlas: &ItemAtlas,
+    name: &str,
+    rect: HudRect,
+    aspect: f32,
+) -> bool {
+    let Some((atlas, vertices)) = hud_item_model(block_atlas, item_atlas, name, rect, aspect)
+    else {
+        return false;
+    };
+    match atlas {
+        HudModelAtlas::Blocks => block_vertices.extend(vertices),
+        HudModelAtlas::Items => item_vertices.extend(vertices),
+    }
+    true
+}
+
 fn first_person_items_geometry(
     item_vertices: &mut Vec<[f32; 4]>,
-    main_hand: Option<[f32; 4]>,
-    offhand: Option<[f32; 4]>,
+    main_hand: Option<(&str, [f32; 4])>,
+    offhand: Option<(&str, [f32; 4])>,
     swing: f32,
     aspect: f32,
 ) {
     let arc = (swing.clamp(0.0, 1.0) * std::f32::consts::PI).sin();
-    let half_size = [0.22 / aspect.max(0.01), 0.22];
-    if let Some(uv) = offhand {
+    let handheld = |name: &str| {
+        [
+            "_sword",
+            "_pickaxe",
+            "_axe",
+            "_shovel",
+            "_hoe",
+            "fishing_rod",
+            "carrot_on_a_stick",
+            "warped_fungus_on_a_stick",
+            "trident",
+            "mace",
+        ]
+        .iter()
+        .any(|suffix| name.ends_with(suffix))
+    };
+    if let Some((name, uv)) = offhand {
+        let half_size = if handheld(name) {
+            [0.15 / aspect.max(0.01), 0.34]
+        } else {
+            [0.22 / aspect.max(0.01), 0.22]
+        };
         push_rotated_tex2d(
             item_vertices,
             [-0.72 + arc * 0.04, -0.58 - arc * 0.05],
             half_size,
-            0.32,
+            if handheld(name) { 0.72 } else { 0.32 },
             uv,
         );
     }
-    if let Some(uv) = main_hand {
+    if let Some((name, uv)) = main_hand {
+        let half_size = if handheld(name) {
+            [0.15 / aspect.max(0.01), 0.34]
+        } else {
+            [0.22 / aspect.max(0.01), 0.22]
+        };
         push_rotated_tex2d(
             item_vertices,
             [0.72 - arc * 0.22, -0.56 - arc * 0.28],
             half_size,
-            -0.32 - arc * 0.5,
+            if handheld(name) {
+                -0.78 - arc * 0.5
+            } else {
+                -0.32 - arc * 0.5
+            },
             uv,
         );
     }
@@ -1110,29 +1269,48 @@ fn chat_geometry(
 
 /// Builds the stack-size number text (font quads) for the hotbar, and for the
 /// inventory grid when it's open. Counts of 1 are not shown.
+fn push_stack_count(
+    out: &mut Vec<[f32; 4]>,
+    gui: &GuiAtlas,
+    aspect: f32,
+    count: i8,
+    rect: (f32, f32, f32, f32),
+) {
+    if count <= 1 {
+        return;
+    }
+    let s = count.to_string();
+    let (_x0, y0, x1, y1) = rect;
+    let h = (y1 - y0) * 0.5;
+    let w = gui.text_width(&s) * (h / 8.0) / aspect.max(0.01);
+    crab_render::push_text(out, gui, &s, x1 - w, y0 + h, h, aspect);
+}
+
 fn count_text(shared: &Shared, gui: &GuiAtlas, aspect: f32, inv_open: bool) -> Vec<[f32; 4]> {
     let inv = shared.inventory.lock().unwrap();
     let mut out = Vec::new();
-    let mut push_count = |count: i8, rect: (f32, f32, f32, f32)| {
-        if count <= 1 {
-            return;
-        }
-        let s = count.to_string();
-        let (_x0, y0, x1, y1) = rect;
-        let h = (y1 - y0) * 0.5;
-        let w = gui.text_width(&s) * (h / 8.0) / aspect.max(0.01);
-        crab_render::push_text(&mut out, gui, &s, x1 - w, y0 + h, h, aspect);
-    };
     for i in 0..9 {
         if let Some(it) = inv.get(36 + i).and_then(|s| *s) {
-            push_count(it.count, crab_render::hotbar_slot_rect(aspect, i));
+            push_stack_count(
+                &mut out,
+                gui,
+                aspect,
+                it.count,
+                crab_render::hotbar_slot_rect(aspect, i),
+            );
         }
     }
     if inv_open {
         let rect = crab_render::inventory_rect(aspect);
         for slot in 0..46 {
             if let Some(it) = inv.get(slot).and_then(|s| *s) {
-                push_count(it.count, crab_render::inventory_slot_rect(rect, slot));
+                push_stack_count(
+                    &mut out,
+                    gui,
+                    aspect,
+                    it.count,
+                    crab_render::inventory_slot_rect(rect, slot),
+                );
             }
         }
     }
@@ -1146,7 +1324,7 @@ fn inventory_icons(shared: &Shared, item_atlas: &ItemAtlas) -> Vec<Option<[f32; 
         .map(|i| {
             inv.get(i).and_then(|s| *s).and_then(|it| {
                 let id = u32::try_from(it.item_id).ok()?;
-                item_atlas.icon(crab_registry::item_name(id)?)
+                flat_item_icon(item_atlas, crab_registry::item_name(id)?)
             })
         })
         .collect()
@@ -1222,7 +1400,7 @@ fn slot_icons(
         .map(|slot| {
             slot.and_then(|it| {
                 let id = u32::try_from(it.item_id).ok()?;
-                item_atlas.icon(crab_registry::item_name(id)?)
+                flat_item_icon(item_atlas, crab_registry::item_name(id)?)
             })
         })
         .collect()
@@ -1302,15 +1480,17 @@ struct Graphics {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
+    translucent_pipeline: wgpu::RenderPipeline,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
     inventory_camera_buffer: wgpu::Buffer,
     inventory_camera_bind_group: wgpu::BindGroup,
+    overlay_camera_bind_group: wgpu::BindGroup,
     atlas_bind_group: wgpu::BindGroup,
     texture_layout: wgpu::BindGroupLayout,
     depth_view: wgpu::TextureView,
     /// Cached vertex buffer per chunk column.
-    chunk_meshes: HashMap<(i32, i32), (wgpu::Buffer, u32)>,
+    chunk_meshes: HashMap<(i32, i32), ChunkBuffers>,
     hud: HudPipelines,
     hud_color_buffer: Option<(wgpu::Buffer, u32)>,
     /// HUD GUI-sprite verts (hotbar/inventory backgrounds, gui atlas).
@@ -1340,6 +1520,29 @@ struct Graphics {
     /// Vanilla-style 3D local-player preview shown over the inventory panel.
     inventory_player_buffer: Option<(wgpu::Buffer, u32)>,
     inventory_player_bounds: Option<(f32, f32, f32, f32)>,
+    /// Clip-space 3D item models, separated by their source texture atlas.
+    overlay_block_buffer: Option<(wgpu::Buffer, u32)>,
+    overlay_item_buffer: Option<(wgpu::Buffer, u32)>,
+}
+
+struct ChunkBuffers {
+    opaque: Option<(wgpu::Buffer, u32)>,
+    translucent: Option<(wgpu::Buffer, u32)>,
+}
+
+fn partition_chunk_vertices(vertices: &[Vertex]) -> (Vec<Vertex>, Vec<Vertex>) {
+    let mut opaque = Vec::with_capacity(vertices.len());
+    let mut translucent = Vec::new();
+    let mut triangles = vertices.chunks_exact(3);
+    for triangle in &mut triangles {
+        if triangle.iter().any(|vertex| vertex.opacity < 0.999) {
+            translucent.extend_from_slice(triangle);
+        } else {
+            opaque.extend_from_slice(triangle);
+        }
+    }
+    opaque.extend_from_slice(triangles.remainder());
+    (opaque, translucent)
 }
 
 impl Graphics {
@@ -1399,6 +1602,8 @@ impl Graphics {
         surface.configure(&device, &config);
 
         let (pipeline, camera_bgl, texture_bgl) = build_block_pipeline(&device, config.format);
+        let translucent_pipeline =
+            build_translucent_pipeline(&device, config.format, &camera_bgl, &texture_bgl);
         let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("camera"),
             contents: bytemuck::cast_slice(&[CameraUniform {
@@ -1430,6 +1635,22 @@ impl Graphics {
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
                 resource: inventory_camera_buffer.as_entire_binding(),
+            }],
+        });
+        let overlay_camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("item overlay camera"),
+            contents: bytemuck::cast_slice(&[CameraUniform {
+                view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
+                lighting: [1.0, 0.0, 0.0, 0.0],
+            }]),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let overlay_camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("item overlay camera bg"),
+            layout: &camera_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: overlay_camera_buffer.as_entire_binding(),
             }],
         });
         let atlas_bind_group = upload_atlas(&device, &queue, &texture_bgl, atlas);
@@ -1485,10 +1706,12 @@ impl Graphics {
             queue,
             config,
             pipeline,
+            translucent_pipeline,
             camera_buffer,
             camera_bind_group,
             inventory_camera_buffer,
             inventory_camera_bind_group,
+            overlay_camera_bind_group,
             atlas_bind_group,
             texture_layout: texture_bgl,
             depth_view,
@@ -1509,6 +1732,8 @@ impl Graphics {
             crack_buffer: None,
             inventory_player_buffer: None,
             inventory_player_bounds: None,
+            overlay_block_buffer: None,
+            overlay_item_buffer: None,
         }
     }
 
@@ -1631,6 +1856,11 @@ impl Graphics {
         }
     }
 
+    fn set_item_overlays(&mut self, block_vertices: &[Vertex], item_vertices: &[Vertex]) {
+        self.overlay_block_buffer = self.make_vertex_buffer(block_vertices);
+        self.overlay_item_buffer = self.make_vertex_buffer(item_vertices);
+    }
+
     fn resize(&mut self, width: u32, height: u32) {
         if width == 0 || height == 0 {
             return;
@@ -1650,15 +1880,26 @@ impl Graphics {
             self.chunk_meshes.remove(&coord);
             return;
         }
-        let buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("chunk vertices"),
-                contents: bytemuck::cast_slice(vertices),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-        self.chunk_meshes
-            .insert(coord, (buffer, vertices.len() as u32));
+        let (opaque, translucent) = partition_chunk_vertices(vertices);
+        let upload = |label: &str, vertices: &[Vertex]| {
+            (!vertices.is_empty()).then(|| {
+                let buffer = self
+                    .device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some(label),
+                        contents: bytemuck::cast_slice(vertices),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    });
+                (buffer, vertices.len() as u32)
+            })
+        };
+        self.chunk_meshes.insert(
+            coord,
+            ChunkBuffers {
+                opaque: upload("opaque chunk vertices", &opaque),
+                translucent: upload("translucent chunk vertices", &translucent),
+            },
+        );
     }
 
     fn render(&mut self, camera: &crab_render::Camera, clear: [f64; 3]) {
@@ -1668,9 +1909,23 @@ impl Graphics {
             .write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[uniform]));
 
         let frame = match self.surface.get_current_texture() {
-            Ok(f) => f,
-            Err(_) => {
+            Ok(frame) => frame,
+            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
                 self.surface.configure(&self.device, &self.config);
+                match self.surface.get_current_texture() {
+                    Ok(frame) => frame,
+                    Err(error) => {
+                        tracing::debug!(%error, "surface was not ready after reconfiguration");
+                        return;
+                    }
+                }
+            }
+            Err(wgpu::SurfaceError::Timeout) => {
+                self.window.request_redraw();
+                return;
+            }
+            Err(wgpu::SurfaceError::OutOfMemory) => {
+                tracing::error!("surface ran out of memory");
                 return;
             }
         };
@@ -1712,9 +1967,13 @@ impl Graphics {
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
             pass.set_bind_group(1, &self.atlas_bind_group, &[]);
-            for (buffer, count) in self.chunk_meshes.values() {
-                pass.set_vertex_buffer(0, buffer.slice(..));
-                pass.draw(0..*count, 0..1);
+            let mut opaque_chunks: Vec<_> = self.chunk_meshes.iter().collect();
+            opaque_chunks.sort_by_key(|(coord, _)| **coord);
+            for (_, chunk) in opaque_chunks {
+                if let Some((buffer, count)) = &chunk.opaque {
+                    pass.set_vertex_buffer(0, buffer.slice(..));
+                    pass.draw(0..*count, 0..1);
+                }
             }
             // Box entities (no model) — block atlas still bound at group 1.
             if let Some((buffer, count)) = &self.box_entity_buffer {
@@ -1740,6 +1999,30 @@ impl Graphics {
                 pass.set_bind_group(1, bind, &[]);
                 pass.set_vertex_buffer(0, buffer.slice(..));
                 pass.draw(0..*count, 0..1);
+            }
+            // Alpha geometry is drawn after every opaque world object. The
+            // chunks are ordered back-to-front and do not write depth, so
+            // water/glass appearance cannot depend on HashMap iteration order.
+            pass.set_pipeline(&self.translucent_pipeline);
+            pass.set_bind_group(1, &self.atlas_bind_group, &[]);
+            let mut translucent_chunks: Vec<_> = self
+                .chunk_meshes
+                .iter()
+                .filter(|(_, chunk)| chunk.translucent.is_some())
+                .collect();
+            translucent_chunks.sort_by(|(a, _), (b, _)| {
+                let distance = |coord: &(i32, i32)| {
+                    let x = coord.0 as f32 * 16.0 + 8.0 - camera.eye.x;
+                    let z = coord.1 as f32 * 16.0 + 8.0 - camera.eye.z;
+                    x * x + z * z
+                };
+                distance(b).total_cmp(&distance(a))
+            });
+            for (_, chunk) in translucent_chunks {
+                if let Some((buffer, count)) = &chunk.translucent {
+                    pass.set_vertex_buffer(0, buffer.slice(..));
+                    pass.draw(0..*count, 0..1);
+                }
             }
             // HUD backgrounds and GUI sprites are drawn before the inventory
             // player preview so the 3D model appears inside the panel cutout.
@@ -1793,6 +2076,41 @@ impl Graphics {
             pass.set_bind_group(1, &self.entity_atlas_bind_group, &[]);
             pass.set_vertex_buffer(0, buffer.slice(..));
             pass.draw(0..*count, 0..1);
+        }
+        if self.overlay_block_buffer.is_some() || self.overlay_item_buffer.is_some() {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("3d item overlay pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &self.overlay_camera_bind_group, &[]);
+            if let Some((buffer, count)) = &self.overlay_block_buffer {
+                pass.set_bind_group(1, &self.atlas_bind_group, &[]);
+                pass.set_vertex_buffer(0, buffer.slice(..));
+                pass.draw(0..*count, 0..1);
+            }
+            if let Some((buffer, count)) = &self.overlay_item_buffer {
+                pass.set_bind_group(1, &self.item_world_bind_group, &[]);
+                pass.set_vertex_buffer(0, buffer.slice(..));
+                pass.draw(0..*count, 0..1);
+            }
         }
         {
             // Item icons and text remain above the 3D inventory preview.
@@ -1886,6 +2204,9 @@ struct App {
     last_frame: Instant,
     /// Previous non-repeating Space press, used for vanilla-style flight toggling.
     last_space_press: Option<Instant>,
+    /// Previous non-repeating forward press and the resulting sprint latch.
+    last_forward_press: Option<Instant>,
+    double_tap_sprint: bool,
     /// One-shot request consumed by the network/physics thread.
     flight_toggle_pending: bool,
     swap_hands_pending: bool,
@@ -1913,6 +2234,7 @@ struct App {
     /// Cursor position in NDC (for inventory/menu hit-testing).
     cursor: (f32, f32),
     fov_degrees: f32,
+    rendered_fov_degrees: f32,
     mouse_sensitivity: f32,
     perspective: Perspective,
     local_walk_phase: f32,
@@ -1936,6 +2258,7 @@ struct App {
 #[derive(Clone, Copy)]
 struct EntityAnim {
     pos: [f32; 3],
+    velocity: [f32; 3],
     /// Accumulated walk-cycle phase (radians).
     phase: f32,
     /// Smoothed limb-swing amplitude (0 = still).
@@ -1948,6 +2271,47 @@ struct EntityAnim {
     swing_time: f32,
     hurt_time: f32,
     age: f32,
+}
+
+fn predicted_falling_item_position(
+    position: [f64; 3],
+    velocity: [f64; 3],
+    horizon: f32,
+) -> [f32; 3] {
+    let t = f64::from(horizon.clamp(0.0, 0.1));
+    // Vanilla item entities subtract 0.04 blocks/tick before applying 0.98
+    // drag. In seconds that is 16 blocks/s²; a short ballistic lookahead is
+    // enough to hide the 20 Hz packet staircase without running a second game
+    // simulation in the renderer.
+    [
+        (position[0] + velocity[0] * t) as f32,
+        (position[1] + velocity[1] * t - 8.0 * t * t) as f32,
+        (position[2] + velocity[2] * t) as f32,
+    ]
+}
+
+fn local_player_model_yaws(camera_yaw: f32) -> (f32, f32) {
+    (camera_yaw, camera_yaw)
+}
+
+fn particle_mesh(particle: &Particle, white_uv: [f32; 4]) -> Vec<Vertex> {
+    // A 0.12-block particle stays legible at normal play distances while
+    // remaining substantially smaller than an item entity.
+    let half_size = 0.06;
+    box_mesh(
+        [
+            particle.position[0] - half_size,
+            particle.position[1] - half_size,
+            particle.position[2] - half_size,
+        ],
+        [
+            particle.position[0] + half_size,
+            particle.position[1] + half_size,
+            particle.position[2] + half_size,
+        ],
+        white_uv,
+        particle.color,
+    )
 }
 
 #[derive(Clone)]
@@ -2013,6 +2377,8 @@ impl App {
             keys: HashSet::new(),
             last_frame: Instant::now(),
             last_space_press: None,
+            last_forward_press: None,
+            double_tap_sprint: false,
             flight_toggle_pending: false,
             swap_hands_pending: false,
             hand_swing_time: 0.0,
@@ -2033,6 +2399,7 @@ impl App {
             chat_buffer: String::new(),
             cursor: (0.0, 0.0),
             fov_degrees: 70.0,
+            rendered_fov_degrees: 70.0,
             mouse_sensitivity: 0.12,
             perspective: Perspective::FirstPerson,
             local_walk_phase: 0.0,
@@ -2062,13 +2429,19 @@ impl App {
                     vehicle.z,
                 )
             });
-            let target = [
-                (x + e.velocity[0] * 0.05) as f32,
-                (y + e.velocity[1] * 0.05) as f32,
-                (z + e.velocity[2] * 0.05) as f32,
-            ];
+            let falling_item = e.item.is_some() || e.block_state.is_some();
+            let target = if falling_item {
+                predicted_falling_item_position([x, y, z], e.velocity, 0.05)
+            } else {
+                [
+                    (x + e.velocity[0] * 0.05) as f32,
+                    (y + e.velocity[1] * 0.05) as f32,
+                    (z + e.velocity[2] * 0.05) as f32,
+                ]
+            };
             let a = self.entity_anim.entry(id).or_insert(EntityAnim {
                 pos: target,
+                velocity: e.velocity.map(|component| component as f32),
                 phase: 0.0,
                 amount: 0.0,
                 yaw: e.yaw,
@@ -2091,8 +2464,16 @@ impl App {
             a.swing_time = (a.swing_time - dt).max(0.0);
             a.hurt_time = (a.hurt_time - dt).max(0.0);
             let before = a.pos;
+            if falling_item {
+                for axis in 0..3 {
+                    a.pos[axis] += a.velocity[axis] * dt;
+                    a.velocity[axis] *= 0.98_f32.powf(dt * 20.0);
+                }
+                a.velocity[1] -= 16.0 * dt;
+            }
             for (k, &t) in target.iter().enumerate() {
                 a.pos[k] += (t - a.pos[k]) * ease;
+                a.velocity[k] += (e.velocity[k] as f32 - a.velocity[k]) * ease;
             }
             let (dx, dz) = (a.pos[0] - before[0], a.pos[2] - before[2]);
             let moved = (dx * dx + dz * dz).sqrt();
@@ -2319,21 +2700,7 @@ impl App {
         }
         drop(entities);
         for particle in self.shared.particles.lock().unwrap().iter() {
-            let size = 0.035;
-            box_v.extend(box_mesh(
-                [
-                    particle.position[0] - size,
-                    particle.position[1] - size,
-                    particle.position[2] - size,
-                ],
-                [
-                    particle.position[0] + size,
-                    particle.position[1] + size,
-                    particle.position[2] + size,
-                ],
-                white,
-                particle.color,
-            ));
+            box_v.extend(particle_mesh(particle, white));
         }
         (box_v, model_v, item_v)
     }
@@ -2923,6 +3290,7 @@ impl App {
         {
             self.flight_toggle_pending = false;
             self.swap_hands_pending = false;
+            self.double_tap_sprint = false;
             let mut controls = self.shared.controls.lock().unwrap();
             controls.forward = 0.0;
             controls.strafe = 0.0;
@@ -2972,7 +3340,9 @@ impl App {
         controls.forward = axis(KeyCode::KeyW, KeyCode::KeyS);
         controls.strafe = axis(KeyCode::KeyD, KeyCode::KeyA);
         controls.jump = pressed(KeyCode::Space);
-        controls.sprint = pressed(KeyCode::ControlLeft) || pressed(KeyCode::ControlRight);
+        controls.sprint = self.double_tap_sprint
+            || pressed(KeyCode::ControlLeft)
+            || pressed(KeyCode::ControlRight);
         controls.sneak = pressed(KeyCode::ShiftLeft) || pressed(KeyCode::ShiftRight);
         if std::mem::take(&mut self.flight_toggle_pending) {
             controls.toggle_flight = true;
@@ -3171,6 +3541,22 @@ impl ApplicationHandler for App {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::Focused(focused) => {
+                // Key-up events are not guaranteed while another application
+                // owns focus. Clear transient movement immediately and reset
+                // frame timing so restoring the window cannot produce a large
+                // simulation step. Reconfigure eagerly on focus regain because
+                // macOS may invalidate the drawable while the app is hidden.
+                self.keys.clear();
+                self.last_frame = Instant::now();
+                if focused {
+                    if let Some(gfx) = self.gfx.as_mut() {
+                        let size = gfx.window.inner_size();
+                        gfx.resize(size.width, size.height);
+                        gfx.window.request_redraw();
+                    }
+                }
+            }
             WindowEvent::Resized(size) => {
                 if let Some(gfx) = self.gfx.as_mut() {
                     gfx.resize(size.width, size.height);
@@ -3341,6 +3727,19 @@ impl ApplicationHandler for App {
                 } else if code == KeyCode::Escape {
                     // ignore Esc release / auto-repeat
                 } else if pressed {
+                    if !repeat
+                        && code == KeyCode::KeyW
+                        && !self.item_screen_open()
+                        && !self.screen_open(UiScreen::Pause)
+                    {
+                        let now = Instant::now();
+                        if is_double_tap(self.last_forward_press, now) {
+                            self.double_tap_sprint = true;
+                            self.last_forward_press = None;
+                        } else {
+                            self.last_forward_press = Some(now);
+                        }
+                    }
                     if !repeat && code == KeyCode::F3 {
                         self.debug_open = !self.debug_open;
                         return;
@@ -3399,6 +3798,9 @@ impl ApplicationHandler for App {
                     self.keys.insert(code);
                 } else {
                     self.keys.remove(&code);
+                    if code == KeyCode::KeyW {
+                        self.double_tap_sprint = false;
+                    }
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
@@ -3570,6 +3972,14 @@ impl ApplicationHandler for App {
                 self.last_frame = now;
                 let instant_fps = 1.0 / dt.max(0.001);
                 self.smoothed_fps += (instant_fps - self.smoothed_fps) * 0.08;
+                let target_fov = movement_fov(
+                    self.fov_degrees,
+                    player.sneaking,
+                    player.sprinting,
+                    player.flying,
+                );
+                self.rendered_fov_degrees +=
+                    (target_fov - self.rendered_fov_degrees) * (1.0 - (-dt * 8.0).exp());
                 if player.selected_slot != self.last_named_slot {
                     self.last_named_slot = player.selected_slot;
                     self.selected_name_time = 2.0;
@@ -3615,9 +4025,11 @@ impl ApplicationHandler for App {
                     .map(|context| self.visible_crafting_recipes(context.grid))
                     .unwrap_or_default();
                 let selected = player.selected_slot as usize;
-                let main_hand_icon =
+                let mut main_hand_icon =
                     inventory_item_icon(&self.shared, &self.item_atlas, 36 + selected);
-                let offhand_icon = inventory_item_icon(&self.shared, &self.item_atlas, 45);
+                let mut offhand_icon = inventory_item_icon(&self.shared, &self.item_atlas, 45);
+                let main_hand_name = inventory_item_name(&self.shared, 36 + selected);
+                let offhand_name = inventory_item_name(&self.shared, 45);
                 let holding_filled_map = {
                     let inventory = self.shared.inventory.lock().unwrap();
                     [36 + selected, 45].into_iter().any(|slot| {
@@ -3683,6 +4095,7 @@ impl ApplicationHandler for App {
                         } else {
                             0
                         };
+                        let (body_yaw, head_yaw) = local_player_model_yaws(self.yaw);
                         model_v.extend(entity_mesh_with_pose(
                             &model.geo,
                             [eye.x, eye.y, eye.z],
@@ -3694,8 +4107,8 @@ impl ApplicationHandler for App {
                             self.local_walk_phase,
                             if moving { 0.65 } else { 0.0 },
                             1.0,
-                            self.yaw,
-                            self.yaw,
+                            body_yaw,
+                            head_yaw,
                             hand_swing,
                             pose,
                         ));
@@ -3737,6 +4150,145 @@ impl ApplicationHandler for App {
                         gfx.resize(real.width, real.height);
                     }
                     let aspect = gfx.aspect();
+                    let mut overlay_blocks = Vec::new();
+                    let mut overlay_items = Vec::new();
+                    let inventory_snapshot = self.shared.inventory.lock().unwrap().clone();
+                    {
+                        let mut add_model =
+                            |item: Option<crab_protocol::versions::v1_20_1::play::SlotItem>,
+                             rect: HudRect| {
+                                item.filter(|item| item.count > 0)
+                                    .and_then(|item| u32::try_from(item.item_id).ok())
+                                    .and_then(crab_registry::item_name)
+                                    .is_some_and(|name| {
+                                        push_hud_item_model(
+                                            &mut overlay_blocks,
+                                            &mut overlay_items,
+                                            &self.atlas,
+                                            &self.item_atlas,
+                                            name,
+                                            rect,
+                                            aspect,
+                                        )
+                                    })
+                            };
+                        for slot in 0..9 {
+                            add_model(
+                                inventory_snapshot.get(36 + slot).copied().flatten(),
+                                crab_render::hotbar_slot_rect(aspect, slot),
+                            );
+                        }
+                        if inventory_open && container.is_none() {
+                            let panel = crab_render::inventory_rect(aspect);
+                            for slot in 0..46 {
+                                add_model(
+                                    inventory_snapshot.get(slot).copied().flatten(),
+                                    crab_render::inventory_slot_rect(panel, slot),
+                                );
+                            }
+                        }
+                        if let Some(container) = container.as_ref() {
+                            let rows = container.generic_rows();
+                            let panel = rows.map_or_else(
+                                || {
+                                    container.simple_container_texture().map_or_else(
+                                        || crab_render::inventory_rect(aspect),
+                                        |texture| {
+                                            crab_render::simple_container_rect(texture, aspect)
+                                        },
+                                    )
+                                },
+                                |rows| crab_render::container_rect(rows, aspect),
+                            );
+                            for (slot, item) in container.slots.iter().copied().enumerate() {
+                                let rect = if let Some(rows) = rows {
+                                    crab_render::container_slot_rect(panel, rows, slot)
+                                } else if let Some(texture) = container.simple_container_texture() {
+                                    crab_render::simple_container_slot_rect(panel, texture, slot)
+                                } else {
+                                    crab_render::furnace_slot_rect(panel, slot)
+                                };
+                                add_model(item, rect);
+                            }
+                        }
+                        if self.recipe_book_open {
+                            if let Some(context) = recipe_context {
+                                let rect = recipe_book_panel_rect(context.panel, aspect);
+                                let start = self.recipe_book_page * 20;
+                                for (visible, recipe) in
+                                    crafting_recipes.iter().skip(start).take(20).enumerate()
+                                {
+                                    let cell = recipe_book_cell_rect(rect, visible);
+                                    let inset = (cell.2 - cell.0) * 0.14;
+                                    add_model(
+                                        recipe.result,
+                                        (
+                                            cell.0 + inset,
+                                            cell.1 + inset,
+                                            cell.2 - inset,
+                                            cell.3 - inset,
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    if show_first_person_items && held_map.is_none() {
+                        let swing_arc = (hand_swing * std::f32::consts::PI).sin().clamp(0.0, 1.0);
+                        if main_hand_name.is_some_and(|name| {
+                            push_hud_item_model(
+                                &mut overlay_blocks,
+                                &mut overlay_items,
+                                &self.atlas,
+                                &self.item_atlas,
+                                name,
+                                (
+                                    0.40 - swing_arc * 0.18,
+                                    -0.98 - swing_arc * 0.12,
+                                    0.98 - swing_arc * 0.10,
+                                    -0.28 - swing_arc * 0.18,
+                                ),
+                                aspect,
+                            )
+                        }) {
+                            main_hand_icon = None;
+                        }
+                        if offhand_name.is_some_and(|name| {
+                            push_hud_item_model(
+                                &mut overlay_blocks,
+                                &mut overlay_items,
+                                &self.atlas,
+                                &self.item_atlas,
+                                name,
+                                (-0.98, -0.98, -0.42, -0.30),
+                                aspect,
+                            )
+                        }) {
+                            offhand_icon = None;
+                        }
+                    }
+                    let carried = *self.shared.carried.lock().unwrap();
+                    let carried_rect = {
+                        let (cx, cy) = self.cursor;
+                        let size = 0.055;
+                        (cx - size / aspect, cy - size, cx + size / aspect, cy + size)
+                    };
+                    let carried_modelled = carried
+                        .filter(|item| item.count > 0)
+                        .and_then(|item| u32::try_from(item.item_id).ok())
+                        .and_then(crab_registry::item_name)
+                        .is_some_and(|name| {
+                            push_hud_item_model(
+                                &mut overlay_blocks,
+                                &mut overlay_items,
+                                &self.atlas,
+                                &self.item_atlas,
+                                name,
+                                carried_rect,
+                                aspect,
+                            )
+                        });
+                    gfx.set_item_overlays(&overlay_blocks, &overlay_items);
                     gfx.set_inventory_player(&[], None, None);
                     let eye_height = if player.swimming || player.gliding {
                         0.4
@@ -3751,7 +4303,7 @@ impl ApplicationHandler for App {
                         self.pitch,
                         aspect,
                         eye_height,
-                        self.fov_degrees,
+                        self.rendered_fov_degrees,
                         self.perspective,
                         third_person_distance,
                     );
@@ -3903,8 +4455,8 @@ impl ApplicationHandler for App {
                             } else {
                                 first_person_items_geometry(
                                     &mut hud_i,
-                                    main_hand_icon,
-                                    offhand_icon,
+                                    main_hand_name.zip(main_hand_icon),
+                                    offhand_name.zip(offhand_icon),
                                     hand_swing,
                                     aspect,
                                 );
@@ -4329,31 +4881,35 @@ impl ApplicationHandler for App {
                         }
                         if let Some(context) = recipe_context {
                             let toggle = recipe_book_toggle_rect(context.panel, aspect);
-                            push_color2d(
-                                &mut hud_c,
-                                toggle.0,
-                                toggle.1,
-                                toggle.2,
-                                toggle.3,
-                                if self.recipe_book_open {
-                                    [0.35, 0.68, 0.30]
-                                } else {
-                                    [0.25, 0.48, 0.22]
-                                },
-                            );
-                            crab_render::push_text(
-                                &mut hud_text,
-                                gui,
-                                "R",
-                                toggle.0 + 0.026 / aspect.max(0.01),
-                                toggle.3 - 0.025,
-                                0.06,
-                                aspect,
-                            );
+                            if let Some(uv) = gui.sprite(if self.recipe_book_open {
+                                "recipe_toggle_hover"
+                            } else {
+                                "recipe_toggle"
+                            }) {
+                                push_tex2d(&mut hud_g, toggle.0, toggle.1, toggle.2, toggle.3, uv);
+                            } else {
+                                push_color2d(
+                                    &mut hud_c,
+                                    toggle.0,
+                                    toggle.1,
+                                    toggle.2,
+                                    toggle.3,
+                                    [0.25, 0.48, 0.22],
+                                );
+                                crab_render::push_text(
+                                    &mut hud_text,
+                                    gui,
+                                    "R",
+                                    toggle.0 + 0.026 / aspect.max(0.01),
+                                    toggle.3 - 0.025,
+                                    0.06,
+                                    aspect,
+                                );
+                            }
                             if self.recipe_book_open {
                                 let page_count = crafting_recipes.len().max(1).div_ceil(20);
                                 let page = self.recipe_book_page.min(page_count - 1);
-                                let (colors, items, text) = recipe_book_geometry(
+                                let (colors, recipe_gui, items, text) = recipe_book_geometry(
                                     gui,
                                     &self.item_atlas,
                                     &crafting_recipes,
@@ -4363,23 +4919,37 @@ impl ApplicationHandler for App {
                                     aspect,
                                 );
                                 hud_c.extend(colors);
+                                hud_g.extend(recipe_gui);
                                 hud_i.extend(items);
                                 hud_text.extend(text);
                             }
                         }
                         if inv_icons.is_some() || container_icons.is_some() {
                             // Item held on the cursor, drawn at the mouse position.
-                            if let Some(it) = *self.shared.carried.lock().unwrap() {
-                                if let Some(uv) = u32::try_from(it.item_id)
-                                    .ok()
-                                    .and_then(crab_registry::item_name)
-                                    .and_then(|n| self.item_atlas.icon(n))
-                                {
-                                    let (cx, cy) = self.cursor;
-                                    let s = 0.055;
-                                    let hw = s / aspect;
-                                    push_tex2d(&mut hud_i, cx - hw, cy - s, cx + hw, cy + s, uv);
+                            if let Some(it) = carried {
+                                if !carried_modelled {
+                                    if let Some(uv) = u32::try_from(it.item_id)
+                                        .ok()
+                                        .and_then(crab_registry::item_name)
+                                        .and_then(|n| self.item_atlas.icon(n))
+                                    {
+                                        push_tex2d(
+                                            &mut hud_i,
+                                            carried_rect.0,
+                                            carried_rect.1,
+                                            carried_rect.2,
+                                            carried_rect.3,
+                                            uv,
+                                        );
+                                    }
                                 }
+                                push_stack_count(
+                                    &mut hud_text,
+                                    gui,
+                                    aspect,
+                                    it.count,
+                                    carried_rect,
+                                );
                             }
                         }
                         if let Some(item) = hovered_item {
@@ -4579,6 +5149,18 @@ mod tests {
             Perspective::ThirdPersonFront.next(),
             Perspective::FirstPerson
         );
+        assert_eq!(movement_fov(70.0, false, false, false), 70.0);
+        assert_eq!(movement_fov(70.0, true, false, false), 66.5);
+        assert_eq!(movement_fov(70.0, false, true, false), 77.0);
+        assert_eq!(movement_fov(110.0, false, true, false), 110.0);
+    }
+
+    #[test]
+    fn forward_double_tap_uses_vanilla_sprint_window() {
+        let now = Instant::now();
+        assert!(is_double_tap(Some(now - Duration::from_millis(200)), now));
+        assert!(!is_double_tap(Some(now - Duration::from_millis(300)), now));
+        assert!(!is_double_tap(None, now));
     }
 
     #[test]
@@ -4688,13 +5270,38 @@ mod tests {
         let mut vertices = Vec::new();
         first_person_items_geometry(
             &mut vertices,
-            Some([0.0, 0.0, 0.5, 0.5]),
-            Some([0.5, 0.5, 1.0, 1.0]),
+            Some(("diamond_pickaxe", [0.0, 0.0, 0.5, 0.5])),
+            Some(("apple", [0.5, 0.5, 1.0, 1.0])),
             0.5,
             16.0 / 9.0,
         );
         assert_eq!(vertices.len(), 12);
         assert!(vertices.iter().all(|vertex| vertex[0].is_finite()));
+        let main_height = vertices[..6]
+            .iter()
+            .map(|vertex| vertex[1])
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(min, max), value| {
+                (min.min(value), max.max(value))
+            });
+        assert!(main_height.1 - main_height.0 > 0.4);
+    }
+
+    #[test]
+    fn block_items_are_fitted_as_depth_bearing_hud_models() {
+        let atlas = Atlas::debug_uniform();
+        let item_atlas = ItemAtlas::empty();
+        let rect = (-0.2, -0.2, 0.2, 0.2);
+        let (source, vertices) =
+            hud_item_model(&atlas, &item_atlas, "stone", rect, 16.0 / 9.0).unwrap();
+        assert_eq!(source, HudModelAtlas::Blocks);
+        assert_eq!(vertices.len(), 36);
+        assert!(vertices.iter().all(|vertex| {
+            vertex.position[0] >= rect.0
+                && vertex.position[0] <= rect.2
+                && vertex.position[1] >= rect.1
+                && vertex.position[1] <= rect.3
+                && (0.0..=1.0).contains(&vertex.position[2])
+        }));
     }
 
     #[test]
@@ -4703,6 +5310,60 @@ mod tests {
         assert_eq!(entity_item_sprite("eye_of_ender"), Some("ender_eye"));
         assert_eq!(entity_item_sprite("small_fireball"), Some("fire_charge"));
         assert_eq!(entity_item_sprite("zombie"), None);
+    }
+
+    #[test]
+    fn dropped_item_prediction_includes_velocity_and_gravity() {
+        let predicted = predicted_falling_item_position([10.0, 64.0, -3.0], [2.0, 1.0, -4.0], 0.05);
+        assert!((predicted[0] - 10.1).abs() < 1e-5);
+        assert!((predicted[1] - 64.03).abs() < 1e-5);
+        assert!((predicted[2] - -3.2).abs() < 1e-5);
+        assert_eq!(
+            predicted_falling_item_position([1.0, 2.0, 3.0], [9.0; 3], -1.0),
+            [1.0, 2.0, 3.0]
+        );
+    }
+
+    #[test]
+    fn local_player_body_and_head_follow_camera_yaw() {
+        assert_eq!(local_player_model_yaws(-137.5), (-137.5, -137.5));
+        assert_eq!(local_player_model_yaws(42.0), (42.0, 42.0));
+    }
+
+    #[test]
+    fn particles_build_visible_world_geometry() {
+        let particle = Particle {
+            position: [2.0, 3.0, 4.0],
+            velocity: [0.0; 3],
+            color: [0.2, 0.4, 0.8],
+            age: 0,
+            lifetime: 20,
+        };
+        let vertices = particle_mesh(&particle, [0.0, 0.0, 1.0, 1.0]);
+        assert_eq!(vertices.len(), 36);
+        assert!(vertices.iter().all(|vertex| vertex.tint == particle.color));
+        let (min_x, max_x) = vertices
+            .iter()
+            .map(|vertex| vertex.position[0])
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(min, max), x| {
+                (min.min(x), max.max(x))
+            });
+        assert!((max_x - min_x - 0.12).abs() < 1e-5);
+    }
+
+    #[test]
+    fn chunk_geometry_separates_translucent_triangles() {
+        let mut opaque = box_mesh([0.0; 3], [1.0; 3], [0.0, 0.0, 1.0, 1.0], [1.0; 3]);
+        let mut translucent = opaque.clone();
+        for vertex in &mut translucent {
+            vertex.opacity = 0.65;
+        }
+        opaque.extend(translucent);
+        let (opaque, translucent) = partition_chunk_vertices(&opaque);
+        assert_eq!(opaque.len(), 36);
+        assert_eq!(translucent.len(), 36);
+        assert!(opaque.iter().all(|vertex| vertex.opacity == 1.0));
+        assert!(translucent.iter().all(|vertex| vertex.opacity == 0.65));
     }
 
     #[test]
