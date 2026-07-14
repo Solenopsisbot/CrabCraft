@@ -10,4 +10,4 @@ repository.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 serde_json = { version = "1", features = ["preserve_order"] }
-rodio = "0.19"
+rodio = "0.22"
