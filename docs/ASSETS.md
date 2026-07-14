@@ -27,17 +27,37 @@ state radices from block names. Multipart `OR`/`AND` conditions, pipe-separated
 values, weighted alternatives, model rotations, per-face UV rotations, and
 `uvlock` are carried into chunk meshing. The model loader then follows parent
 chains and texture variables before adding the resolved textures to the atlas.
+Face UVs omitted by a model are derived from the element bounds with vanilla's
+direction-specific projection. Namespaced model and texture references resolve
+from their owning `assets/<namespace>` tree rather than being redirected to
+`minecraft`.
 
 Legacy family-specific model lookups remain a non-fatal fallback for incomplete
 or custom packs. A missing blockstate, model, or texture never causes a client
 jar to be copied or extracted into the repository.
 
-Item models use the same parent-chain resolver. Items with resolved element
+Item models use the same parent-chain resolver. For 1.21.4 and newer assets the
+loader starts at `assets/<namespace>/items/<path>.json`, follows plain models,
+and selects the context-free fallback of condition, select, and range-dispatch
+definitions. Generated flat models alpha-compose every declared `layerN`
+texture in order instead of discarding overlays. Items with resolved element
 geometry retain their inherited `ground` display rotation, translation, and
 scale when rendered as dropped entities; generated flat-layer items remain
 camera-facing sprites. Falling-block entities are different from dropped items:
 their Spawn Entity data is an exact global block-state ID, so they select that
 state's variant/multipart geometry rather than an inventory item model.
+
+At startup Crabcraft reports unresolved block/item model counts and missing or
+undecodable texture counts, with examples. A non-zero count usually means that
+the client jar does not match the selected protocol or a resource pack has
+incomplete references; Crabcraft does not guess a replacement model ID.
+
+The remaining item fidelity boundary is explicit. Stack-dependent branches
+(damage, use state, time/compass state, custom-model-data, trim, and similar
+properties), special renderers, per-layer component tints, native-resolution
+textures, and animated `.mcmeta` frame playback are not yet evaluated. The
+context-free fallback makes the base icon/model available but is not a claim
+that every runtime variant is identical to Java Edition.
 
 ## Entity model resolution
 
@@ -66,6 +86,13 @@ still reads each wood/chest texture from the user's jar. Item-shaped projectiles
 use item-atlas sprites, primed TNT uses its block model, and entity bones named
 as wings, fins, tails, or paddles receive continuous procedural motion in
 addition to walk, attack, hurt, and pose animation.
+
+Entity geometry is a compatibility approximation, not Java model equivalence.
+Java Edition's entity meshes and animation controllers are code-defined rather
+than stored in the client resource pack; Bedrock sample geometry and Crabcraft's
+procedural animation therefore cannot guarantee vertex-, pose-, or timing-level
+identity. Missing source geometry continues to render as an explicit bounds box
+instead of a guessed mob model.
 
 When adding an alias:
 

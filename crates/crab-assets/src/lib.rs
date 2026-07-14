@@ -198,6 +198,8 @@ pub struct Atlas {
     white_uv: [f32; 4],
     /// When true (the debug atlas), every block is treated as a full cube.
     assume_cube: bool,
+    unresolved: Vec<String>,
+    missing_textures: Vec<String>,
 }
 
 impl Atlas {
@@ -257,6 +259,19 @@ impl Atlas {
         self.white_uv
     }
 
+    /// Requested registry blocks for which neither a blockstate-selected model
+    /// nor a legacy direct model could be resolved from the active assets.
+    #[must_use]
+    pub fn unresolved_models(&self) -> &[String] {
+        &self.unresolved
+    }
+
+    /// Referenced textures that were absent or could not be decoded.
+    #[must_use]
+    pub fn missing_textures(&self) -> &[String] {
+        &self.missing_textures
+    }
+
     /// A trivial 1-tile white atlas where every block maps to a flat white tile.
     /// Lets the renderer/tests run without a jar (everything is untextured).
     pub fn debug_uniform() -> Self {
@@ -278,6 +293,8 @@ impl Atlas {
             },
             white_uv: [0.0, 0.0, 1.0, 1.0],
             assume_cube: true,
+            unresolved: Vec::new(),
+            missing_textures: Vec::new(),
         }
     }
 }
@@ -291,6 +308,8 @@ pub struct ItemAtlas {
     pub height: u32,
     icons: HashMap<String, [f32; 4]>,
     models: HashMap<String, ItemModel>,
+    unresolved: Vec<String>,
+    missing_textures: Vec<String>,
 }
 
 /// Resolved 3D item geometry and its inherited ground display transform.
@@ -326,6 +345,19 @@ impl ItemAtlas {
         self.icons.is_empty()
     }
 
+    /// Requested non-air items whose default model and icon could not be
+    /// resolved from either the legacy or 1.21.4+ item-definition format.
+    #[must_use]
+    pub fn unresolved_models(&self) -> &[String] {
+        &self.unresolved
+    }
+
+    /// Referenced textures that were absent or could not be decoded.
+    #[must_use]
+    pub fn missing_textures(&self) -> &[String] {
+        &self.missing_textures
+    }
+
     /// An atlas with no icons (a single transparent tile). Lets the renderer
     /// run without a jar — the hotbar simply shows no item icons.
     #[must_use]
@@ -336,6 +368,8 @@ impl ItemAtlas {
             height: TILE,
             icons: HashMap::new(),
             models: HashMap::new(),
+            unresolved: Vec::new(),
+            missing_textures: Vec::new(),
         }
     }
 }
@@ -461,12 +495,69 @@ pub(crate) fn read_model<R: Read + std::io::Seek>(
     archive: &mut zip::ZipArchive<R>,
     name: &str,
 ) -> Option<ModelJson> {
-    let bare = name.strip_prefix("minecraft:").unwrap_or(name);
-    let path = format!("assets/minecraft/models/{bare}.json");
+    let (namespace, bare) = split_resource_id(name);
+    let path = format!("assets/{namespace}/models/{bare}.json");
     let mut file = archive.by_name(&path).ok()?;
     let mut text = String::new();
     file.read_to_string(&mut text).ok()?;
     serde_json::from_str(&text).ok()
+}
+
+fn split_resource_id(id: &str) -> (&str, &str) {
+    id.split_once(':').unwrap_or(("minecraft", id))
+}
+
+/// Resolves the context-free/default plain model referenced by the 1.21.4+
+/// client item definition. Dynamic branches are evaluated as an unselected,
+/// unused stack: condition uses `on_false`, while select/range dispatch use
+/// their explicit fallback. This is the authoritative default appearance used
+/// by inventory entries that do not retain the relevant stack components.
+fn read_client_item_model<R: Read + std::io::Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    item_id: &str,
+) -> Option<Option<String>> {
+    let (namespace, bare) = split_resource_id(item_id);
+    let path = format!("assets/{namespace}/items/{bare}.json");
+    let mut file = archive.by_name(&path).ok()?;
+    let mut text = String::new();
+    file.read_to_string(&mut text).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    Some(default_plain_item_model(value.get("model")?, 0))
+}
+
+fn default_plain_item_model(value: &serde_json::Value, depth: usize) -> Option<String> {
+    if depth > 32 {
+        return None;
+    }
+    let object = value.as_object()?;
+    let kind = object.get("type")?.as_str()?;
+    match kind.strip_prefix("minecraft:").unwrap_or(kind) {
+        "model" => object.get("model")?.as_str().map(str::to_owned),
+        "special" => object.get("base")?.as_str().map(str::to_owned),
+        "condition" => object
+            .get("on_false")
+            .or_else(|| object.get("on_true"))
+            .and_then(|model| default_plain_item_model(model, depth + 1)),
+        "select" | "range_dispatch" => object
+            .get("fallback")
+            .and_then(|model| default_plain_item_model(model, depth + 1))
+            .or_else(|| {
+                object
+                    .get("cases")
+                    .or_else(|| object.get("entries"))
+                    .and_then(serde_json::Value::as_array)
+                    .and_then(|entries| entries.first())
+                    .and_then(|entry| entry.get("model"))
+                    .and_then(|model| default_plain_item_model(model, depth + 1))
+            }),
+        "composite" => object
+            .get("models")?
+            .as_array()?
+            .iter()
+            .find_map(|model| default_plain_item_model(model, depth + 1)),
+        "empty" | "bundle/selected_item" => None,
+        _ => None,
+    }
 }
 
 fn load_element_variant<R: Read + std::io::Seek>(
@@ -588,16 +679,14 @@ pub fn load_block_atlas_with_registry(
     let mut block_elems: HashMap<String, Vec<ParsedElem>> = HashMap::new();
     let mut state_models: HashMap<u32, Vec<ParsedStatePart>> = HashMap::new();
     let mut tex_paths: BTreeSet<String> = BTreeSet::new();
+    let mut unresolved = Vec::new();
 
     for name in block_names {
         let bare = name.strip_prefix("minecraft:").unwrap_or(name);
-        state_models.extend(load_state_models(
-            &mut archive,
-            &mut cache,
-            &mut tex_paths,
-            bare,
-            registries,
-        ));
+        let selected_models =
+            load_state_models(&mut archive, &mut cache, &mut tex_paths, bare, registries);
+        let resolved_by_state = !selected_models.is_empty();
+        state_models.extend(selected_models);
         if bare.ends_with("_door") && !bare.ends_with("_trapdoor") {
             for half in ["bottom", "top"] {
                 for hinge in ["left", "right"] {
@@ -743,6 +832,9 @@ pub fn load_block_atlas_with_registry(
         }
         let model_name = format!("block/{bare}");
         let Some(resolved) = resolve(&mut archive, &model_name, &mut cache) else {
+            if !resolved_by_state {
+                unresolved.push(name.clone());
+            }
             continue;
         };
         if let Some(faces) = cube_faces(&resolved) {
@@ -790,10 +882,13 @@ pub fn load_block_atlas_with_registry(
     let white_uv = slot_uv(0, grid);
 
     let mut tex_uv: HashMap<String, [f32; 4]> = HashMap::new();
+    let mut missing_textures = Vec::new();
     for (i, path) in paths.iter().enumerate() {
         let slot = i as u32 + 1;
-        let tile =
-            load_texture_tile(&mut archive, path).unwrap_or([200u8; (TILE * TILE * 4) as usize]);
+        let tile = load_texture_tile(&mut archive, path).unwrap_or_else(|| {
+            missing_textures.push(path.clone());
+            [200u8; (TILE * TILE * 4) as usize]
+        });
         blit_tile(&mut rgba, dim, slot, &tile);
         tex_uv.insert(path.clone(), slot_uv(slot, grid));
     }
@@ -931,19 +1026,34 @@ pub fn load_block_atlas_with_registry(
         fallback,
         white_uv,
         assume_cube: false,
+        unresolved,
+        missing_textures,
     })
 }
 
-/// Resolves the single icon texture path for an item: `layer0` for flat
-/// (generated) items, else a representative face texture for block items.
-fn resolve_item_icon<R: Read + std::io::Seek>(
+/// Resolves the ordered icon texture layers for an item. Generated models can
+/// use multiple layers (for example potion contents and an overlay); block
+/// items fall back to one representative face texture.
+fn resolve_item_icon_layers<R: Read + std::io::Seek>(
     archive: &mut zip::ZipArchive<R>,
-    item_bare: &str,
+    model_name: &str,
     cache: &mut HashMap<String, Option<Resolved>>,
-) -> Option<String> {
-    let resolved = resolve(archive, &format!("item/{item_bare}"), cache)?;
-    if resolved.textures.contains_key("layer0") {
-        return model::resolve_texture(&resolved.textures, "#layer0");
+) -> Vec<String> {
+    let Some(resolved) = resolve(archive, model_name, cache) else {
+        return Vec::new();
+    };
+    let mut layers = Vec::new();
+    for index in 0..32 {
+        let key = format!("layer{index}");
+        if !resolved.textures.contains_key(&key) {
+            break;
+        }
+        if let Some(texture) = model::resolve_texture(&resolved.textures, &format!("#{key}")) {
+            layers.push(texture);
+        }
+    }
+    if !layers.is_empty() {
+        return layers;
     }
     // Block items inherit a block model; pick a sensible representative face.
     for key in [
@@ -951,7 +1061,7 @@ fn resolve_item_icon<R: Read + std::io::Seek>(
     ] {
         if resolved.textures.contains_key(key) {
             if let Some(p) = model::resolve_texture(&resolved.textures, &format!("#{key}")) {
-                return Some(p);
+                return vec![p];
             }
         }
     }
@@ -959,6 +1069,8 @@ fn resolve_item_icon<R: Read + std::io::Seek>(
         .textures
         .values()
         .find_map(|v| model::resolve_texture(&resolved.textures, v))
+        .into_iter()
+        .collect()
 }
 
 /// Loads flat **item icons** for `item_names` from `jar_path` and stitches them
@@ -969,21 +1081,35 @@ pub fn load_item_atlas(jar_path: &Path, item_names: &[String]) -> Result<ItemAtl
     let mut cache: HashMap<String, Option<Resolved>> = HashMap::new();
 
     // Resolve each item to its icon texture path.
-    let mut item_tex: HashMap<String, String> = HashMap::new();
+    let mut item_tex: HashMap<String, Vec<String>> = HashMap::new();
     let mut item_models: HashMap<String, (Vec<ParsedElem>, DisplayTransform)> = HashMap::new();
     let mut tex_paths: BTreeSet<String> = BTreeSet::new();
+    let mut unresolved = Vec::new();
     for name in item_names {
         let bare = name.strip_prefix("minecraft:").unwrap_or(name);
         if bare == "air" {
             continue;
         }
-        if let Some(path) = resolve_item_icon(&mut archive, bare, &mut cache) {
-            tex_paths.insert(path.clone());
-            item_tex.insert(bare.to_string(), path);
+        let modern_model = read_client_item_model(&mut archive, name);
+        if modern_model == Some(None) {
+            // An explicit empty/context-only modern definition has no
+            // context-free visual. Do not resurrect a removed legacy path.
+            continue;
         }
-        if let Some(resolved) = resolve(&mut archive, &format!("item/{bare}"), &mut cache) {
+        let model_name = modern_model
+            .flatten()
+            .unwrap_or_else(|| format!("minecraft:item/{bare}"));
+        let mut resolved_any = false;
+        let icon_layers = resolve_item_icon_layers(&mut archive, &model_name, &mut cache);
+        if !icon_layers.is_empty() {
+            resolved_any = true;
+            tex_paths.extend(icon_layers.iter().cloned());
+            item_tex.insert(bare.to_string(), icon_layers);
+        }
+        if let Some(resolved) = resolve(&mut archive, &model_name, &mut cache) {
             let elements = parse_elements(&resolved);
             if !elements.is_empty() {
+                resolved_any = true;
                 for element in &elements {
                     for face in element.faces.iter().flatten() {
                         tex_paths.insert(face.path.clone());
@@ -993,27 +1119,42 @@ pub fn load_item_atlas(jar_path: &Path, item_names: &[String]) -> Result<ItemAtl
                 item_models.insert(bare.to_string(), (elements, ground));
             }
         }
+        if !resolved_any {
+            unresolved.push(name.clone());
+        }
     }
 
     // One tile per unique texture, laid out in a square grid.
     let paths: Vec<String> = tex_paths.into_iter().collect();
-    let tile_count = paths.len().max(1) as u32;
+    // Each item icon gets its own composed tile after the source texture tiles.
+    let tile_count = (paths.len() + item_tex.len()).max(1) as u32;
     let grid = (f64::from(tile_count)).sqrt().ceil() as u32;
     let dim = grid * TILE;
     let mut rgba = vec![0u8; (dim * dim * 4) as usize];
     let mut tex_uv: HashMap<String, [f32; 4]> = HashMap::new();
+    let mut missing_textures = Vec::new();
     for (i, path) in paths.iter().enumerate() {
         let slot = i as u32;
-        let tile =
-            load_texture_tile(&mut archive, path).unwrap_or([200u8; (TILE * TILE * 4) as usize]);
+        let tile = load_texture_tile(&mut archive, path).unwrap_or_else(|| {
+            missing_textures.push(path.clone());
+            [200u8; (TILE * TILE * 4) as usize]
+        });
         blit_tile(&mut rgba, dim, slot, &tile);
         tex_uv.insert(path.clone(), slot_uv(slot, grid));
     }
 
-    let icons = item_tex
-        .into_iter()
-        .filter_map(|(item, path)| tex_uv.get(&path).map(|uv| (item, *uv)))
-        .collect();
+    let mut icons = HashMap::new();
+    for (index, (item, layers)) in item_tex.into_iter().enumerate() {
+        let mut composed = [0u8; (TILE * TILE * 4) as usize];
+        for path in layers {
+            if let Some(layer) = load_texture_tile(&mut archive, &path) {
+                alpha_composite(&mut composed, &layer);
+            }
+        }
+        let slot = paths.len() as u32 + index as u32;
+        blit_tile(&mut rgba, dim, slot, &composed);
+        icons.insert(item, slot_uv(slot, grid));
+    }
 
     let models = item_models
         .into_iter()
@@ -1047,7 +1188,28 @@ pub fn load_item_atlas(jar_path: &Path, item_names: &[String]) -> Result<ItemAtl
         height: dim,
         icons,
         models,
+        unresolved,
+        missing_textures,
     })
+}
+
+fn alpha_composite(destination: &mut [u8], source: &[u8]) {
+    for (dst, src) in destination.chunks_exact_mut(4).zip(source.chunks_exact(4)) {
+        let source_alpha = u32::from(src[3]);
+        let destination_alpha = u32::from(dst[3]);
+        let output_alpha = source_alpha + (destination_alpha * (255 - source_alpha) + 127) / 255;
+        if output_alpha == 0 {
+            continue;
+        }
+        for channel in 0..3 {
+            let source_premultiplied = u32::from(src[channel]) * source_alpha;
+            let destination_premultiplied =
+                u32::from(dst[channel]) * destination_alpha * (255 - source_alpha) / 255;
+            dst[channel] =
+                ((source_premultiplied + destination_premultiplied) / output_alpha).min(255) as u8;
+        }
+        dst[3] = output_alpha.min(255) as u8;
+    }
 }
 
 /// Generic green for tinted faces (grass top, leaves). Real biome tint later.
@@ -1120,7 +1282,7 @@ fn parse_elements(resolved: &Resolved) -> Vec<ParsedElem> {
                 if let Some(path) = model::resolve_texture(&resolved.textures, &fj.texture) {
                     faces[idx] = Some(ParsedFace {
                         path,
-                        uv16: fj.uv.unwrap_or([0.0, 0.0, 16.0, 16.0]),
+                        uv16: fj.uv.unwrap_or_else(|| default_face_uv(e, idx)),
                         tinted: fj.tintindex.is_some(),
                         cull: fj.cullface.as_deref().and_then(face_index).map(|i| i as u8),
                         uv_rotation: fj.rotation.rem_euclid(360).div_euclid(90) as u8 % 4,
@@ -1147,6 +1309,23 @@ fn parse_elements(resolved: &Resolved) -> Vec<ParsedElem> {
         .collect()
 }
 
+/// Vanilla derives omitted face UVs from the element bounds. The mapping is
+/// direction-specific because north/east faces view the cuboid from the
+/// opposite axis direction.
+fn default_face_uv(element: &ElementJson, face: usize) -> [f32; 4] {
+    let [fx, fy, fz] = element.from;
+    let [tx, ty, tz] = element.to;
+    match face {
+        0 => [16.0 - tz, 16.0 - ty, 16.0 - fz, 16.0 - fy], // east
+        1 => [fz, 16.0 - ty, tz, 16.0 - fy],               // west
+        2 => [fx, fz, tx, tz],                             // up
+        3 => [fx, 16.0 - tz, tx, 16.0 - fz],               // down
+        4 => [fx, 16.0 - ty, tx, 16.0 - fy],               // south
+        5 => [16.0 - tx, 16.0 - ty, 16.0 - fx, 16.0 - fy], // north
+        _ => [0.0, 0.0, 16.0, 16.0],
+    }
+}
+
 /// Maps a face's 0..16 model uv into its atlas tile sub-rect.
 fn sub_rect(tile: [f32; 4], uv16: [f32; 4]) -> [f32; 4] {
     let [au0, av0, au1, av1] = tile;
@@ -1160,8 +1339,8 @@ fn load_texture_tile<R: Read + std::io::Seek>(
     archive: &mut zip::ZipArchive<R>,
     tex_ref: &str,
 ) -> Option<[u8; (TILE * TILE * 4) as usize]> {
-    let bare = tex_ref.strip_prefix("minecraft:").unwrap_or(tex_ref);
-    let path = format!("assets/minecraft/textures/{bare}.png");
+    let (namespace, bare) = split_resource_id(tex_ref);
+    let path = format!("assets/{namespace}/textures/{bare}.png");
     let mut file = archive.by_name(&path).ok()?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes).ok()?;
@@ -1268,6 +1447,100 @@ mod tests {
             &serde_json::json!({"AND": [{"north": "true"}, {"half": "bottom"}]}),
             &properties,
         ));
+    }
+
+    #[test]
+    fn omitted_element_uvs_follow_vanilla_face_projection() {
+        let element = ElementJson {
+            from: [2.0, 3.0, 5.0],
+            to: [11.0, 13.0, 15.0],
+            rotation: None,
+            faces: HashMap::new(),
+        };
+        assert_eq!(default_face_uv(&element, 0), [1.0, 3.0, 11.0, 13.0]);
+        assert_eq!(default_face_uv(&element, 1), [5.0, 3.0, 15.0, 13.0]);
+        assert_eq!(default_face_uv(&element, 2), [2.0, 5.0, 11.0, 15.0]);
+        assert_eq!(default_face_uv(&element, 3), [2.0, 1.0, 11.0, 11.0]);
+        assert_eq!(default_face_uv(&element, 4), [2.0, 3.0, 11.0, 13.0]);
+        assert_eq!(default_face_uv(&element, 5), [5.0, 3.0, 14.0, 13.0]);
+    }
+
+    #[test]
+    fn resolves_modern_item_definition_and_namespaced_assets() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "crabcraft-modern-item-{}-{nonce}.jar",
+            std::process::id()
+        ));
+        let file = File::create(&path).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        writer
+            .start_file("assets/minecraft/items/test_item.json", options)
+            .unwrap();
+        writer
+            .write_all(br#"{"model":{"type":"minecraft:model","model":"test:item/actual"}}"#)
+            .unwrap();
+        writer
+            .start_file("assets/test/models/item/actual.json", options)
+            .unwrap();
+        writer
+            .write_all(
+                br##"{"parent":"minecraft:item/generated","textures":{"layer0":"test:item/actual","layer1":"test:item/overlay"}}"##,
+            )
+            .unwrap();
+        writer
+            .start_file("assets/minecraft/models/item/generated.json", options)
+            .unwrap();
+        writer.write_all(br#"{}"#).unwrap();
+        writer
+            .start_file("assets/test/textures/item/actual.png", options)
+            .unwrap();
+        let image = image::RgbaImage::from_pixel(16, 16, image::Rgba([12, 34, 56, 255]));
+        let mut png = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut png, image::ImageFormat::Png).unwrap();
+        writer.write_all(png.get_ref()).unwrap();
+        writer
+            .start_file("assets/test/textures/item/overlay.png", options)
+            .unwrap();
+        let image = image::RgbaImage::from_pixel(16, 16, image::Rgba([200, 100, 50, 128]));
+        let mut png = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut png, image::ImageFormat::Png).unwrap();
+        writer.write_all(png.get_ref()).unwrap();
+        writer.finish().unwrap();
+
+        let atlas = load_item_atlas(&path, &["minecraft:test_item".to_string()]).unwrap();
+        assert_eq!(atlas.len(), 1);
+        assert!(atlas.icon("test_item").is_some());
+        assert!(atlas.unresolved_models().is_empty());
+        assert!(atlas.missing_textures().is_empty());
+        assert!(atlas
+            .rgba
+            .chunks_exact(4)
+            .any(|pixel| pixel == [106, 67, 52, 255]));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn modern_item_definition_uses_context_free_fallback() {
+        let definition = serde_json::json!({
+            "type": "minecraft:condition",
+            "property": "minecraft:using_item",
+            "on_true": {"type": "minecraft:model", "model": "test:item/using"},
+            "on_false": {
+                "type": "minecraft:range_dispatch",
+                "property": "minecraft:damage",
+                "fallback": {"type": "minecraft:model", "model": "test:item/default"},
+                "entries": []
+            }
+        });
+        assert_eq!(
+            default_plain_item_model(&definition, 0).as_deref(),
+            Some("test:item/default")
+        );
     }
 
     #[test]
@@ -1391,6 +1664,7 @@ mod tests {
 
         let atlas = load_item_atlas(&path, &["minecraft:test_block".to_string()]).unwrap();
         let model = atlas.model("test_block").unwrap();
+        assert_eq!(atlas.missing_textures(), &["minecraft:block/test"]);
         assert_eq!(model.ground.rotation, [10.0, 20.0, 30.0]);
         assert_eq!(model.ground.translation, [1.0, 2.0, 3.0]);
         assert_eq!(model.ground.scale, [0.25, 0.5, 0.75]);

@@ -63,6 +63,7 @@ tested for every supported profile:
 - **Rendering**: a `wgpu` voxel renderer (face-culled meshing, depth, lighting)
   with **textures loaded from your client jar** (atlas-stitched cube models +
   **element models** so slabs/stairs/plants/lanterns render as real shapes +
+  vanilla-derived omitted-face UVs + namespaced resource-pack references +
   grass/foliage tint); offscreen mode + a live windowed viewer
 - **Player control**: first-person WASD/jump/look in the window, driven through
   the physics sim and sent to the server, with **Control sprint** and
@@ -95,6 +96,9 @@ tested for every supported profile:
    their body yaw plus independent server-driven head yaw**; shared-model/variant mobs are aliased to the right geo+skin so
    far fewer render as boxes; slimes/magma cubes scale to their size and
    **dropped items show their item icon**
+- **Item assets**: resolves legacy models and 1.21.4+ `items/*.json` default
+  branches, alpha-composes generated-model texture layers, and reports
+  unresolved block/item models instead of silently claiming complete coverage
 - **Entity presentation**: packet-driven arm swings, hurt reactions, independent
   head rotation, metadata-driven crouch/swim/glide/sleep/death/sit poses,
   main/offhand items, visible material-coloured armour layers,
