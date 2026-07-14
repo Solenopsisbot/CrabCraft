@@ -125,7 +125,19 @@ fn load_atlas(registries: crab_registry::RegistrySet) -> crab_assets::Atlas {
                 registries,
             ) {
                 Ok(atlas) => {
-                    tracing::info!(width = atlas.width, "loaded textures from {jar}");
+                    if atlas.unresolved_models().is_empty() && atlas.missing_textures().is_empty() {
+                        tracing::info!(
+                            width = atlas.width,
+                            "resolved all requested block model references from {jar}"
+                        );
+                    } else {
+                        tracing::warn!(
+                            missing = atlas.unresolved_models().len(),
+                            missing_textures = atlas.missing_textures().len(),
+                            examples = ?atlas.unresolved_models().iter().take(8).collect::<Vec<_>>(),
+                            "block assets are incomplete or do not match the selected protocol"
+                        );
+                    }
                     atlas
                 }
                 Err(e) => {
@@ -156,7 +168,20 @@ fn load_item_atlas(registries: crab_registry::RegistrySet) -> crab_assets::ItemA
         .collect();
     match crab_assets::load_item_atlas(std::path::Path::new(&jar), &names) {
         Ok(atlas) => {
-            tracing::info!("loaded {} item icons from {jar}", atlas.len());
+            if atlas.unresolved_models().is_empty() && atlas.missing_textures().is_empty() {
+                tracing::info!(
+                    resolved = atlas.len(),
+                    "resolved all context-free item model references from {jar}"
+                );
+            } else {
+                tracing::warn!(
+                    resolved = atlas.len(),
+                    missing = atlas.unresolved_models().len(),
+                    missing_textures = atlas.missing_textures().len(),
+                    examples = ?atlas.unresolved_models().iter().take(8).collect::<Vec<_>>(),
+                    "item assets are incomplete or do not match the selected protocol"
+                );
+            }
             atlas
         }
         Err(e) => {
