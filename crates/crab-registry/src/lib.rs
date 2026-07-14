@@ -61,20 +61,125 @@ pub use items_1_21_5::ITEMS_1_21_5;
 
 static REGISTRY_PROFILE: AtomicU8 = AtomicU8::new(0);
 
+/// Immutable set of generated registries selected for one client session.
+///
+/// Prefer carrying this value in session, simulation, and rendering state over
+/// using the process-global compatibility functions in this crate. Keeping the
+/// selection explicit allows multiple protocol versions and replay tests to run
+/// safely in the same process.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct RegistrySet {
+    profile: u8,
+}
+
+impl RegistrySet {
+    /// Selects the generated registry set for a supported wire protocol.
+    /// Unknown protocols deliberately use the primary 1.20.1 tables.
+    #[must_use]
+    pub const fn for_protocol(protocol: i32) -> Self {
+        Self {
+            profile: match protocol {
+                764 => 1,
+                765 => 2,
+                766 => 3,
+                767 => 4,
+                768 => 5,
+                769 => 6,
+                770 => 7,
+                _ => 0,
+            },
+        }
+    }
+
+    /// The process-global selection, retained for compatibility with existing
+    /// stateless APIs and examples while callers migrate to session ownership.
+    #[must_use]
+    pub fn global() -> Self {
+        Self {
+            profile: REGISTRY_PROFILE.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Active block definitions for this registry set.
+    #[must_use]
+    pub const fn blocks(self) -> &'static [BlockDef] {
+        match self.profile {
+            1 => BLOCKS_1_20_2,
+            2 => BLOCKS_1_20_3,
+            3 => BLOCKS_1_20_5,
+            4 => BLOCKS_1_21,
+            5 => BLOCKS_1_21_3,
+            6 => BLOCKS_1_21_4,
+            7 => BLOCKS_1_21_5,
+            _ => BLOCKS_1_20_1,
+        }
+    }
+
+    /// Active item definitions for this registry set.
+    #[must_use]
+    pub const fn items(self) -> &'static [ItemDef] {
+        match self.profile {
+            2 => ITEMS_1_20_3,
+            3 => ITEMS_1_20_5,
+            4 => ITEMS_1_21,
+            5 => ITEMS_1_21_3,
+            6 => ITEMS_1_21_4,
+            7 => ITEMS_1_21_5,
+            _ => ITEMS_1_20_1,
+        }
+    }
+
+    /// Active entity definitions for this registry set.
+    #[must_use]
+    pub const fn entities(self) -> &'static [EntityDef] {
+        match self.profile {
+            2 => ENTITIES_1_20_3,
+            3 | 4 => ENTITIES_1_20_5,
+            5 => ENTITIES_1_21_3,
+            6 => ENTITIES_1_21_4,
+            7 => ENTITIES_1_21_5,
+            _ => ENTITIES_1_20_1,
+        }
+    }
+
+    /// Looks up an entity by its wire registry ID.
+    #[must_use]
+    pub fn entity_def(self, id: u32) -> Option<&'static EntityDef> {
+        let entities = self.entities();
+        entities
+            .binary_search_by_key(&id, |entity| entity.id)
+            .ok()
+            .map(|index| &entities[index])
+    }
+
+    /// Looks up an entity name by its wire registry ID.
+    #[must_use]
+    pub fn entity_name(self, id: u32) -> Option<&'static str> {
+        self.entity_def(id).map(|entity| entity.name)
+    }
+
+    /// Looks up an item by its wire registry ID.
+    #[must_use]
+    pub fn item_def(self, id: u32) -> Option<&'static ItemDef> {
+        let items = self.items();
+        items
+            .binary_search_by_key(&id, |item| item.id)
+            .ok()
+            .map(|index| &items[index])
+    }
+
+    /// Looks up an item name by its wire registry ID.
+    #[must_use]
+    pub fn item_name(self, id: u32) -> Option<&'static str> {
+        self.item_def(id).map(|item| item.name)
+    }
+}
+
 /// Selects numeric registry tables for a supported protocol. Call this before
 /// loading assets or decoding packets; unknown protocols retain the 763 tables.
 pub fn set_protocol(protocol: i32) {
     REGISTRY_PROFILE.store(
-        match protocol {
-            764 => 1,
-            765 => 2,
-            766 => 3,
-            767 => 4,
-            768 => 5,
-            769 => 6,
-            770 => 7,
-            _ => 0,
-        },
+        RegistrySet::for_protocol(protocol).profile,
         Ordering::Relaxed,
     );
 }
@@ -82,44 +187,19 @@ pub fn set_protocol(protocol: i32) {
 /// Active block registry for this process's selected server protocol.
 #[must_use]
 pub fn blocks() -> &'static [BlockDef] {
-    match REGISTRY_PROFILE.load(Ordering::Relaxed) {
-        1 => BLOCKS_1_20_2,
-        2 => BLOCKS_1_20_3,
-        3 => BLOCKS_1_20_5,
-        4 => BLOCKS_1_21,
-        5 => BLOCKS_1_21_3,
-        6 => BLOCKS_1_21_4,
-        7 => BLOCKS_1_21_5,
-        _ => BLOCKS_1_20_1,
-    }
+    RegistrySet::global().blocks()
 }
 
 /// Active item registry for this process's selected server protocol.
 #[must_use]
 pub fn items() -> &'static [ItemDef] {
-    match REGISTRY_PROFILE.load(Ordering::Relaxed) {
-        2 => ITEMS_1_20_3,
-        3 => ITEMS_1_20_5,
-        4 => ITEMS_1_21,
-        5 => ITEMS_1_21_3,
-        6 => ITEMS_1_21_4,
-        7 => ITEMS_1_21_5,
-        _ => ITEMS_1_20_1,
-    }
+    RegistrySet::global().items()
 }
 
 /// Active entity registry for this process's selected server protocol.
 #[must_use]
 pub fn entities() -> &'static [EntityDef] {
-    match REGISTRY_PROFILE.load(Ordering::Relaxed) {
-        2 => ENTITIES_1_20_3,
-        3 => ENTITIES_1_20_5,
-        4 => ENTITIES_1_20_5,
-        5 => ENTITIES_1_21_3,
-        6 => ENTITIES_1_21_4,
-        7 => ENTITIES_1_21_5,
-        _ => ENTITIES_1_20_1,
-    }
+    RegistrySet::global().entities()
 }
 
 /// An entity type and its default hitbox size.
@@ -134,17 +214,13 @@ pub struct EntityDef {
 /// Looks up an entity type by its registry id.
 #[must_use]
 pub fn entity_def(id: u32) -> Option<&'static EntityDef> {
-    let entities = entities();
-    entities
-        .binary_search_by_key(&id, |e| e.id)
-        .ok()
-        .map(|i| &entities[i])
+    RegistrySet::global().entity_def(id)
 }
 
 /// Entity name (e.g. `"cow"`) for a type id.
 #[must_use]
 pub fn entity_name(id: u32) -> Option<&'static str> {
-    entity_def(id).map(|e| e.name)
+    RegistrySet::global().entity_name(id)
 }
 
 /// An item type and its maximum stack size.
@@ -158,17 +234,13 @@ pub struct ItemDef {
 /// Looks up an item by its registry id.
 #[must_use]
 pub fn item_def(id: u32) -> Option<&'static ItemDef> {
-    let items = items();
-    items
-        .binary_search_by_key(&id, |e| e.id)
-        .ok()
-        .map(|i| &items[i])
+    RegistrySet::global().item_def(id)
 }
 
 /// Item name (e.g. `"diamond"`) for an item id.
 #[must_use]
 pub fn item_name(id: u32) -> Option<&'static str> {
-    item_def(id).map(|e| e.name)
+    RegistrySet::global().item_name(id)
 }
 
 /// One blockstate property in global-state enumeration order.
@@ -202,32 +274,13 @@ pub struct BlockDef {
 /// Resolves one property value from a global block-state ID.
 #[must_use]
 pub fn block_state_property(state: u32, property: &str) -> Option<&'static str> {
-    let block = block_for_state(state)?;
-    let offset = usize::try_from(state.checked_sub(block.min_state)?).ok()?;
-    let index = block
-        .properties
-        .iter()
-        .position(|candidate| candidate.name == property)?;
-    let stride = block.properties[index + 1..]
-        .iter()
-        .try_fold(1usize, |product, property| {
-            product.checked_mul(property.values.len())
-        })?;
-    let values = block.properties[index].values;
-    values.get((offset / stride) % values.len()).copied()
+    RegistrySet::global().block_state_property(state, property)
 }
 
 /// Returns all property/value pairs for a global block-state ID.
 #[must_use]
 pub fn block_state_properties(state: u32) -> Option<Vec<(&'static str, &'static str)>> {
-    let block = block_for_state(state)?;
-    block
-        .properties
-        .iter()
-        .map(|property| {
-            block_state_property(state, property.name).map(|value| (property.name, value))
-        })
-        .collect()
+    RegistrySet::global().block_state_properties(state)
 }
 
 /// One axis-aligned part of a block collision shape, in local 0..=1 coordinates.
@@ -263,9 +316,9 @@ const FULL_BOX: CollisionBox = CollisionBox {
     max: [1.0; 3],
 };
 
-fn collision_state_shapes() -> &'static [u16] {
+fn collision_state_shapes(profile: u8) -> &'static [u16] {
     use collision_generated::*;
-    match REGISTRY_PROFILE.load(Ordering::Relaxed) {
+    match profile {
         1 => COLLISION_STATES_1_20_2,
         2 => COLLISION_STATES_1_20_3,
         3 => COLLISION_STATES_1_20_5,
@@ -283,35 +336,135 @@ fn collision_state_shapes() -> &'static [u16] {
 /// PrismarineJS minecraft-data.
 #[must_use]
 pub fn collision_shape(state: u32) -> CollisionShape {
-    let Some(&shape_id) = usize::try_from(state)
-        .ok()
-        .and_then(|state| collision_state_shapes().get(state))
-    else {
-        return CollisionShape {
-            boxes: [EMPTY_BOX; 16],
-            len: 0,
+    RegistrySet::global().collision_shape(state)
+}
+
+impl RegistrySet {
+    /// Resolves one property value from a global block-state ID.
+    #[must_use]
+    pub fn block_state_property(self, state: u32, property: &str) -> Option<&'static str> {
+        let block = self.block_for_state(state)?;
+        let offset = usize::try_from(state.checked_sub(block.min_state)?).ok()?;
+        let index = block
+            .properties
+            .iter()
+            .position(|candidate| candidate.name == property)?;
+        let stride = block.properties[index + 1..]
+            .iter()
+            .try_fold(1usize, |product, property| {
+                product.checked_mul(property.values.len())
+            })?;
+        let values = block.properties[index].values;
+        values.get((offset / stride) % values.len()).copied()
+    }
+
+    /// Returns all property/value pairs for a global block-state ID.
+    #[must_use]
+    pub fn block_state_properties(self, state: u32) -> Option<Vec<(&'static str, &'static str)>> {
+        let block = self.block_for_state(state)?;
+        block
+            .properties
+            .iter()
+            .map(|property| {
+                self.block_state_property(state, property.name)
+                    .map(|value| (property.name, value))
+            })
+            .collect()
+    }
+
+    /// Exact vanilla collision boxes for a global block state in this set.
+    #[must_use]
+    pub fn collision_shape(self, state: u32) -> CollisionShape {
+        let Some(&shape_id) = usize::try_from(state)
+            .ok()
+            .and_then(|state| collision_state_shapes(self.profile).get(state))
+        else {
+            return CollisionShape {
+                boxes: [EMPTY_BOX; 16],
+                len: 0,
+            };
         };
-    };
-    let Some(&(start, len)) = collision_generated::COLLISION_SHAPES.get(usize::from(shape_id))
-    else {
-        return CollisionShape {
-            boxes: [EMPTY_BOX; 16],
-            len: 0,
+        let Some(&(start, len)) = collision_generated::COLLISION_SHAPES.get(usize::from(shape_id))
+        else {
+            return CollisionShape {
+                boxes: [EMPTY_BOX; 16],
+                len: 0,
+            };
         };
-    };
-    let start = start as usize;
-    let len = usize::from(len);
-    let Some(source) = collision_generated::COLLISION_BOXES.get(start..start + len) else {
-        return CollisionShape {
-            boxes: [EMPTY_BOX; 16],
-            len: 0,
+        let start = start as usize;
+        let len = usize::from(len);
+        let Some(source) = collision_generated::COLLISION_BOXES.get(start..start + len) else {
+            return CollisionShape {
+                boxes: [EMPTY_BOX; 16],
+                len: 0,
+            };
         };
-    };
-    let mut boxes = [EMPTY_BOX; 16];
-    boxes[..len].copy_from_slice(source);
-    CollisionShape {
-        boxes,
-        len: len as u8,
+        let mut boxes = [EMPTY_BOX; 16];
+        boxes[..len].copy_from_slice(source);
+        CollisionShape {
+            boxes,
+            len: len as u8,
+        }
+    }
+
+    /// Ticks at 20 TPS for a bare hand to break a block state.
+    #[must_use]
+    pub fn break_ticks(self, state: u32) -> Option<u32> {
+        let block = self.block_for_state(state)?;
+        if block.hardness < 0.0 {
+            return None;
+        }
+        let denominator = if block.needs_tool { 100.0 } else { 30.0 };
+        Some((block.hardness * denominator).ceil() as u32)
+    }
+
+    /// Resolves the block owning a global state ID.
+    #[must_use]
+    pub fn block_for_state(self, state: u32) -> Option<&'static BlockDef> {
+        let blocks = self.blocks();
+        let (mut low, mut high) = (0usize, blocks.len());
+        while low < high {
+            let middle = low + (high - low) / 2;
+            let block = &blocks[middle];
+            if state < block.min_state {
+                high = middle;
+            } else if state > block.max_state {
+                low = middle + 1;
+            } else {
+                return Some(block);
+            }
+        }
+        None
+    }
+
+    /// Namespaced block name for a block-state ID.
+    #[must_use]
+    pub fn block_name(self, state: u32) -> Option<&'static str> {
+        self.block_for_state(state).map(|block| block.name)
+    }
+
+    /// Looks up a block by bare or namespaced name.
+    #[must_use]
+    pub fn block_by_name(self, name: &str) -> Option<&'static BlockDef> {
+        let bare = name.strip_prefix("minecraft:").unwrap_or(name);
+        self.blocks()
+            .iter()
+            .find(|block| block.name.strip_prefix("minecraft:") == Some(bare))
+    }
+
+    /// Whether a state is one of the non-collidable air blocks.
+    #[must_use]
+    pub fn is_air(self, state: u32) -> bool {
+        matches!(
+            self.block_name(state),
+            Some("minecraft:air" | "minecraft:cave_air" | "minecraft:void_air")
+        )
+    }
+
+    /// Whether a state has any player collision.
+    #[must_use]
+    pub fn is_collidable(self, state: u32) -> bool {
+        !self.collision_shape(state).boxes().is_empty()
     }
 }
 
@@ -320,13 +473,7 @@ pub fn collision_shape(state: u32) -> CollisionShape {
 /// tool), so a server validating dig speed never rejects it as too fast.
 #[must_use]
 pub fn break_ticks(state: u32) -> Option<u32> {
-    let b = block_for_state(state)?;
-    if b.hardness < 0.0 {
-        return None;
-    }
-    // damage/tick = speed(1.0) / hardness / (canHarvest ? 30 : 100)
-    let denom = if b.needs_tool { 100.0 } else { 30.0 };
-    Some((b.hardness * denom).ceil() as u32)
+    RegistrySet::global().break_ticks(state)
 }
 
 /// Resolves the block owning `state` via binary search over the sorted table.
@@ -334,56 +481,53 @@ pub fn break_ticks(state: u32) -> Option<u32> {
 /// State-ID ranges are contiguous and disjoint, so this is exact.
 #[must_use]
 pub fn block_for_state(state: u32) -> Option<&'static BlockDef> {
-    let blocks = blocks();
-    let (mut lo, mut hi) = (0usize, blocks.len());
-    while lo < hi {
-        let mid = lo + (hi - lo) / 2;
-        let b = &blocks[mid];
-        if state < b.min_state {
-            hi = mid;
-        } else if state > b.max_state {
-            lo = mid + 1;
-        } else {
-            return Some(b);
-        }
-    }
-    None
+    RegistrySet::global().block_for_state(state)
 }
 
 /// Namespaced block name for a block-state ID, if known.
 #[must_use]
 pub fn block_name(state: u32) -> Option<&'static str> {
-    block_for_state(state).map(|b| b.name)
+    RegistrySet::global().block_name(state)
 }
 
 /// Looks up a block by (bare or namespaced) name, e.g. `"oak_planks"`.
 #[must_use]
 pub fn block_by_name(name: &str) -> Option<&'static BlockDef> {
-    let bare = name.strip_prefix("minecraft:").unwrap_or(name);
-    blocks()
-        .iter()
-        .find(|b| b.name.strip_prefix("minecraft:") == Some(bare))
+    RegistrySet::global().block_by_name(name)
 }
 
 /// Whether a state is one of the non-collidable air blocks.
 #[must_use]
 pub fn is_air(state: u32) -> bool {
-    matches!(
-        block_name(state),
-        Some("minecraft:air" | "minecraft:cave_air" | "minecraft:void_air")
-    )
+    RegistrySet::global().is_air(state)
 }
 
 /// Whether a block state has any player collision.
 ///
 #[must_use]
 pub fn is_collidable(state: u32) -> bool {
-    !collision_shape(state).boxes().is_empty()
+    RegistrySet::global().is_collidable(state)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn immutable_registry_sets_do_not_share_protocol_selection() {
+        let legacy = RegistrySet::for_protocol(763);
+        let modern = RegistrySet::for_protocol(770);
+        assert_ne!(legacy.blocks().len(), modern.blocks().len());
+        assert_ne!(legacy.items().len(), modern.items().len());
+        assert_eq!(
+            legacy.block_by_name("pale_oak_log"),
+            None,
+            "1.20.1 must not observe a later session's registry"
+        );
+        assert!(modern.block_by_name("pale_oak_log").is_some());
+        assert_eq!(legacy.block_name(0), Some("minecraft:air"));
+        assert_eq!(modern.block_name(0), Some("minecraft:air"));
+    }
 
     #[test]
     fn known_blocks_resolve() {

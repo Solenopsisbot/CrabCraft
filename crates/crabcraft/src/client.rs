@@ -6,11 +6,15 @@ use std::fs::File;
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use bytes::Buf;
+use crab_core::{
+    ClientCommand, ClientCore, ClientEvent, ClientSnapshot, CommandQueue, ConnectionPhase,
+    ProtocolVersion, RecipeKey, ReplayRecorder, SessionContext,
+};
 use crab_net::Connection;
 use crab_protocol::packet::{Packet, State};
 use crab_protocol::versions::v1_20_1::handshake::{Handshake, NextState};
@@ -19,13 +23,13 @@ use crab_protocol::versions::v1_20_1::login::{
     SetCompression,
 };
 use crab_protocol::versions::v1_20_1::play::{
-    ChatCommand, ClickContainer, ClientChatMessage, ClientCommand, ClientInformation,
-    ClientboundCloseContainer, ClientboundPlayerAbilities, CloseContainer, ConfirmTeleport,
-    ContainerButtonClick, EditBook, EnchantItem, InteractEntity, Interaction, KeepAlive,
-    KeepAliveResponse, OpenScreen, Ping, PlaceRecipe, PlayDisconnect, PlayerCommand, PlayerDigging,
-    Pong, RenameItem, ResourcePackStatus, ServerboundPlayerAbilities, SetContainerContent,
-    SetContainerData, SetContainerSlot, SetHealth, SetHeldItem, SetPlayerPosition,
-    SetPlayerPositionRotation, SlotItem, SteerBoat, SteerVehicle, SwingArm,
+    ChatCommand, ClickContainer, ClientChatMessage, ClientCommand as ClientStatusCommand,
+    ClientInformation, ClientboundCloseContainer, ClientboundPlayerAbilities, CloseContainer,
+    ConfirmTeleport, ContainerButtonClick, EditBook, EnchantItem, InteractEntity, Interaction,
+    KeepAlive, KeepAliveResponse, OpenScreen, Ping, PlaceRecipe, PlayDisconnect, PlayerCommand,
+    PlayerDigging, Pong, RenameItem, ResourcePackStatus, ServerboundPlayerAbilities,
+    SetContainerContent, SetContainerData, SetContainerSlot, SetHealth, SetHeldItem,
+    SetPlayerPosition, SetPlayerPositionRotation, SlotItem, SteerBoat, SteerVehicle, SwingArm,
     SynchronizePlayerPosition, SystemChat, UseItem, UseItemOn, VehicleMove,
 };
 use crab_protocol::versions::v1_20_2::configuration::{
@@ -41,10 +45,6 @@ use crab_protocol::versions::v1_21::play as play767;
 use crab_protocol::versions::v1_21_2::{configuration as configuration768, play as play768};
 use crab_protocol::versions::v1_21_4::play as play769;
 use crab_protocol::versions::v1_21_5::play as play770;
-use crab_protocol::versions::{
-    PROTOCOL_1_20_1, PROTOCOL_1_20_2, PROTOCOL_1_20_3, PROTOCOL_1_20_5, PROTOCOL_1_21,
-    PROTOCOL_1_21_2, PROTOCOL_1_21_4, PROTOCOL_1_21_5,
-};
 use crab_protocol::BufExt;
 use crab_world::{Chunk, World};
 use sha1::{Digest, Sha1};
@@ -526,6 +526,48 @@ pub struct Controls {
     pub selected_slot: u8,
 }
 
+/// Coalescing, event-driven invalidation queue for chunk mesh workers.
+#[derive(Debug, Default)]
+pub struct DirtyChunks {
+    pending: Mutex<HashSet<(i32, i32)>>,
+    ready: Condvar,
+}
+
+impl DirtyChunks {
+    pub fn mark_neighborhood(&self, cx: i32, cz: i32) {
+        let mut pending = self.pending.lock().unwrap();
+        pending.extend([
+            (cx, cz),
+            (cx + 1, cz),
+            (cx - 1, cz),
+            (cx, cz + 1),
+            (cx, cz - 1),
+        ]);
+        self.ready.notify_one();
+    }
+
+    pub fn extend(&self, chunks: impl IntoIterator<Item = (i32, i32)>) {
+        self.pending.lock().unwrap().extend(chunks);
+        self.ready.notify_one();
+    }
+
+    pub fn take_batch_wait(&self, max: usize) -> Vec<(i32, i32)> {
+        let mut pending = self.pending.lock().unwrap();
+        if pending.is_empty() {
+            let (next, _) = self
+                .ready
+                .wait_timeout(pending, Duration::from_millis(100))
+                .unwrap();
+            pending = next;
+        }
+        let batch: Vec<_> = pending.iter().take(max).copied().collect();
+        for coord in &batch {
+            pending.remove(coord);
+        }
+        batch
+    }
+}
+
 /// Maps a face normal to the Minecraft direction enum (0=down..5=east).
 fn face_direction(face: [i32; 3]) -> i32 {
     match face {
@@ -696,6 +738,13 @@ impl PlayerState {
 /// State shared between the network task and any reader (the renderer).
 #[derive(Debug)]
 pub struct Shared {
+    /// Immutable protocol and generated-registry selection for this session.
+    pub context: SessionContext,
+    /// Deterministic single-owner reducer. Only the session task mutates it;
+    /// readers consume the coherently published snapshot below.
+    core: Mutex<CoreRuntime>,
+    snapshot: RwLock<Arc<ClientSnapshot>>,
+    replay_output: Mutex<Option<PathBuf>>,
     pub world: Mutex<World>,
     /// Registry codec received during 764's Configuration state.
     pub registry_codec: Mutex<Option<crab_protocol::nbt::Nbt>>,
@@ -718,7 +767,6 @@ pub struct Shared {
     pub signs: Mutex<HashMap<(i32, i32, i32), SignState>>,
     pub resource_pack_request: Mutex<Option<ResourcePackRequest>>,
     pub resource_pack_prompt_open: Mutex<bool>,
-    pub resource_pack_outbox: Mutex<Vec<bool>>,
     pub cached_resource_pack: Mutex<Option<PathBuf>>,
     /// Validated raw server packs in lowest-to-highest priority order.
     pub resource_pack_layers: Mutex<Vec<ResourcePackLayer>>,
@@ -730,12 +778,12 @@ pub struct Shared {
     /// Whether the next renderer reload is an Add Pack that needs a terminal
     /// status. Remove Pack reloads are intentionally unacknowledged.
     pub resource_pack_reload_ack: AtomicBool,
-    /// Resource-pack terminal statuses produced by the renderer (0/2).
-    pub resource_pack_status_outbox: Mutex<Vec<i32>>,
+    /// Bounded typed commands produced by presentation adapters.
+    pub commands: CommandQueue,
     /// Player input intent (written by the renderer).
     pub controls: Mutex<Controls>,
     /// Chunk columns whose mesh needs (re)building, drained by the renderer.
-    pub dirty_chunks: Mutex<HashSet<(i32, i32)>>,
+    pub dirty_chunks: DirtyChunks,
     /// Other entities (players/mobs/...) by entity id.
     pub entities: Mutex<HashMap<i32, Entity>>,
     /// The player inventory (window 0): `PLAYER_INVENTORY_SLOTS` slots.
@@ -749,28 +797,10 @@ pub struct Shared {
     pub sfx: Mutex<Option<std::sync::mpsc::Sender<String>>>,
     /// Recent chat lines (incoming system/player chat + our own), newest last.
     pub chat_log: Mutex<std::collections::VecDeque<String>>,
-    /// Chat/command lines the UI wants sent (drained by the net thread).
-    pub chat_outbox: Mutex<Vec<String>>,
     /// The item on the cursor while the inventory is open.
     pub carried: Mutex<Option<SlotItem>>,
     /// Latest container `stateId` (echoed back in inventory clicks).
     pub window_state: Mutex<i32>,
-    /// Inventory clicks the UI wants performed: `(window, slot, button, mode)`.
-    /// Mode 0 is a normal click; mode 1 is vanilla's shift-click quick move.
-    pub click_outbox: Mutex<Vec<(u8, i16, i8, i32)>>,
-    /// Server-owned windows the UI closed and must acknowledge.
-    pub close_container_outbox: Mutex<Vec<u8>>,
-    /// Enchanting choices queued by the UI: `(window id, offer 0..=2)`.
-    pub enchant_outbox: Mutex<Vec<(u8, i8)>>,
-    /// Loom/stonecutter numeric menu buttons queued by the UI.
-    pub menu_button_outbox: Mutex<Vec<(u8, i8)>>,
-    /// Latest anvil rename field updates queued by the UI.
-    pub rename_outbox: Mutex<Vec<String>>,
-    pub edit_book_outbox: Mutex<Vec<EditBook>>,
-    pub place_recipe_outbox: Mutex<Vec<PlaceRecipe>>,
-    /// Protocol 768 bundle selections queued by the inventory UI:
-    /// `(visible slot id, nested item index)`.
-    pub bundle_selection_outbox: Mutex<Vec<(i32, i32)>>,
     /// The block currently being mined + its crack stage, for the destroy-stage
     /// overlay (`None` when not digging).
     pub dig: Mutex<Option<DigOverlay>>,
@@ -778,9 +808,25 @@ pub struct Shared {
     pub running: AtomicBool,
 }
 
+#[derive(Debug)]
+struct CoreRuntime {
+    core: ClientCore,
+    replay: Option<ReplayRecorder>,
+}
+
 impl Shared {
     pub fn new() -> Self {
+        Self::with_context(SessionContext::new(ProtocolVersion::default()))
+    }
+
+    pub fn with_context(context: SessionContext) -> Self {
+        let core = ClientCore::new(context);
+        let snapshot = Arc::new(core.snapshot().clone());
         Self {
+            context,
+            core: Mutex::new(CoreRuntime { core, replay: None }),
+            snapshot: RwLock::new(snapshot),
+            replay_output: Mutex::new(None),
             world: Mutex::new(World::overworld()),
             registry_codec: Mutex::new(None),
             player: Mutex::new(PlayerState::default()),
@@ -801,34 +847,86 @@ impl Shared {
             signs: Mutex::new(HashMap::new()),
             resource_pack_request: Mutex::new(None),
             resource_pack_prompt_open: Mutex::new(false),
-            resource_pack_outbox: Mutex::new(Vec::new()),
             cached_resource_pack: Mutex::new(None),
             resource_pack_layers: Mutex::new(Vec::new()),
             base_resource_jar: Mutex::new(None),
             renderer_active: AtomicBool::new(false),
             resource_pack_reload_ack: AtomicBool::new(false),
-            resource_pack_status_outbox: Mutex::new(Vec::new()),
+            commands: CommandQueue::new(256),
             controls: Mutex::new(Controls::default()),
-            dirty_chunks: Mutex::new(HashSet::new()),
+            dirty_chunks: DirtyChunks::default(),
             entities: Mutex::new(HashMap::new()),
             inventory: Mutex::new(vec![None; PLAYER_INVENTORY_SLOTS]),
             inventory_nbt: Mutex::new(vec![None; PLAYER_INVENTORY_SLOTS]),
             container: Mutex::new(None),
             sfx: Mutex::new(None),
             chat_log: Mutex::new(std::collections::VecDeque::new()),
-            chat_outbox: Mutex::new(Vec::new()),
             carried: Mutex::new(None),
             window_state: Mutex::new(0),
-            click_outbox: Mutex::new(Vec::new()),
-            close_container_outbox: Mutex::new(Vec::new()),
-            enchant_outbox: Mutex::new(Vec::new()),
-            menu_button_outbox: Mutex::new(Vec::new()),
-            rename_outbox: Mutex::new(Vec::new()),
-            edit_book_outbox: Mutex::new(Vec::new()),
-            place_recipe_outbox: Mutex::new(Vec::new()),
-            bundle_selection_outbox: Mutex::new(Vec::new()),
             dig: Mutex::new(None),
             running: AtomicBool::new(true),
+        }
+    }
+
+    /// Enqueues a discrete presentation command without blocking the caller.
+    /// Returns `false` if the bounded queue is full or unavailable.
+    pub fn queue_command(&self, command: ClientCommand) -> bool {
+        match self.commands.try_push(command.clone()) {
+            Ok(()) => {
+                let mut runtime = self.core.lock().unwrap();
+                let _ = runtime.core.apply_command(command.clone());
+                if let Some(replay) = &mut runtime.replay {
+                    replay.record_command(command);
+                }
+                *self.snapshot.write().unwrap() = Arc::new(runtime.core.snapshot().clone());
+                true
+            }
+            Err(error) => {
+                tracing::warn!(%error, "dropping client command");
+                false
+            }
+        }
+    }
+
+    /// Applies a semantic event atomically and publishes one coherent snapshot.
+    fn apply_core_event(&self, event: ClientEvent) {
+        let mut runtime = self.core.lock().unwrap();
+        runtime.core.apply_event(event.clone());
+        if let Some(replay) = &mut runtime.replay {
+            replay.record_event(event);
+        }
+        *self.snapshot.write().unwrap() = Arc::new(runtime.core.snapshot().clone());
+    }
+
+    /// Latest coherent renderer- and diagnostics-facing session snapshot.
+    pub fn snapshot(&self) -> Arc<ClientSnapshot> {
+        Arc::clone(&self.snapshot.read().unwrap())
+    }
+
+    /// Enables opt-in, redacted semantic replay capture for this session.
+    pub fn enable_replay(&self, output: PathBuf) {
+        self.core.lock().unwrap().replay = Some(ReplayRecorder::new(self.context));
+        *self.replay_output.lock().unwrap() = Some(output);
+    }
+
+    fn flush_replay(&self) {
+        let output = self.replay_output.lock().unwrap().clone();
+        let Some(output) = output else {
+            return;
+        };
+        let json = self
+            .core
+            .lock()
+            .unwrap()
+            .replay
+            .as_ref()
+            .and_then(|recorder| recorder.replay().to_json().ok());
+        if let Some(json) = json {
+            if let Err(error) = std::fs::write(&output, json) {
+                tracing::warn!(%error, path = %output.display(), "failed to write semantic replay");
+            } else {
+                tracing::info!(path = %output.display(), "wrote redacted semantic replay");
+            }
         }
     }
 }
@@ -836,16 +934,7 @@ impl Shared {
 /// Marks a chunk and its 4 neighbours dirty (neighbours so border face-culling
 /// updates when an adjacent chunk's blocks change).
 fn mark_dirty(shared: &Arc<Shared>, cx: i32, cz: i32) {
-    let mut dirty = shared.dirty_chunks.lock().unwrap();
-    for c in [
-        (cx, cz),
-        (cx + 1, cz),
-        (cx - 1, cz),
-        (cx, cz + 1),
-        (cx, cz - 1),
-    ] {
-        dirty.insert(c);
-    }
+    shared.dirty_chunks.mark_neighborhood(cx, cz);
 }
 
 impl Default for Shared {
@@ -861,80 +950,82 @@ pub enum LoginMode {
     Online(crab_auth::Session),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ProtocolVersion {
-    V1_20_1,
-    V1_20_2,
-    V1_20_3,
-    V1_20_5,
-    V1_21,
-    V1_21_2,
-    V1_21_4,
-    V1_21_5,
-}
-
-impl ProtocolVersion {
-    fn configured() -> Result<Self> {
-        match std::env::var("CRABCRAFT_PROTOCOL") {
-            Ok(value) => match value.as_str() {
-                "764" | "1.20.2" => Ok(Self::V1_20_2),
-                "765" | "1.20.3" | "1.20.4" => Ok(Self::V1_20_3),
-                "766" | "1.20.5" | "1.20.6" => Ok(Self::V1_20_5),
-                "767" | "1.21" | "1.21.1" => Ok(Self::V1_21),
-                "768" | "1.21.2" | "1.21.3" => Ok(Self::V1_21_2),
-                "769" | "1.21.4" => Ok(Self::V1_21_4),
-                "770" | "1.21.5" => Ok(Self::V1_21_5),
-                "763" | "1.20" | "1.20.1" => Ok(Self::V1_20_1),
-                _ => {
-                    bail!("unsupported CRABCRAFT_PROTOCOL={value}; use 763, 764, 765, 766, 767, 768, 769, or 770")
-                }
-            },
-            Err(std::env::VarError::NotPresent) => Ok(Self::V1_20_1),
-            Err(error) => bail!("invalid CRABCRAFT_PROTOCOL: {error}"),
-        }
-    }
-
-    const fn number(self) -> i32 {
-        match self {
-            Self::V1_20_1 => PROTOCOL_1_20_1,
-            Self::V1_20_2 => PROTOCOL_1_20_2,
-            Self::V1_20_3 => PROTOCOL_1_20_3,
-            Self::V1_20_5 => PROTOCOL_1_20_5,
-            Self::V1_21 => PROTOCOL_1_21,
-            Self::V1_21_2 => PROTOCOL_1_21_2,
-            Self::V1_21_4 => PROTOCOL_1_21_4,
-            Self::V1_21_5 => PROTOCOL_1_21_5,
-        }
-    }
-
-    const fn uses_nbt_components(self) -> bool {
-        matches!(
-            self,
-            Self::V1_20_3
-                | Self::V1_20_5
-                | Self::V1_21
-                | Self::V1_21_2
-                | Self::V1_21_4
-                | Self::V1_21_5
-        )
-    }
-
-    const fn uses_data_components(self) -> bool {
-        matches!(
-            self,
-            Self::V1_20_5 | Self::V1_21 | Self::V1_21_2 | Self::V1_21_4 | Self::V1_21_5
-        )
-    }
-
-    const fn uses_split_registry(self) -> bool {
-        self.uses_data_components()
-    }
-}
-
 /// Resolves the configured wire protocol for startup-time registry and asset
 /// selection. Connection setup performs the same validation again.
-pub fn configured_protocol_number() -> Result<i32> {
-    Ok(ProtocolVersion::configured()?.number())
+pub fn configured_session_context() -> Result<SessionContext> {
+    let protocol = match std::env::var("CRABCRAFT_PROTOCOL") {
+        Ok(value) => value
+            .parse()
+            .map_err(|error| anyhow::anyhow!("invalid CRABCRAFT_PROTOCOL: {error}"))?,
+        Err(std::env::VarError::NotPresent) => ProtocolVersion::default(),
+        Err(error) => bail!("invalid CRABCRAFT_PROTOCOL: {error}"),
+    };
+    Ok(SessionContext::new(protocol))
+}
+
+#[cfg(test)]
+fn canonical_clientbound_764_id(wire: i32) -> i32 {
+    ProtocolVersion::V1_20_2
+        .canonical_clientbound_id(wire)
+        .unwrap_or(-1)
+}
+
+#[cfg(test)]
+fn canonical_clientbound_765_id(wire: i32) -> i32 {
+    ProtocolVersion::V1_20_3
+        .canonical_clientbound_id(wire)
+        .unwrap_or(-1)
+}
+
+#[cfg(test)]
+fn canonical_clientbound_766_id(wire: i32) -> i32 {
+    ProtocolVersion::V1_20_5
+        .canonical_clientbound_id(wire)
+        .unwrap_or(-1)
+}
+
+#[cfg(test)]
+fn canonical_clientbound_768_id(wire: i32) -> i32 {
+    ProtocolVersion::V1_21_2
+        .canonical_clientbound_id(wire)
+        .unwrap_or(-1)
+}
+
+#[cfg(test)]
+fn canonical_clientbound_770_id(wire: i32) -> i32 {
+    ProtocolVersion::V1_21_5
+        .canonical_clientbound_id(wire)
+        .unwrap_or(-1)
+}
+
+#[cfg(test)]
+fn serverbound_764_id(state: State, canonical: i32) -> i32 {
+    ProtocolVersion::V1_20_2.serverbound_id(state, canonical)
+}
+
+#[cfg(test)]
+fn serverbound_765_id(state: State, canonical: i32) -> i32 {
+    ProtocolVersion::V1_20_3.serverbound_id(state, canonical)
+}
+
+#[cfg(test)]
+fn serverbound_766_id(state: State, canonical: i32) -> i32 {
+    ProtocolVersion::V1_20_5.serverbound_id(state, canonical)
+}
+
+#[cfg(test)]
+fn serverbound_768_id(state: State, canonical: i32) -> i32 {
+    ProtocolVersion::V1_21_2.serverbound_id(state, canonical)
+}
+
+#[cfg(test)]
+fn serverbound_769_id(state: State, canonical: i32) -> i32 {
+    ProtocolVersion::V1_21_4.serverbound_id(state, canonical)
+}
+
+#[cfg(test)]
+fn serverbound_770_id(state: State, canonical: i32) -> i32 {
+    ProtocolVersion::V1_21_5.serverbound_id(state, canonical)
 }
 
 fn offline_uuid(name: &str) -> uuid::Uuid {
@@ -942,232 +1033,6 @@ fn offline_uuid(name: &str) -> uuid::Uuid {
     bytes[6] = (bytes[6] & 0x0f) | 0x30;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     uuid::Uuid::from_bytes(bytes)
-}
-
-fn serverbound_764_id(state: State, canonical: i32) -> i32 {
-    if state != State::Play {
-        return canonical;
-    }
-    match canonical {
-        0x00..=0x06 => canonical,
-        0x07..=0x09 => canonical + 1,
-        0x0a..=0x1a => canonical + 2,
-        0x1b..=0x32 => canonical + 3,
-        _ => canonical,
-    }
-}
-
-fn serverbound_765_id(state: State, canonical: i32) -> i32 {
-    if state != State::Play {
-        return canonical;
-    }
-    match canonical {
-        0x00..=0x06 => canonical,
-        0x07..=0x09 => canonical + 1,
-        0x0a..=0x0c => canonical + 2,
-        0x0d..=0x1a => canonical + 3,
-        0x1b..=0x32 => canonical + 4,
-        _ => canonical,
-    }
-}
-
-fn serverbound_766_id(state: State, canonical: i32) -> i32 {
-    if state == State::Configuration {
-        return match canonical {
-            0x01..=0x05 => canonical + 1,
-            _ => canonical,
-        };
-    }
-    if state != State::Play {
-        return canonical;
-    }
-    match canonical {
-        0x00..=0x04 => canonical,
-        0x05..=0x06 => canonical + 1,
-        0x07..=0x09 => canonical + 2,
-        0x0a..=0x0c => canonical + 3,
-        0x0d => canonical + 5,
-        0x0e..=0x1a => canonical + 6,
-        0x1b..=0x32 => canonical + 7,
-        _ => canonical,
-    }
-}
-
-fn serverbound_768_id(state: State, canonical: i32) -> i32 {
-    if state == State::Configuration {
-        return serverbound_766_id(state, canonical);
-    }
-    if state != State::Play {
-        return canonical;
-    }
-    match canonical {
-        0x00..=0x01 => canonical,
-        0x02..=0x04 => canonical + 1,
-        0x05..=0x06 => canonical + 2,
-        0x07 => canonical + 3,
-        0x08..=0x09 => canonical + 4,
-        0x0a..=0x0c => canonical + 5,
-        0x0d => canonical + 7,
-        0x0e => canonical + 8,
-        0x0f..=0x1a => canonical + 8,
-        0x1b..=0x1e => canonical + 9,
-        0x20..=0x32 => canonical + 9,
-        _ => canonical,
-    }
-}
-
-/// Protocol 769 keeps 768's early play map, splits Pick Item in two, and adds
-/// Player Loaded after the input packet. Packets at/after those insertions move
-/// by one or two slots respectively.
-fn serverbound_769_id(state: State, canonical: i32) -> i32 {
-    let mapped = serverbound_768_id(state, canonical);
-    if state != State::Play {
-        return mapped;
-    }
-    match mapped {
-        0x23..=0x28 => mapped + 1,
-        0x29.. => mapped + 2,
-        _ => mapped,
-    }
-}
-
-/// Protocol 770 inserts Game Test packets around the sign/swing/spectate tail.
-fn serverbound_770_id(state: State, canonical: i32) -> i32 {
-    let mapped = serverbound_769_id(state, canonical);
-    if state != State::Play {
-        return mapped;
-    }
-    match mapped {
-        0x39..=0x3a => mapped + 1,
-        0x3b.. => mapped + 2,
-        _ => mapped,
-    }
-}
-
-fn canonical_clientbound_764_id(wire: i32) -> i32 {
-    match wire {
-        0x00..=0x02 => wire,
-        0x03..=0x0b => wire + 1,
-        0x0c | 0x0d | 0x34 | 0x65 => -1,
-        0x0e..=0x33 => wire - 1,
-        0x35..=0x64 => wire - 2,
-        0x66..=0x6d => wire - 3,
-        0x6e..=0x70 => wire - 2,
-        _ => wire,
-    }
-}
-
-fn canonical_clientbound_765_id(wire: i32) -> i32 {
-    match wire {
-        0x00..=0x02 => wire,
-        0x03..=0x0b => wire + 1,
-        0x0c | 0x0d | 0x34 | 0x42 | 0x43 | 0x67 | 0x6e | 0x6f => -1,
-        0x0e..=0x33 => wire - 1,
-        0x35..=0x41 => wire - 2,
-        0x44 => ID_RESOURCE_PACK,
-        0x45..=0x66 => wire - 4,
-        0x68..=0x6d => wire - 5,
-        0x70..=0x71 => wire - 7,
-        0x72..=0x74 => wire - 6,
-        _ => wire,
-    }
-}
-
-fn canonical_clientbound_766_id(wire: i32) -> i32 {
-    match wire {
-        0x00..=0x02 => wire,
-        0x03..=0x0b => wire + 1,
-        0x0c | 0x0d | 0x16 | 0x1b | 0x36 | 0x44..=0x46 | 0x69 | 0x6b | 0x71..=0x73 | 0x79 => -1,
-        0x0e..=0x15 => wire - 1,
-        0x17..=0x1a => wire - 2,
-        0x1c..=0x35 => wire - 3,
-        0x37..=0x43 => wire - 4,
-        0x47..=0x68 => wire - 6,
-        0x6a => wire - 7,
-        0x6c..=0x70 => wire - 8,
-        0x74..=0x75 => wire - 11,
-        0x76..=0x78 => wire - 10,
-        _ => wire,
-    }
-}
-
-/// Protocol 768 inserted several packets and split recipe/inventory updates.
-/// Mapping only the packets consumed by this client makes new, unimplemented
-/// presentation packets safely ignorable instead of accidentally decoding a
-/// same-number packet with an unrelated payload.
-fn canonical_clientbound_768_id(wire: i32) -> i32 {
-    match wire {
-        0x03 => ID_ENTITY_ANIMATION,
-        0x01 => ID_SPAWN_ENTITY,
-        0x07 => ID_BLOCK_ENTITY_DATA,
-        0x09 => ID_BLOCK_CHANGE,
-        0x0a => ID_BOSS_BAR,
-        0x0f => ID_CLEAR_TITLES,
-        0x13 => ID_CONTAINER_CONTENT,
-        0x15 => ID_CONTAINER_SLOT,
-        0x22 => ID_UNLOAD_CHUNK,
-        0x23 => ID_GAME_STATE,
-        0x25 => ID_HURT_ANIMATION,
-        0x26 => ID_INIT_WORLD_BORDER,
-        0x27 => KeepAlive::ID,
-        0x28 => ID_MAP_CHUNK,
-        0x2a => ID_PARTICLES,
-        0x2c => ID_JOIN_GAME,
-        0x2d => ID_MAP_DATA,
-        0x2f => ID_REL_MOVE,
-        0x30 => ID_MOVE_LOOK,
-        0x32 => ID_ENTITY_ROTATION,
-        0x33 => ID_VEHICLE_MOVE,
-        0x37 => Ping::ID,
-        0x3f => ID_PLAYER_REMOVE,
-        0x40 => ID_PLAYER_INFO,
-        0x42 => SynchronizePlayerPosition::ID,
-        0x47 => ID_ENTITY_DESTROY,
-        0x48 => ID_REMOVE_ENTITY_EFFECT,
-        0x4c => ID_RESPAWN,
-        0x4d => ID_ENTITY_HEAD_ROTATION,
-        0x51 => ID_ACTION_BAR,
-        0x52 => ID_WORLD_BORDER_CENTER,
-        0x53 => ID_WORLD_BORDER_LERP,
-        0x54 => ID_WORLD_BORDER_SIZE,
-        0x55 => ID_WORLD_BORDER_WARNING_DELAY,
-        0x56 => ID_WORLD_BORDER_WARNING_REACH,
-        0x5c => ID_SCOREBOARD_DISPLAY,
-        0x5d => ID_ENTITY_METADATA,
-        0x5f => ID_ENTITY_VELOCITY,
-        0x60 => ID_ENTITY_EQUIPMENT,
-        0x61 => ID_EXPERIENCE,
-        0x62 => ID_UPDATE_HEALTH,
-        0x63 => ID_SET_HELD_ITEM,
-        0x64 => ID_SCOREBOARD_OBJECTIVE,
-        0x65 => ID_SET_PASSENGERS,
-        0x67 => ID_TEAMS,
-        0x68 => ID_SCOREBOARD_SCORE,
-        0x6a => ID_TITLE_SUBTITLE,
-        0x6b => ID_UPDATE_TIME,
-        0x6c => ID_TITLE_TEXT,
-        0x6d => ID_TITLE_TIME,
-        0x6e => ID_ENTITY_SOUND,
-        0x6f => ID_SOUND,
-        0x73 => SystemChat::ID,
-        0x74 => ID_PLAYER_LIST_HEADER,
-        0x77 => ID_ENTITY_TELEPORT,
-        0x7d => ID_ENTITY_EFFECT,
-        0x7e => ID_DECLARE_RECIPES,
-        _ => -1,
-    }
-}
-
-/// Protocol 770 removes the dedicated experience-orb spawn packet, shifting
-/// the existing play map down through Entity Teleport, then fills the vacated
-/// tail slot with a Game Test status packet.
-fn canonical_clientbound_770_id(wire: i32) -> i32 {
-    match wire {
-        0x00..=0x01 => canonical_clientbound_768_id(wire),
-        0x02..=0x76 => canonical_clientbound_768_id(wire + 1),
-        0x77 => -1,
-        _ => canonical_clientbound_768_id(wire),
-    }
 }
 
 async fn configuration_loop<S>(
@@ -1287,8 +1152,17 @@ where
                 }
             }
             _ = choices.tick() => {
-                let choices = std::mem::take(&mut *shared.resource_pack_outbox.lock().unwrap());
-                for accepted in choices {
+                let commands = shared.commands.take_matching(|command| matches!(
+                    command,
+                    ClientCommand::ResourcePackDecision(_) | ClientCommand::ResourcePackStatus(_)
+                ))?;
+                for command in commands {
+                    let ClientCommand::ResourcePackDecision(accepted) = command else {
+                        if let ClientCommand::ResourcePackStatus(status) = command {
+                            send_configuration_pack_status(conn, shared, protocol, status).await?;
+                        }
+                        continue;
+                    };
                     if !accepted {
                         send_configuration_pack_status(conn, shared, protocol, 1).await?;
                         continue;
@@ -1322,12 +1196,6 @@ where
                         },
                         None => send_configuration_pack_status(conn, shared, protocol, 2).await?,
                     }
-                }
-                let statuses = std::mem::take(
-                    &mut *shared.resource_pack_status_outbox.lock().unwrap(),
-                );
-                for status in statuses {
-                    send_configuration_pack_status(conn, shared, protocol, status).await?;
                 }
             }
         }
@@ -1378,7 +1246,16 @@ pub async fn connect_and_play(
     shared: Arc<Shared>,
     deadline: Option<Duration>,
 ) -> Result<()> {
+    shared.apply_core_event(ClientEvent::ConnectionPhaseChanged(
+        ConnectionPhase::Connecting,
+    ));
     let result = run_inner(addr, &login, &shared, deadline).await;
+    let reason = result
+        .as_ref()
+        .err()
+        .map_or_else(|| "session ended".to_string(), ToString::to_string);
+    shared.apply_core_event(ClientEvent::Disconnected { reason });
+    shared.flush_replay();
     shared.running.store(false, Ordering::SeqCst);
     result
 }
@@ -1389,8 +1266,7 @@ async fn run_inner(
     shared: &Arc<Shared>,
     deadline: Option<Duration>,
 ) -> Result<()> {
-    let protocol = ProtocolVersion::configured()?;
-    crab_registry::set_protocol(protocol.number());
+    let protocol = shared.context.protocol;
     let (host, port) = split_host_port(addr);
     let (name, uuid) = match login {
         LoginMode::Offline { username } => (username.clone(), None),
@@ -1414,6 +1290,7 @@ async fn run_inner(
     })
     .await?;
     conn.set_state(State::Login);
+    shared.apply_core_event(ClientEvent::ConnectionPhaseChanged(ConnectionPhase::Login));
     match protocol {
         ProtocolVersion::V1_20_1 => {
             conn.send(&LoginStart {
@@ -1475,21 +1352,18 @@ async fn run_inner(
                 let pkt: LoginSuccess = raw.decode()?;
                 tracing::info!(uuid = %pkt.uuid, name = %pkt.username, "logged in");
                 if protocol != ProtocolVersion::V1_20_1 {
-                    conn.set_packet_id_mapper(match protocol {
-                        ProtocolVersion::V1_20_2 => serverbound_764_id,
-                        ProtocolVersion::V1_20_3 => serverbound_765_id,
-                        ProtocolVersion::V1_20_5 => serverbound_766_id,
-                        ProtocolVersion::V1_21 => serverbound_766_id,
-                        ProtocolVersion::V1_21_2 => serverbound_768_id,
-                        ProtocolVersion::V1_21_4 => serverbound_769_id,
-                        ProtocolVersion::V1_21_5 => serverbound_770_id,
-                        ProtocolVersion::V1_20_1 => unreachable!(),
-                    });
+                    if let Some(mapper) = protocol.serverbound_mapper() {
+                        conn.set_packet_id_mapper(mapper);
+                    }
                     conn.send(&LoginAcknowledged).await?;
                     conn.set_state(State::Configuration);
+                    shared.apply_core_event(ClientEvent::ConnectionPhaseChanged(
+                        ConnectionPhase::Configuration,
+                    ));
                     configuration_loop(&mut conn, shared, protocol).await?;
                 }
                 conn.set_state(State::Play);
+                shared.apply_core_event(ClientEvent::ConnectionPhaseChanged(ConnectionPhase::Play));
                 break;
             }
             _ => {}
@@ -1779,16 +1653,7 @@ where
                     }
                     continue;
                 }
-                let packet_id = match protocol {
-                    ProtocolVersion::V1_20_1 => raw.id,
-                    ProtocolVersion::V1_20_2 => canonical_clientbound_764_id(raw.id),
-                    ProtocolVersion::V1_20_3 => canonical_clientbound_765_id(raw.id),
-                    ProtocolVersion::V1_20_5 => canonical_clientbound_766_id(raw.id),
-                    ProtocolVersion::V1_21 => canonical_clientbound_766_id(raw.id),
-                    ProtocolVersion::V1_21_2 => canonical_clientbound_768_id(raw.id),
-                    ProtocolVersion::V1_21_4 => canonical_clientbound_768_id(raw.id),
-                    ProtocolVersion::V1_21_5 => canonical_clientbound_770_id(raw.id),
-                };
+                let packet_id = protocol.canonical_clientbound_id(raw.id).unwrap_or(-1);
                 match packet_id {
                     id if id == KeepAlive::ID => {
                         let k: KeepAlive = raw.decode()?;
@@ -1837,6 +1702,11 @@ where
                             ps.spawned = true;
                             (js, *ps)
                         };
+                        shared.apply_core_event(ClientEvent::PositionSynchronized {
+                            position: [pos.x, pos.y, pos.z],
+                            yaw: pos.yaw,
+                            pitch: pos.pitch,
+                        });
                         conn.send(&ConfirmTeleport { teleport_id: p.teleport_id }).await?;
                         conn.send(&SetPlayerPositionRotation {
                             x: pos.x, y: pos.y, z: pos.z, yaw: pos.yaw, pitch: pos.pitch,
@@ -2598,6 +2468,10 @@ where
                                 ps.food = pkt.food;
                                 prev
                             };
+                            shared.apply_core_event(ClientEvent::HealthUpdated {
+                                health: pkt.health,
+                                food: pkt.food,
+                            });
                             // Took damage (and not the initial 20->20 sync): hurt sound.
                             if pkt.health < prev && pkt.health > 0.0 {
                                 queue_sound(shared, crab_audio::hurt_event().to_string());
@@ -2605,7 +2479,7 @@ where
                             if pkt.health <= 0.0 && !dead {
                                 dead = true;
                                 tracing::info!("died — respawning");
-                                conn.send(&ClientCommand { action: 0 }).await?;
+                                conn.send(&ClientStatusCommand { action: 0 }).await?;
                             } else if pkt.health > 0.0 {
                                 dead = false;
                             }
@@ -2697,6 +2571,7 @@ where
                 }
             }
             _ = pos_tick.tick() => {
+                shared.apply_core_event(ClientEvent::Tick);
                 // Left-click ("attack") is held: hold-to-dig / continuous
                 // attack. Right-click is held, with press/release edges below.
                 let controls = {
@@ -2805,7 +2680,8 @@ where
                     }
                     let can_stand = {
                         let world = shared.world.lock().unwrap();
-                        crab_physics::can_occupy_player(
+                        crab_physics::can_occupy_player_in(
+                            shared.context.registries,
                             &world,
                             [snapshot.x, snapshot.y, snapshot.z],
                             crab_physics::PLAYER_HEIGHT,
@@ -2857,236 +2733,13 @@ where
                     })
                     .await?;
                     shared.player.lock().unwrap().selected_slot = controls.selected_slot;
+                    shared.apply_core_event(ClientEvent::SelectedSlotChanged(
+                        controls.selected_slot,
+                    ));
                 }
 
-                // Send queued chat / commands; show our own line locally.
-                let outgoing: Vec<String> =
-                    std::mem::take(&mut *shared.chat_outbox.lock().unwrap());
-                for msg in outgoing {
-                    if let Some(cmd) = msg.strip_prefix('/') {
-                        conn.send(&ChatCommand::new(cmd.to_string())).await?;
-                    } else if protocol == ProtocolVersion::V1_21_5 {
-                        conn.send_unmapped(&play770::ClientChatMessage::unsigned(msg.clone()))
-                            .await?;
-                    } else {
-                        conn.send(&ClientChatMessage::unsigned(msg.clone())).await?;
-                    }
-                    push_chat(shared, msg);
-                }
-
-                // Inventory clicks: predict locally and tell the server. The
-                // server remains authoritative and corrects via 0x12/0x14.
-                let closes: Vec<u8> = std::mem::take(
-                    &mut *shared.close_container_outbox.lock().unwrap(),
-                );
-                for window_id in closes {
-                    conn.send(&CloseContainer { window_id }).await?;
-                }
-                let enchants: Vec<(u8, i8)> =
-                    std::mem::take(&mut *shared.enchant_outbox.lock().unwrap());
-                for (window_id, enchantment) in enchants {
-                    conn.send(&EnchantItem {
-                        window_id: window_id as i8,
-                        enchantment,
-                    })
-                    .await?;
-                }
-                let menu_buttons: Vec<(u8, i8)> =
-                    std::mem::take(&mut *shared.menu_button_outbox.lock().unwrap());
-                for (window_id, button_id) in menu_buttons {
-                    conn.send(&ContainerButtonClick {
-                        window_id: window_id as i8,
-                        button_id,
-                    })
-                    .await?;
-                }
-                let pack_choices: Vec<bool> =
-                    std::mem::take(&mut *shared.resource_pack_outbox.lock().unwrap());
-                for accepted in pack_choices {
-                    if !accepted {
-                        send_play_pack_status(conn, shared, protocol, 1).await?;
-                        continue;
-                    }
-                    send_play_pack_status(conn, shared, protocol, 3).await?;
-                    let request = shared.resource_pack_request.lock().unwrap().clone();
-                    let base_jar = shared.base_resource_jar.lock().unwrap().clone();
-                    match request {
-                        Some(request) => match download_resource_pack(&request).await {
-                            Ok(archive) => match activate_resource_pack(
-                                shared,
-                                request.uuid,
-                                archive,
-                                base_jar.as_deref(),
-                            ) {
-                                Ok(path) => {
-                                    *shared.cached_resource_pack.lock().unwrap() = Some(path);
-                                    if !shared.renderer_active.load(Ordering::SeqCst) {
-                                        send_play_pack_status(conn, shared, protocol, 0).await?;
-                                    }
-                                }
-                                Err(error) => {
-                                    tracing::warn!(%error, "resource-pack activation failed");
-                                    send_play_pack_status(conn, shared, protocol, 2).await?;
-                                }
-                            },
-                            Err(error) => {
-                                tracing::warn!(%error, "resource-pack download failed");
-                                send_play_pack_status(conn, shared, protocol, 2).await?;
-                            }
-                        },
-                        None => send_play_pack_status(conn, shared, protocol, 2).await?,
-                    }
-                }
-                let pack_statuses = std::mem::take(
-                    &mut *shared.resource_pack_status_outbox.lock().unwrap(),
-                );
-                for status in pack_statuses {
-                    send_play_pack_status(conn, shared, protocol, status).await?;
-                }
-                let renames: Vec<String> =
-                    std::mem::take(&mut *shared.rename_outbox.lock().unwrap());
-                for name in renames {
-                    conn.send(&RenameItem { name }).await?;
-                }
-                let book_edits =
-                    std::mem::take(&mut *shared.edit_book_outbox.lock().unwrap());
-                for edit in book_edits {
-                    conn.send(&edit).await?;
-                }
-                let recipe_requests =
-                    std::mem::take(&mut *shared.place_recipe_outbox.lock().unwrap());
-                for request in recipe_requests {
-                    if matches!(
-                        protocol,
-                        ProtocolVersion::V1_21_4 | ProtocolVersion::V1_21_5
-                    ) {
-                        if let Ok(recipe_id) = request.recipe.parse() {
-                            conn.send_unmapped(&play769::PlaceRecipe {
-                                window_id: i32::from(request.window_id),
-                                recipe_id,
-                                make_all: request.make_all,
-                            })
-                            .await?;
-                        }
-                    } else if protocol == ProtocolVersion::V1_21_2 {
-                        if let Ok(recipe_id) = request.recipe.parse() {
-                            conn.send_unmapped(&play768::PlaceRecipe {
-                                window_id: i32::from(request.window_id),
-                                recipe_id,
-                                make_all: request.make_all,
-                            })
-                            .await?;
-                        }
-                    } else {
-                        conn.send(&request).await?;
-                    }
-                }
-                let bundle_selections = std::mem::take(
-                    &mut *shared.bundle_selection_outbox.lock().unwrap(),
-                );
-                if matches!(
-                    protocol,
-                    ProtocolVersion::V1_21_4 | ProtocolVersion::V1_21_5
-                ) {
-                    for (slot_id, selected_item_index) in bundle_selections {
-                        conn.send_unmapped(&play769::SelectBundleItem {
-                            slot_id,
-                            selected_item_index,
-                        })
-                        .await?;
-                    }
-                } else if protocol == ProtocolVersion::V1_21_2 {
-                    for (slot_id, selected_item_index) in bundle_selections {
-                        conn.send_unmapped(&play768::SelectBundleItem {
-                            slot_id,
-                            selected_item_index,
-                        })
-                        .await?;
-                    }
-                }
-
-                let clicks: Vec<(u8, i16, i8, i32)> =
-                    std::mem::take(&mut *shared.click_outbox.lock().unwrap());
-                for (window_id, slot, button, mode) in clicks {
-                    let idx = slot as usize;
-                    let predicted = if window_id == 0 {
-                        let state_id = *shared.window_state.lock().unwrap();
-                        let mut inv = shared.inventory.lock().unwrap();
-                        let mut carried = shared.carried.lock().unwrap();
-                        if idx >= inv.len() {
-                            None
-                        } else {
-                            let changed = apply_inventory_click(
-                                &mut inv,
-                                &mut carried,
-                                idx,
-                                button,
-                                mode,
-                            );
-                            Some((state_id, changed, *carried))
-                        }
-                    } else {
-                        let mut open = shared.container.lock().unwrap();
-                        let mut carried = shared.carried.lock().unwrap();
-                        match open.as_mut().filter(|c| c.window_id == window_id) {
-                            Some(container) if idx < container.slots.len() => {
-                                let container_slots = container.container_slot_count();
-                                let changed = apply_container_click(
-                                    &mut container.slots,
-                                    &mut carried,
-                                    idx,
-                                    button,
-                                    mode,
-                                    container_slots,
-                                    container.menu_type,
-                                );
-                                Some((container.state_id, changed, *carried))
-                            }
-                            _ => None,
-                        }
-                    };
-                    if let Some((state_id, changed, carried)) = predicted {
-                        if matches!(
-                            protocol,
-                            ProtocolVersion::V1_21
-                                | ProtocolVersion::V1_21_2
-                                | ProtocolVersion::V1_21_4
-                                | ProtocolVersion::V1_21_5
-                        ) {
-                            conn.send(&play767::ClickContainerComponents {
-                                window_id,
-                                state_id,
-                                slot,
-                                button,
-                                mode,
-                                changed,
-                                carried,
-                            })
-                            .await?;
-                        } else if protocol == ProtocolVersion::V1_20_5 {
-                            conn.send(&play766::ClickContainerComponents {
-                                window_id,
-                                state_id,
-                                slot,
-                                button,
-                                mode,
-                                changed,
-                                carried,
-                            })
-                            .await?;
-                        } else {
-                            conn.send(&ClickContainer {
-                                window_id,
-                                state_id,
-                                slot,
-                                button,
-                                mode,
-                                changed,
-                                carried,
-                            })
-                            .await?;
-                        }
-                    }
+                for command in shared.commands.drain()? {
+                    handle_client_command(conn, shared, protocol, command).await?;
                 }
 
                 if snapshot.spawned {
@@ -3206,7 +2859,13 @@ where
                         -pitch.sin(),
                         yaw.cos() * pitch.cos(),
                     ];
-                    let hit = crab_physics::raycast(&shared.world.lock().unwrap(), eye, dir, 5.0);
+                    let hit = crab_physics::raycast_in(
+                        shared.context.registries,
+                        &shared.world.lock().unwrap(),
+                        eye,
+                        dir,
+                        5.0,
+                    );
 
                     // Combat: on a fresh click, attack a nearer entity in reach.
                     let mut attacked_entity = false;
@@ -3551,7 +3210,8 @@ where
                                     on_ground: false,
                                 }
                             } else {
-                                crab_physics::step_player_with_forces(
+                                crab_physics::step_player_with_forces_in(
+                                    shared.context.registries,
                                     &world,
                                     [snapshot.x, snapshot.y, snapshot.z],
                                     vel,
@@ -3610,6 +3270,255 @@ where
                         })
                         .await?;
                     }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Encodes one version-neutral presentation command at the protocol boundary.
+/// Keeping this dispatch outside the simulation loop makes new commands and
+/// protocol-specific representations independently testable.
+async fn handle_client_command<S>(
+    conn: &mut Connection<S>,
+    shared: &Arc<Shared>,
+    protocol: ProtocolVersion,
+    command: ClientCommand,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    match command {
+        ClientCommand::SetControls(controls) => {
+            *shared.controls.lock().unwrap() = Controls {
+                forward: controls.forward,
+                strafe: controls.strafe,
+                jump: controls.jump,
+                sprint: controls.sprint,
+                sneak: controls.sneak,
+                attack: controls.attack,
+                use_item: controls.use_item,
+                yaw: controls.yaw,
+                pitch: controls.pitch,
+                selected_slot: controls.selected_slot,
+                toggle_flight: controls.toggle_flight,
+                swap_hands: controls.swap_hands,
+            };
+        }
+        ClientCommand::SendChat(message) => {
+            if let Some(command) = message.strip_prefix('/') {
+                conn.send(&ChatCommand::new(command.to_owned())).await?;
+            } else if protocol == ProtocolVersion::V1_21_5 {
+                conn.send_unmapped(&play770::ClientChatMessage::unsigned(message.clone()))
+                    .await?;
+            } else {
+                conn.send(&ClientChatMessage::unsigned(message.clone()))
+                    .await?;
+            }
+            push_chat(shared, message);
+        }
+        ClientCommand::ResourcePackDecision(accepted) => {
+            if !accepted {
+                send_play_pack_status(conn, shared, protocol, 1).await?;
+                return Ok(());
+            }
+            send_play_pack_status(conn, shared, protocol, 3).await?;
+            let request = shared.resource_pack_request.lock().unwrap().clone();
+            let base_jar = shared.base_resource_jar.lock().unwrap().clone();
+            match request {
+                Some(request) => match download_resource_pack(&request).await {
+                    Ok(archive) => match activate_resource_pack(
+                        shared,
+                        request.uuid,
+                        archive,
+                        base_jar.as_deref(),
+                    ) {
+                        Ok(path) => {
+                            *shared.cached_resource_pack.lock().unwrap() = Some(path);
+                            if !shared.renderer_active.load(Ordering::SeqCst) {
+                                send_play_pack_status(conn, shared, protocol, 0).await?;
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "resource-pack activation failed");
+                            send_play_pack_status(conn, shared, protocol, 2).await?;
+                        }
+                    },
+                    Err(error) => {
+                        tracing::warn!(%error, "resource-pack download failed");
+                        send_play_pack_status(conn, shared, protocol, 2).await?;
+                    }
+                },
+                None => send_play_pack_status(conn, shared, protocol, 2).await?,
+            }
+        }
+        ClientCommand::ResourcePackStatus(status) => {
+            send_play_pack_status(conn, shared, protocol, status).await?;
+        }
+        ClientCommand::CloseContainer(window_id) => {
+            conn.send(&CloseContainer { window_id }).await?;
+        }
+        ClientCommand::ChooseEnchantment {
+            window_id,
+            enchantment,
+        } => {
+            conn.send(&EnchantItem {
+                window_id: window_id as i8,
+                enchantment,
+            })
+            .await?;
+        }
+        ClientCommand::PressMenuButton {
+            window_id,
+            button_id,
+        } => {
+            conn.send(&ContainerButtonClick {
+                window_id: window_id as i8,
+                button_id,
+            })
+            .await?;
+        }
+        ClientCommand::RenameItem(name) => conn.send(&RenameItem { name }).await?,
+        ClientCommand::EditBook { slot, pages, title } => {
+            conn.send(&EditBook { slot, pages, title }).await?;
+        }
+        ClientCommand::PlaceRecipe {
+            window_id,
+            recipe,
+            make_all,
+        } => match (protocol, recipe) {
+            (
+                ProtocolVersion::V1_21_4 | ProtocolVersion::V1_21_5,
+                RecipeKey::Numeric(recipe_id),
+            ) => {
+                conn.send_unmapped(&play769::PlaceRecipe {
+                    window_id: i32::from(window_id),
+                    recipe_id,
+                    make_all,
+                })
+                .await?;
+            }
+            (ProtocolVersion::V1_21_2, RecipeKey::Numeric(recipe_id)) => {
+                conn.send_unmapped(&play768::PlaceRecipe {
+                    window_id: i32::from(window_id),
+                    recipe_id,
+                    make_all,
+                })
+                .await?;
+            }
+            (_, RecipeKey::Namespaced(recipe)) => {
+                conn.send(&PlaceRecipe {
+                    window_id,
+                    recipe,
+                    make_all,
+                })
+                .await?;
+            }
+            _ => tracing::warn!("recipe key does not match active protocol profile"),
+        },
+        ClientCommand::SelectBundleItem {
+            slot_id,
+            selected_item_index,
+        } => {
+            if matches!(
+                protocol,
+                ProtocolVersion::V1_21_4 | ProtocolVersion::V1_21_5
+            ) {
+                conn.send_unmapped(&play769::SelectBundleItem {
+                    slot_id,
+                    selected_item_index,
+                })
+                .await?;
+            } else if protocol == ProtocolVersion::V1_21_2 {
+                conn.send_unmapped(&play768::SelectBundleItem {
+                    slot_id,
+                    selected_item_index,
+                })
+                .await?;
+            }
+        }
+        ClientCommand::ClickContainer {
+            window_id,
+            slot,
+            button,
+            mode,
+        } => {
+            let index = slot as usize;
+            let predicted = if window_id == 0 {
+                let state_id = *shared.window_state.lock().unwrap();
+                let mut inventory = shared.inventory.lock().unwrap();
+                let mut carried = shared.carried.lock().unwrap();
+                if index >= inventory.len() {
+                    None
+                } else {
+                    let changed =
+                        apply_inventory_click(&mut inventory, &mut carried, index, button, mode);
+                    Some((state_id, changed, *carried))
+                }
+            } else {
+                let mut open = shared.container.lock().unwrap();
+                let mut carried = shared.carried.lock().unwrap();
+                match open
+                    .as_mut()
+                    .filter(|container| container.window_id == window_id)
+                {
+                    Some(container) if index < container.slots.len() => {
+                        let container_slots = container.container_slot_count();
+                        let changed = apply_container_click(
+                            &mut container.slots,
+                            &mut carried,
+                            index,
+                            button,
+                            mode,
+                            container_slots,
+                            container.menu_type,
+                        );
+                        Some((container.state_id, changed, *carried))
+                    }
+                    _ => None,
+                }
+            };
+            if let Some((state_id, changed, carried)) = predicted {
+                if matches!(
+                    protocol,
+                    ProtocolVersion::V1_21
+                        | ProtocolVersion::V1_21_2
+                        | ProtocolVersion::V1_21_4
+                        | ProtocolVersion::V1_21_5
+                ) {
+                    conn.send(&play767::ClickContainerComponents {
+                        window_id,
+                        state_id,
+                        slot,
+                        button,
+                        mode,
+                        changed,
+                        carried,
+                    })
+                    .await?;
+                } else if protocol == ProtocolVersion::V1_20_5 {
+                    conn.send(&play766::ClickContainerComponents {
+                        window_id,
+                        state_id,
+                        slot,
+                        button,
+                        mode,
+                        changed,
+                        carried,
+                    })
+                    .await?;
+                } else {
+                    conn.send(&ClickContainer {
+                        window_id,
+                        state_id,
+                        slot,
+                        button,
+                        mode,
+                        changed,
+                        carried,
+                    })
+                    .await?;
                 }
             }
         }
@@ -3708,6 +3617,7 @@ fn handle_join_game(
         player.entity_id = entity_id;
         player.gamemode = game_mode;
     }
+    shared.apply_core_event(ClientEvent::PlayerSpawned { entity_id });
     let colors = crab_world::biome_colors(&codec);
     if let Some((min_y, height)) = crab_world::dimension_extent(&codec, &dimension_type) {
         let mut world = World::new(min_y, height);
@@ -6047,6 +5957,7 @@ fn nearest_entity_hit(
 
 /// Appends a chat line to the capped chat log.
 fn push_chat(shared: &Arc<Shared>, line: String) {
+    shared.apply_core_event(ClientEvent::ChatReceived(line.clone()));
     let mut log = shared.chat_log.lock().unwrap();
     log.push_back(line);
     while log.len() > 100 {

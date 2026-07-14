@@ -1,6 +1,8 @@
 //! The loaded-chunk store and block queries.
 
 use std::collections::HashMap;
+use std::ops::Deref;
+use std::sync::Arc;
 
 use crab_protocol::nbt::Nbt;
 
@@ -131,12 +133,45 @@ pub fn dimension_extent(codec: &Nbt, dimension_type: &str) -> Option<(i32, i32)>
 /// `min_y` / `height` describe the vertical extent of the current dimension.
 /// They default to the 1.20.1 overworld (`-64..320`); once we parse the
 /// dimension registry from the Login packet we'll set these per-dimension.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct World {
     pub min_y: i32,
     pub height: i32,
-    chunks: HashMap<(i32, i32), Chunk>,
-    biome_colors: HashMap<u32, BiomeColors>,
+    chunks: HashMap<(i32, i32), Arc<Chunk>>,
+    chunk_revisions: HashMap<(i32, i32), u64>,
+    biome_colors: Arc<HashMap<u32, BiomeColors>>,
+    revision: u64,
+}
+
+/// Cheap immutable view captured for background queries such as meshing.
+/// Chunk payloads are structurally shared and dependency revisions allow stale
+/// work to be rejected before it reaches presentation.
+#[derive(Clone, Debug)]
+pub struct WorldSnapshot {
+    world: World,
+    dependencies: Vec<((i32, i32), Option<u64>)>,
+}
+
+impl WorldSnapshot {
+    #[must_use]
+    pub fn is_current(&self, world: &World) -> bool {
+        self.dependencies
+            .iter()
+            .all(|(coord, revision)| world.chunk_revision(*coord) == *revision)
+    }
+
+    #[must_use]
+    pub const fn revision(&self) -> u64 {
+        self.world.revision
+    }
+}
+
+impl Deref for WorldSnapshot {
+    type Target = World;
+
+    fn deref(&self) -> &Self::Target {
+        &self.world
+    }
 }
 
 impl Default for World {
@@ -152,7 +187,9 @@ impl World {
             min_y,
             height,
             chunks: HashMap::new(),
-            biome_colors: HashMap::new(),
+            chunk_revisions: HashMap::new(),
+            biome_colors: Arc::new(HashMap::new()),
+            revision: 0,
         }
     }
 
@@ -163,12 +200,17 @@ impl World {
 
     /// Inserts/replaces a chunk column.
     pub fn load_chunk(&mut self, chunk: Chunk) {
-        self.chunks.insert((chunk.x, chunk.z), chunk);
+        let coord = (chunk.x, chunk.z);
+        let revision = self.next_revision();
+        self.chunks.insert(coord, Arc::new(chunk));
+        self.chunk_revisions.insert(coord, revision);
     }
 
     /// Drops a chunk column.
     pub fn unload_chunk(&mut self, x: i32, z: i32) {
         self.chunks.remove(&(x, z));
+        self.chunk_revisions.remove(&(x, z));
+        self.next_revision();
     }
 
     /// Number of currently-loaded chunk columns.
@@ -183,7 +225,59 @@ impl World {
     }
 
     pub fn set_biome_colors(&mut self, colors: HashMap<u32, BiomeColors>) {
-        self.biome_colors = colors;
+        self.biome_colors = Arc::new(colors);
+        self.next_revision();
+    }
+
+    /// Monotonic revision for any world mutation.
+    #[must_use]
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Current revision of one loaded chunk.
+    #[must_use]
+    pub fn chunk_revision(&self, coord: (i32, i32)) -> Option<u64> {
+        self.chunk_revisions.get(&coord).copied()
+    }
+
+    /// Captures the target chunk and its eight horizontal neighbours. The
+    /// resulting snapshot can be queried and meshed without holding a world
+    /// lock, while preserving border face culling and biome smoothing.
+    #[must_use]
+    pub fn snapshot_region(&self, cx: i32, cz: i32) -> WorldSnapshot {
+        let mut chunks = HashMap::with_capacity(9);
+        let mut revisions = HashMap::with_capacity(9);
+        let mut dependencies = Vec::with_capacity(9);
+        for x in cx - 1..=cx + 1 {
+            for z in cz - 1..=cz + 1 {
+                let coord = (x, z);
+                let revision = self.chunk_revision(coord);
+                dependencies.push((coord, revision));
+                if let Some(chunk) = self.chunks.get(&coord) {
+                    chunks.insert(coord, Arc::clone(chunk));
+                }
+                if let Some(revision) = revision {
+                    revisions.insert(coord, revision);
+                }
+            }
+        }
+        WorldSnapshot {
+            world: World {
+                min_y: self.min_y,
+                height: self.height,
+                chunks,
+                chunk_revisions: revisions,
+                biome_colors: Arc::clone(&self.biome_colors),
+                revision: self.revision,
+            },
+            dependencies,
+        }
+    }
+
+    fn next_revision(&mut self) -> u64 {
+        self.revision = self.revision.saturating_add(1);
+        self.revision
     }
 
     pub fn biome_id(&self, x: i32, y: i32, z: i32) -> Option<u32> {
@@ -291,12 +385,15 @@ impl World {
             return;
         }
         if let Some(chunk) = self.chunks.get_mut(&(x >> 4, z >> 4)) {
+            let coord = (x >> 4, z >> 4);
             let section_index = ((y - self.min_y) >> 4) as usize;
-            if let Some(section) = chunk.sections.get_mut(section_index) {
+            if let Some(section) = Arc::make_mut(chunk).sections.get_mut(section_index) {
                 let lx = (x & 15) as usize;
                 let lz = (z & 15) as usize;
                 let ly = ((y - self.min_y) & 15) as usize;
                 section.set_block_state(lx, ly, lz, state);
+                let revision = self.next_revision();
+                self.chunk_revisions.insert(coord, revision);
             }
         }
     }
@@ -352,6 +449,25 @@ mod tests {
         world.set_block_state(8, -60, 8, 5);
         assert_eq!(world.block_state(8, -60, 8), Some(5));
         assert_eq!(world.block_state(8, -59, 8), Some(0));
+    }
+
+    #[test]
+    fn region_snapshots_are_immutable_and_revision_checked() {
+        let sections: Vec<Section> = (0..24).map(|_| air_section()).collect();
+        let mut world = World::overworld();
+        world.load_chunk(Chunk {
+            x: 0,
+            z: 0,
+            sections,
+        });
+        let snapshot = world.snapshot_region(0, 0);
+        assert!(snapshot.is_current(&world));
+        assert_eq!(snapshot.block_state(8, -60, 8), Some(0));
+
+        world.set_block_state(8, -60, 8, 5);
+        assert!(!snapshot.is_current(&world));
+        assert_eq!(snapshot.block_state(8, -60, 8), Some(0));
+        assert_eq!(world.block_state(8, -60, 8), Some(5));
     }
 
     #[test]

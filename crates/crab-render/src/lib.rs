@@ -1,15 +1,15 @@
 //! # crab-render
 //!
-//! A `wgpu` renderer for the Crabcraft world. It meshes [`crab_world::World`]
-//! block data (face culling + flat per-block colours via [`crab_registry`]) and
-//! rasterizes it.
+//! A `wgpu` renderer for the Crabcraft world. It meshes revisioned
+//! [`crab_world::WorldSnapshot`] regions with session-scoped registry and asset
+//! data, then rasterizes them.
 //!
 //! The pipeline is window-agnostic: [`renderer::render_to_rgba`] /
 //! [`render_to_png`] render headlessly to an image (great for tests and CI),
 //! and the same shader/vertex format drives the live windowed mode.
 //!
-//! Textures/block-models are intentionally not here yet — flat colours are
-//! enough to see terrain; the asset pipeline is a later milestone.
+//! Model and texture loading stays in `crab-assets`; this crate consumes the
+//! resulting immutable atlas/model generations.
 
 pub mod camera;
 pub mod hud;
@@ -26,7 +26,7 @@ pub use hud::{
 };
 pub use mesh::{
     block_item_mesh, block_state_item_mesh, box_mesh, entity_armour_mesh, entity_mesh,
-    entity_mesh_with_pose, item_model_mesh, mesh_region, Mesh, Vertex,
+    entity_mesh_with_pose, item_model_mesh, mesh_region, mesh_region_with_registry, Mesh, Vertex,
 };
 pub use renderer::{
     build_block_pipeline, render_to_png, render_to_rgba, upload_atlas, upload_texture,

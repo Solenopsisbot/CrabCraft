@@ -91,9 +91,11 @@ const FACES: [Face; 6] = [
 ];
 
 /// Whether `state` is a full opaque cube, so it hides neighbouring faces.
-fn occludes(atlas: &Atlas, state: u32) -> bool {
-    !crab_registry::is_air(state)
-        && crab_registry::block_name(state).is_some_and(|n| atlas.is_state_cube(state, n))
+fn occludes(registries: crab_registry::RegistrySet, atlas: &Atlas, state: u32) -> bool {
+    !registries.is_air(state)
+        && registries
+            .block_name(state)
+            .is_some_and(|name| atlas.is_state_cube(state, name))
 }
 
 fn block_model_seed(cell: [i32; 3], part: usize) -> u64 {
@@ -304,6 +306,17 @@ fn campfire_visual(offset: usize) -> (&'static str, f32) {
 
 /// Builds a textured mesh for the inclusive world-coordinate box `[min, max]`.
 pub fn mesh_region(world: &World, atlas: &Atlas, min: [i32; 3], max: [i32; 3]) -> Mesh {
+    mesh_region_with_registry(world, atlas, min, max, crab_registry::RegistrySet::global())
+}
+
+/// Session-scoped form of [`mesh_region`].
+pub fn mesh_region_with_registry(
+    world: &World,
+    atlas: &Atlas,
+    min: [i32; 3],
+    max: [i32; 3],
+    registries: crab_registry::RegistrySet,
+) -> Mesh {
     let mut vertices = Vec::new();
     for x in min[0]..=max[0] {
         for y in min[1]..=max[1] {
@@ -311,10 +324,10 @@ pub fn mesh_region(world: &World, atlas: &Atlas, min: [i32; 3], max: [i32; 3]) -
                 let Some(state) = world.block_state(x, y, z) else {
                     continue;
                 };
-                if crab_registry::is_air(state) {
+                if registries.is_air(state) {
                     continue;
                 }
-                let name = crab_registry::block_name(state).unwrap_or("");
+                let name = registries.block_name(state).unwrap_or("");
                 let base = [x as f32, y as f32, z as f32];
 
                 if let Some(parts) = atlas.block_state_model(state) {
@@ -324,6 +337,7 @@ pub fn mesh_region(world: &World, atlas: &Atlas, min: [i32; 3], max: [i32; 3]) -
                                 &mut vertices,
                                 world,
                                 atlas,
+                                registries,
                                 base,
                                 [x, y, z],
                                 &model.elements,
@@ -336,7 +350,7 @@ pub fn mesh_region(world: &World, atlas: &Atlas, min: [i32; 3], max: [i32; 3]) -
                 }
 
                 if name.ends_with("_wall") {
-                    if let Some(block) = crab_registry::block_for_state(state) {
+                    if let Some(block) = registries.block_for_state(state) {
                         let offset = (state - block.min_state) as usize;
                         let levels = [
                             offset / 108,
@@ -351,6 +365,7 @@ pub fn mesh_region(world: &World, atlas: &Atlas, min: [i32; 3], max: [i32; 3]) -
                                     &mut vertices,
                                     world,
                                     atlas,
+                                    registries,
                                     base,
                                     [x, y, z],
                                     post,
@@ -369,6 +384,7 @@ pub fn mesh_region(world: &World, atlas: &Atlas, min: [i32; 3], max: [i32; 3]) -
                                     &mut vertices,
                                     world,
                                     atlas,
+                                    registries,
                                     base,
                                     [x, y, z],
                                     side,
@@ -389,13 +405,14 @@ pub fn mesh_region(world: &World, atlas: &Atlas, min: [i32; 3], max: [i32; 3]) -
                             &mut vertices,
                             world,
                             atlas,
+                            registries,
                             base,
                             [x, y, z],
                             post,
                             [0.0, 0.0, 0.0],
                         );
                         if let Some(side) = atlas.block_elements_variant(name, "side") {
-                            let Some(block) = crab_registry::block_for_state(state) else {
+                            let Some(block) = registries.block_for_state(state) else {
                                 continue;
                             };
                             let offset = (state - block.min_state) as usize;
@@ -412,6 +429,7 @@ pub fn mesh_region(world: &World, atlas: &Atlas, min: [i32; 3], max: [i32; 3]) -
                                         &mut vertices,
                                         world,
                                         atlas,
+                                        registries,
                                         base,
                                         [x, y, z],
                                         side,
@@ -425,13 +443,14 @@ pub fn mesh_region(world: &World, atlas: &Atlas, min: [i32; 3], max: [i32; 3]) -
                 }
 
                 if name.ends_with("_door") && !name.ends_with("_trapdoor") {
-                    if let Some(block) = crab_registry::block_for_state(state) {
+                    if let Some(block) = registries.block_for_state(state) {
                         let (variant, yaw) = door_visual((state - block.min_state) as usize);
                         if let Some(elements) = atlas.block_elements_variant(name, variant) {
                             emit_elements(
                                 &mut vertices,
                                 world,
                                 atlas,
+                                registries,
                                 base,
                                 [x, y, z],
                                 elements,
@@ -443,13 +462,14 @@ pub fn mesh_region(world: &World, atlas: &Atlas, min: [i32; 3], max: [i32; 3]) -
                 }
 
                 if name.ends_with("_trapdoor") {
-                    if let Some(block) = crab_registry::block_for_state(state) {
+                    if let Some(block) = registries.block_for_state(state) {
                         let (variant, yaw) = trapdoor_visual((state - block.min_state) as usize);
                         if let Some(elements) = atlas.block_elements_variant(name, variant) {
                             emit_elements(
                                 &mut vertices,
                                 world,
                                 atlas,
+                                registries,
                                 base,
                                 [x, y, z],
                                 elements,
@@ -461,7 +481,7 @@ pub fn mesh_region(world: &World, atlas: &Atlas, min: [i32; 3], max: [i32; 3]) -
                 }
 
                 if name.ends_with("rail") {
-                    if let Some(block) = crab_registry::block_for_state(state) {
+                    if let Some(block) = registries.block_for_state(state) {
                         let bare = name.strip_prefix("minecraft:").unwrap_or(name);
                         let (variant, yaw) = rail_visual(bare, (state - block.min_state) as usize);
                         let elements = if variant == "base" {
@@ -474,6 +494,7 @@ pub fn mesh_region(world: &World, atlas: &Atlas, min: [i32; 3], max: [i32; 3]) -
                                 &mut vertices,
                                 world,
                                 atlas,
+                                registries,
                                 base,
                                 [x, y, z],
                                 elements,
@@ -485,7 +506,7 @@ pub fn mesh_region(world: &World, atlas: &Atlas, min: [i32; 3], max: [i32; 3]) -
                 }
 
                 if name == "minecraft:redstone_wire" {
-                    if let Some(block) = crab_registry::block_for_state(state) {
+                    if let Some(block) = registries.block_for_state(state) {
                         let visual = redstone_visual((state - block.min_state) as usize);
                         let tint = redstone_tint(visual.power);
                         if visual.dot {
@@ -494,6 +515,7 @@ pub fn mesh_region(world: &World, atlas: &Atlas, min: [i32; 3], max: [i32; 3]) -
                                     &mut vertices,
                                     world,
                                     atlas,
+                                    registries,
                                     base,
                                     [x, y, z],
                                     elements,
@@ -517,6 +539,7 @@ pub fn mesh_region(world: &World, atlas: &Atlas, min: [i32; 3], max: [i32; 3]) -
                                     &mut vertices,
                                     world,
                                     atlas,
+                                    registries,
                                     base,
                                     [x, y, z],
                                     elements,
@@ -537,6 +560,7 @@ pub fn mesh_region(world: &World, atlas: &Atlas, min: [i32; 3], max: [i32; 3]) -
                                         &mut vertices,
                                         world,
                                         atlas,
+                                        registries,
                                         base,
                                         [x, y, z],
                                         elements,
@@ -555,13 +579,14 @@ pub fn mesh_region(world: &World, atlas: &Atlas, min: [i32; 3], max: [i32; 3]) -
                     name,
                     "minecraft:furnace" | "minecraft:blast_furnace" | "minecraft:smoker"
                 ) {
-                    if let Some(block) = crab_registry::block_for_state(state) {
+                    if let Some(block) = registries.block_for_state(state) {
                         let (variant, yaw) = furnace_visual((state - block.min_state) as usize);
                         if let Some(elements) = atlas.block_elements_variant(name, variant) {
                             emit_elements(
                                 &mut vertices,
                                 world,
                                 atlas,
+                                registries,
                                 base,
                                 [x, y, z],
                                 elements,
@@ -573,13 +598,14 @@ pub fn mesh_region(world: &World, atlas: &Atlas, min: [i32; 3], max: [i32; 3]) -
                 }
 
                 if matches!(name, "minecraft:campfire" | "minecraft:soul_campfire") {
-                    if let Some(block) = crab_registry::block_for_state(state) {
+                    if let Some(block) = registries.block_for_state(state) {
                         let (variant, yaw) = campfire_visual((state - block.min_state) as usize);
                         if let Some(elements) = atlas.block_elements_variant(name, variant) {
                             emit_elements(
                                 &mut vertices,
                                 world,
                                 atlas,
+                                registries,
                                 base,
                                 [x, y, z],
                                 elements,
@@ -594,13 +620,14 @@ pub fn mesh_region(world: &World, atlas: &Atlas, min: [i32; 3], max: [i32; 3]) -
                 // model's element geometry.
                 if let Some(default_elements) = atlas.block_elements(name) {
                     let mut elements = default_elements;
-                    let mut model_rotation = crab_registry::block_for_state(state)
+                    let mut model_rotation = registries
+                        .block_for_state(state)
                         .and_then(|block| {
                             horizontal_rotation(name, (state - block.min_state) as usize)
                         })
                         .unwrap_or([0.0, 0.0, 0.0]);
                     if name.ends_with("_stairs") {
-                        if let Some(block) = crab_registry::block_for_state(state) {
+                        if let Some(block) = registries.block_for_state(state) {
                             let offset = (state - block.min_state) as usize;
                             let facing = offset / 20;
                             let half = (offset % 20) / 10;
@@ -626,6 +653,7 @@ pub fn mesh_region(world: &World, atlas: &Atlas, min: [i32; 3], max: [i32; 3]) -
                         &mut vertices,
                         world,
                         atlas,
+                        registries,
                         base,
                         [x, y, z],
                         elements,
@@ -636,7 +664,8 @@ pub fn mesh_region(world: &World, atlas: &Atlas, min: [i32; 3], max: [i32; 3]) -
 
                 // Full cube (or flat fallback): one quad per non-occluded face.
                 let model = atlas.model(name);
-                let rotation = crab_registry::block_for_state(state)
+                let rotation = registries
+                    .block_for_state(state)
                     .and_then(|block| {
                         let offset = (state - block.min_state) as usize;
                         axis_rotation(name, offset).or_else(|| horizontal_rotation(name, offset))
@@ -651,7 +680,7 @@ pub fn mesh_region(world: &World, atlas: &Atlas, min: [i32; 3], max: [i32; 3]) -
                     ];
                     let neighbor =
                         world.block_state(x + direction[0], y + direction[1], z + direction[2]);
-                    if neighbor.is_some_and(|s| occludes(atlas, s)) {
+                    if neighbor.is_some_and(|s| occludes(registries, atlas, s)) {
                         continue;
                     }
                     let tex = model.faces[fi];
@@ -713,10 +742,12 @@ fn rotate_point(p: [f32; 3], rot: &crab_assets::ElementRotation) -> [f32; 3] {
 }
 
 /// Emits one block's element geometry (used for non-full-cube models).
+#[allow(clippy::too_many_arguments)]
 fn emit_elements(
     verts: &mut Vec<Vertex>,
     world: &World,
     atlas: &Atlas,
+    registries: crab_registry::RegistrySet,
     base: [f32; 3],
     cell: [i32; 3],
     elements: &[crab_assets::ElementData],
@@ -726,6 +757,7 @@ fn emit_elements(
         verts,
         world,
         atlas,
+        registries,
         base,
         cell,
         elements,
@@ -740,6 +772,7 @@ fn emit_state_elements(
     verts: &mut Vec<Vertex>,
     world: &World,
     atlas: &Atlas,
+    registries: crab_registry::RegistrySet,
     base: [f32; 3],
     cell: [i32; 3],
     elements: &[crab_assets::ElementData],
@@ -750,6 +783,7 @@ fn emit_state_elements(
         verts,
         world,
         atlas,
+        registries,
         base,
         cell,
         elements,
@@ -764,6 +798,7 @@ fn emit_elements_tinted(
     verts: &mut Vec<Vertex>,
     world: &World,
     atlas: &Atlas,
+    registries: crab_registry::RegistrySet,
     base: [f32; 3],
     cell: [i32; 3],
     elements: &[crab_assets::ElementData],
@@ -773,7 +808,7 @@ fn emit_elements_tinted(
 ) {
     let block_name = world
         .block_state(cell[0], cell[1], cell[2])
-        .and_then(crab_registry::block_name)
+        .and_then(|state| registries.block_name(state))
         .unwrap_or("minecraft:air");
     for el in elements {
         let from_n = [el.from[0] / 16.0, el.from[1] / 16.0, el.from[2] / 16.0];
@@ -787,7 +822,7 @@ fn emit_elements_tinted(
                 let direction = rotate_model(FACES[cd as usize].normal, model_rotation, false);
                 let d = direction.map(|value| value.round() as i32);
                 let n = world.block_state(cell[0] + d[0], cell[1] + d[1], cell[2] + d[2]);
-                if n.is_some_and(|s| occludes(atlas, s)) {
+                if n.is_some_and(|state| occludes(registries, atlas, state)) {
                     continue;
                 }
             }

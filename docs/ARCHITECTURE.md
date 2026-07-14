@@ -7,22 +7,56 @@ presentation remain independently testable.
 
 ```text
 TCP -> framing/compression/encryption -> versioned packet decoding
-    -> Shared game state -> physics/input outboxes -> serverbound packets
-                         -> meshing/assets -> wgpu renderer + HUD
-                         -> audio event resolver -> output device
+    -> semantic ClientEvent -> deterministic ClientCore -> Arc<ClientSnapshot>
+                                                    \-> presentation readers
+ input/UI -> bounded ClientCommand queue -> versioned wire adapter -> TCP
+ world updates -> revisioned World -> immutable region snapshot -> mesh worker
+ resource pack -> bounded CPU worker -> validated generation -> GPU commit
 ```
 
-`crab-net` owns framing, compression, encryption, connection state, and packet-ID
-translation. `crab-protocol` owns primitive codecs, NBT, and versioned packet
-layouts. The `crabcraft` network task parses play packets into `Shared`, a set of
-small mutex-protected stores and bounded outboxes. The window loop reads those
-stores without giving rendering ownership of authoritative game state.
+`crab-net` owns framing, compression, encryption, connection state, and applies
+the packet-ID mapper selected for a session. `crab-protocol` owns primitive
+codecs, NBT, and versioned packet layouts. `crab-core` owns the renderer-neutral session model: protocol profiles,
+typed commands and events, deterministic state transitions, coherent snapshots,
+the screen stack, and semantic replay records. The `crabcraft` crate adapts wire
+packets to those types and temporarily mirrors feature-specific legacy stores as
+their domains migrate. Rendering never owns or mutates authoritative game state.
 
-Chunk meshing runs off the render thread. Network updates mark a chunk and its
-edge neighbours dirty; worker results are uploaded under a per-frame budget.
-Resource-pack changes construct a validated vanilla-fallback archive, rebuild CPU
-atlases, upload replacement GPU resources, remesh loaded chunks, and only then
-acknowledge success to the server.
+Every connection creates one immutable `SessionContext`. It pairs a
+`ProtocolVersion` with its `RegistrySet`, so concurrent or sequential sessions
+cannot change each other's block, item, entity, collision, or packet mapping.
+The old process-global registry accessors remain compatibility wrappers; new
+code must accept a `SessionContext` or `RegistrySet` explicitly.
+
+All presentation/network requests cross the bounded `ClientCommand` queue.
+Configuration may consume its own commands while preserving the order of
+deferred play commands. The play adapter is the only layer that turns commands
+into version-specific bytes. Incoming lifecycle and player-state changes become
+`ClientEvent`s and are applied serially by `ClientCore`; readers receive one
+`Arc<ClientSnapshot>` revision rather than observing unrelated locks mid-update.
+
+Chunk storage is copy-on-write. Network updates increment per-chunk revisions and
+coalesce the chunk plus edge neighbours in an event-driven dirty set. Meshing
+captures a structurally shared 3x3 `WorldSnapshot`, releases the world lock, and
+runs off the render thread. Results travel through a bounded channel and carry
+both world dependency revisions and an asset generation; stale results are
+discarded before GPU upload.
+
+Resource-pack changes are transactional. A bounded worker constructs and
+validates the complete CPU `ResourceSet` without blocking winit. The render
+thread commits one matching generation atomically, remeshes loaded chunks, and
+only then acknowledges success to the server. A failed generation leaves the
+currently displayed resources untouched.
+
+Modal UI is represented by a tested `ScreenStack` rather than unrelated boolean
+flags. This makes nesting explicit (for example Pause -> Options -> Controls)
+and gives new screens one lifecycle model for open, close, replace, and escape.
+
+Set `CRABCRAFT_REPLAY_OUT=/path/to/replay.json` to record a deterministic
+semantic session trace. Replays contain protocol context, ordered events and
+commands, and expected snapshot revisions. User-authored chat, command, book,
+and rename text is redacted. Replays intentionally sit above packet bytes so
+they remain useful when a protocol adapter changes.
 
 Entity assets are assembled at startup from user-provided sources: Java textures
 from the selected client jar and compatible box/bone geometry from Mojang's
@@ -85,6 +119,8 @@ presentation code resolves numeric IDs.
 
 ## Crate boundaries
 
+- `crab-core`: protocol/session profiles, commands, events, state snapshots,
+  screen stack and semantic replay.
 - `crab-protocol`: byte codecs, classic/network NBT, packet traits, per-version packets.
 - `crab-net`: async transport, framing, zlib, AES-CFB8, protocol-state tracking.
 - `crab-world`: section palettes, chunks, block updates, biomes and dimension data.
@@ -99,9 +135,28 @@ presentation code resolves numeric IDs.
 - `crab-auth`: Microsoft authentication and Minecraft session encryption helpers.
 - `crabcraft`: session orchestration, shared state, input, menus and window loop.
 
+## Extension seams
+
+New behavior should enter through the narrowest stable seam:
+
+- Add wire layouts to `crab-protocol`, then expose only verified unchanged ID
+  mappings in `crab-core::wire`.
+- Add player intent as `ClientCommand`; encode it only in the network adapter.
+- Add authoritative state as `ClientEvent` plus a deterministic `ClientCore`
+  transition and snapshot field.
+- Add modal UI with a `UiScreen` variant and `ScreenStack` transition.
+- Add background computation with an immutable input snapshot, bounded queue,
+  generation/revision stamp, and stale-result rejection.
+- Add per-session lookup data to `SessionContext` rather than global mutable
+  selection.
+
+The complete checklist and examples are in [Extending Crabcraft](EXTENDING.md).
+
 ## Invariants
 
 - Network-controlled lengths are validated before allocation.
+- Commands, worker requests, and worker results are bounded.
+- Snapshots are coherent and worker results are revision checked.
 - Protocol profiles translate canonical 1.20.1 packet IDs only when payloads are
   unchanged; changed payloads use explicit version-aware decoders.
 - The repository never embeds proprietary Minecraft assets.

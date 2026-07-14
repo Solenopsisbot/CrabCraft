@@ -20,6 +20,7 @@ crab-physics.workspace = true
 crab-assets.workspace = true
 crab-registry.workspace = true
 crab-audio.workspace = true
+crab-core.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
 bytes.workspace = true
