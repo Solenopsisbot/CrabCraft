@@ -1972,6 +1972,14 @@ struct AppResources {
     manager: ResourceManager,
 }
 
+fn should_request_resource_pack(
+    path: &PathBuf,
+    applied: Option<&PathBuf>,
+    requested: Option<&PathBuf>,
+) -> bool {
+    applied != Some(path) && requested != Some(path)
+}
+
 impl App {
     fn screen_open(&self, screen: UiScreen) -> bool {
         self.screens.contains(screen)
@@ -3003,8 +3011,11 @@ impl App {
     fn apply_pending_resource_pack(&mut self) {
         let pending = self.shared.cached_resource_pack.lock().unwrap().clone();
         if let Some(path) = pending.filter(|path| {
-            self.applied_resource_pack.as_ref() != Some(path)
-                && self.requested_resource_pack.as_ref() != Some(path)
+            should_request_resource_pack(
+                path,
+                self.applied_resource_pack.as_ref(),
+                self.requested_resource_pack.as_ref(),
+            )
         }) {
             if self.resource_manager.request(path.clone()).is_ok() {
                 self.requested_resource_pack = Some(path);
@@ -3015,7 +3026,6 @@ impl App {
             return;
         };
         self.requested_resource_pack = None;
-        self.applied_resource_pack = Some(prepared.archive.clone());
         let path = prepared.archive;
         let result = prepared.resources.map(|resources| {
             let atlas = Arc::new(resources.blocks);
@@ -3053,6 +3063,7 @@ impl App {
 
         let status = match result {
             Ok(()) => {
+                self.applied_resource_pack = Some(path.clone());
                 tracing::info!(pack = %path.display(), "applied server resource pack live");
                 0
             }
@@ -4623,6 +4634,17 @@ mod tests {
             armour_color("diamond_chestplate"),
             armour_color("golden_chestplate")
         );
+    }
+
+    #[test]
+    fn failed_resource_pack_preparation_remains_retryable() {
+        let path = PathBuf::from("server-pack.zip");
+        assert!(!should_request_resource_pack(&path, None, Some(&path)));
+
+        // Clearing the in-flight request after a preparation failure must make
+        // the same cached archive eligible for another attempt.
+        assert!(should_request_resource_pack(&path, None, None));
+        assert!(!should_request_resource_pack(&path, Some(&path), None));
     }
 
     #[test]
