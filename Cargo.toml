@@ -19,6 +19,8 @@ flate2 = "1"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 # internal crates
 crab-protocol = { path = "crates/crab-protocol" }
@@ -30,6 +32,7 @@ crab-auth = { path = "crates/crab-auth" }
 crab-physics = { path = "crates/crab-physics" }
 crab-assets = { path = "crates/crab-assets" }
 crab-audio = { path = "crates/crab-audio" }
+crab-core = { path = "crates/crab-core" }
 
 [profile.release]
 lto = "thin"

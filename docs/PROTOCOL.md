@@ -22,6 +22,13 @@ translate inbound and outbound IDs at known insertion points. A packet receives 
 version-specific decoder whenever its payload changed; accepting a shifted ID is
 not considered sufficient support.
 
+The immutable session profile lives in `crab-core`: `ProtocolVersion` selects
+the audited maps in `crab-core::wire` and a matching `RegistrySet` once per
+connection. Packet bodies remain in `crab-protocol`. The primary physics,
+asset-loading, and world-meshing paths receive the session registry explicitly;
+compatibility wrappers for older presentation helpers still delegate to the
+process-default registry while those call sites migrate.
+
 Blocks, block states, items, and entities are also numeric wire registries. The
 client selects committed generated 1.20.1, 1.20.2, 1.20.3, 1.20.5, 1.21, 1.21.3, 1.21.4, or 1.21.5
 tables before it loads assets or decodes a world. This matters even within
@@ -141,8 +148,9 @@ by a custom-named enchanted Mace carrying 1.21.5 component patches.
 
 1. Obtain authoritative clientbound/serverbound maps and packet schemas.
 2. Diff packet names and layouts against the nearest supported version.
-3. Add constants and per-state packets under `crab-protocol/src/versions/`.
-4. Add segmented ID mappings only for unchanged payloads.
+3. Add constants and per-state packets under `crab-protocol/src/versions/`, then
+   add the profile and immutable registry binding in `crab-core::protocol`.
+4. Add segmented ID mappings in `crab-core::wire` only for unchanged payloads.
 5. Add explicit decoders for changed payloads and registry/item semantics.
 6. Test real insertion points, login/configuration transitions, NBT forms, and at
    least one representative changed packet.

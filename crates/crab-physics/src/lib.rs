@@ -8,6 +8,7 @@
 //! Non-empty shapes are full-cube approximations for now; precise slabs,
 //! stairs, fences and other partial shapes are a later refinement.
 
+use crab_registry::RegistrySet;
 use crab_world::World;
 use glam::DVec3;
 
@@ -56,11 +57,11 @@ fn overlaps(a0: f64, a1: f64, b0: f64, b1: f64) -> bool {
     a1 > b0 + EPS && a0 < b1 - EPS
 }
 
-fn is_targetable(world: &World, x: i32, y: i32, z: i32) -> bool {
+fn is_targetable(registries: RegistrySet, world: &World, x: i32, y: i32, z: i32) -> bool {
     world.block_state(x, y, z).is_some_and(|state| {
-        !crab_registry::is_air(state)
+        !registries.is_air(state)
             && !matches!(
-                crab_registry::block_name(state),
+                registries.block_name(state),
                 Some("minecraft:water" | "minecraft:lava")
             )
     })
@@ -102,6 +103,30 @@ pub fn step_player_with_forces(
     gravity: f64,
     terminal_velocity: f64,
 ) -> StepResult {
+    step_player_with_forces_in(
+        RegistrySet::global(),
+        world,
+        feet,
+        vel,
+        dt,
+        height,
+        gravity,
+        terminal_velocity,
+    )
+}
+
+/// Session-scoped form of [`step_player_with_forces`].
+#[allow(clippy::too_many_arguments)]
+pub fn step_player_with_forces_in(
+    registries: RegistrySet,
+    world: &World,
+    feet: [f64; 3],
+    vel: [f64; 3],
+    dt: f64,
+    height: f64,
+    gravity: f64,
+    terminal_velocity: f64,
+) -> StepResult {
     let mut pos = DVec3::from_array(feet);
     let mut v = DVec3::from_array(vel);
 
@@ -109,7 +134,12 @@ pub fn step_player_with_forces(
 
     // Y
     let desired = v.y * dt;
-    let dy = collide_y(world, &Aabb::player_with_height(pos, height), desired);
+    let dy = collide_y_in(
+        registries,
+        world,
+        &Aabb::player_with_height(pos, height),
+        desired,
+    );
     let on_ground = desired < 0.0 && dy > desired + EPS;
     if (dy - desired).abs() > EPS {
         v.y = 0.0;
@@ -118,9 +148,19 @@ pub fn step_player_with_forces(
 
     let (want_x, want_z) = (v.x * dt, v.z * dt);
     let direct_start = pos;
-    let dx = collide_x(world, &Aabb::player_with_height(pos, height), want_x);
+    let dx = collide_x_in(
+        registries,
+        world,
+        &Aabb::player_with_height(pos, height),
+        want_x,
+    );
     pos.x += dx;
-    let dz = collide_z(world, &Aabb::player_with_height(pos, height), want_z);
+    let dz = collide_z_in(
+        registries,
+        world,
+        &Aabb::player_with_height(pos, height),
+        want_z,
+    );
     pos.z += dz;
 
     // Vanilla-style auto-step: if grounded horizontal motion was clipped, try
@@ -129,14 +169,34 @@ pub fn step_player_with_forces(
     let clipped = (dx - want_x).abs() > EPS || (dz - want_z).abs() > EPS;
     if on_ground && clipped {
         let mut stepped = direct_start;
-        let up = collide_y(world, &Aabb::player_with_height(stepped, height), 0.6);
+        let up = collide_y_in(
+            registries,
+            world,
+            &Aabb::player_with_height(stepped, height),
+            0.6,
+        );
         stepped.y += up;
         if up > EPS {
-            let sx = collide_x(world, &Aabb::player_with_height(stepped, height), want_x);
+            let sx = collide_x_in(
+                registries,
+                world,
+                &Aabb::player_with_height(stepped, height),
+                want_x,
+            );
             stepped.x += sx;
-            let sz = collide_z(world, &Aabb::player_with_height(stepped, height), want_z);
+            let sz = collide_z_in(
+                registries,
+                world,
+                &Aabb::player_with_height(stepped, height),
+                want_z,
+            );
             stepped.z += sz;
-            let down = collide_y(world, &Aabb::player_with_height(stepped, height), -up);
+            let down = collide_y_in(
+                registries,
+                world,
+                &Aabb::player_with_height(stepped, height),
+                -up,
+            );
             stepped.y += down;
             if sx * sx + sz * sz > direct_dist2 + EPS {
                 pos = stepped;
@@ -161,6 +221,17 @@ pub fn step_player_with_forces(
 /// collidable block. Used to prevent standing up into a low ceiling.
 #[must_use]
 pub fn can_occupy_player(world: &World, feet: [f64; 3], height: f64) -> bool {
+    can_occupy_player_in(RegistrySet::global(), world, feet, height)
+}
+
+/// Session-scoped form of [`can_occupy_player`].
+#[must_use]
+pub fn can_occupy_player_in(
+    registries: RegistrySet,
+    world: &World,
+    feet: [f64; 3],
+    height: f64,
+) -> bool {
     let aabb = Aabb::player_with_height(DVec3::from_array(feet), height);
     let x0 = aabb.min.x.floor() as i32;
     let x1 = (aabb.max.x - EPS).floor() as i32;
@@ -174,7 +245,7 @@ pub fn can_occupy_player(world: &World, feet: [f64; 3], height: f64) -> bool {
                 let Some(state) = world.block_state(x, y, z) else {
                     continue;
                 };
-                for part in crab_registry::collision_shape(state).boxes() {
+                for part in registries.collision_shape(state).boxes() {
                     if overlaps(
                         aabb.min.x,
                         aabb.max.x,
@@ -202,6 +273,11 @@ pub fn can_occupy_player(world: &World, feet: [f64; 3], height: f64) -> bool {
 
 /// Clamp vertical motion `dy` so the box doesn't pass through solid blocks.
 pub fn collide_y(world: &World, aabb: &Aabb, dy: f64) -> f64 {
+    collide_y_in(RegistrySet::global(), world, aabb, dy)
+}
+
+/// Session-scoped vertical collision query.
+pub fn collide_y_in(registries: RegistrySet, world: &World, aabb: &Aabb, dy: f64) -> f64 {
     if dy == 0.0 {
         return 0.0;
     }
@@ -219,7 +295,7 @@ pub fn collide_y(world: &World, aabb: &Aabb, dy: f64) -> f64 {
                     let Some(state) = world.block_state(bx, by, bz) else {
                         continue;
                     };
-                    for part in crab_registry::collision_shape(state).boxes() {
+                    for part in registries.collision_shape(state).boxes() {
                         let top = f64::from(by) + part.max[1];
                         if overlaps(
                             aabb.min.x,
@@ -249,7 +325,7 @@ pub fn collide_y(world: &World, aabb: &Aabb, dy: f64) -> f64 {
                     let Some(state) = world.block_state(bx, by, bz) else {
                         continue;
                     };
-                    for part in crab_registry::collision_shape(state).boxes() {
+                    for part in registries.collision_shape(state).boxes() {
                         let bottom = f64::from(by) + part.min[1];
                         if overlaps(
                             aabb.min.x,
@@ -276,6 +352,11 @@ pub fn collide_y(world: &World, aabb: &Aabb, dy: f64) -> f64 {
 
 /// Clamp X motion against solid blocks.
 pub fn collide_x(world: &World, aabb: &Aabb, dx: f64) -> f64 {
+    collide_x_in(RegistrySet::global(), world, aabb, dx)
+}
+
+/// Session-scoped horizontal X collision query.
+pub fn collide_x_in(registries: RegistrySet, world: &World, aabb: &Aabb, dx: f64) -> f64 {
     if dx == 0.0 {
         return 0.0;
     }
@@ -293,7 +374,7 @@ pub fn collide_x(world: &World, aabb: &Aabb, dx: f64) -> f64 {
                     let Some(state) = world.block_state(bx, by, bz) else {
                         continue;
                     };
-                    for part in crab_registry::collision_shape(state).boxes() {
+                    for part in registries.collision_shape(state).boxes() {
                         let edge = f64::from(bx) + part.max[0];
                         if overlaps(
                             aabb.min.y,
@@ -323,7 +404,7 @@ pub fn collide_x(world: &World, aabb: &Aabb, dx: f64) -> f64 {
                     let Some(state) = world.block_state(bx, by, bz) else {
                         continue;
                     };
-                    for part in crab_registry::collision_shape(state).boxes() {
+                    for part in registries.collision_shape(state).boxes() {
                         let edge = f64::from(bx) + part.min[0];
                         if overlaps(
                             aabb.min.y,
@@ -350,6 +431,11 @@ pub fn collide_x(world: &World, aabb: &Aabb, dx: f64) -> f64 {
 
 /// Clamp Z motion against solid blocks.
 pub fn collide_z(world: &World, aabb: &Aabb, dz: f64) -> f64 {
+    collide_z_in(RegistrySet::global(), world, aabb, dz)
+}
+
+/// Session-scoped horizontal Z collision query.
+pub fn collide_z_in(registries: RegistrySet, world: &World, aabb: &Aabb, dz: f64) -> f64 {
     if dz == 0.0 {
         return 0.0;
     }
@@ -367,7 +453,7 @@ pub fn collide_z(world: &World, aabb: &Aabb, dz: f64) -> f64 {
                     let Some(state) = world.block_state(bx, by, bz) else {
                         continue;
                     };
-                    for part in crab_registry::collision_shape(state).boxes() {
+                    for part in registries.collision_shape(state).boxes() {
                         let edge = f64::from(bz) + part.max[2];
                         if overlaps(
                             aabb.min.x,
@@ -397,7 +483,7 @@ pub fn collide_z(world: &World, aabb: &Aabb, dz: f64) -> f64 {
                     let Some(state) = world.block_state(bx, by, bz) else {
                         continue;
                     };
-                    for part in crab_registry::collision_shape(state).boxes() {
+                    for part in registries.collision_shape(state).boxes() {
                         let edge = f64::from(bz) + part.min[2];
                         if overlaps(
                             aabb.min.x,
@@ -444,6 +530,17 @@ impl RayHit {
 /// Casts a ray from `origin` along `dir` (need not be normalised) up to
 /// `max_dist` blocks, returning the first solid block hit (Amanatides–Woo DDA).
 pub fn raycast(world: &World, origin: [f64; 3], dir: [f64; 3], max_dist: f64) -> Option<RayHit> {
+    raycast_in(RegistrySet::global(), world, origin, dir, max_dist)
+}
+
+/// Session-scoped block ray cast.
+pub fn raycast_in(
+    registries: RegistrySet,
+    world: &World,
+    origin: [f64; 3],
+    dir: [f64; 3],
+    max_dist: f64,
+) -> Option<RayHit> {
     let len = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
     if len < 1e-9 {
         return None;
@@ -464,7 +561,7 @@ pub fn raycast(world: &World, origin: [f64; 3], dir: [f64; 3], max_dist: f64) ->
     let mut face = [0i32; 3];
     let max_steps = (max_dist as i32) * 3 + 9;
     for _ in 0..max_steps {
-        if is_targetable(world, cell[0], cell[1], cell[2]) {
+        if is_targetable(registries, world, cell[0], cell[1], cell[2]) {
             return Some(RayHit { block: cell, face });
         }
         // advance along the axis with the nearest voxel boundary

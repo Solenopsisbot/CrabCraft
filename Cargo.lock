@@ -586,6 +586,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "crab-core"
+version = "0.0.1"
+dependencies = [
+ "crab-protocol",
+ "crab-registry",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "crab-net"
 version = "0.0.1"
 dependencies = [
@@ -653,6 +664,7 @@ dependencies = [
  "crab-assets",
  "crab-audio",
  "crab-auth",
+ "crab-core",
  "crab-net",
  "crab-physics",
  "crab-protocol",

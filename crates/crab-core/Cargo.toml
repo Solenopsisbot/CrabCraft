@@ -1,0 +1,14 @@
+[package]
+name = "crab-core"
+description = "Deterministic, renderer-independent Crabcraft client state and session APIs."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+crab-protocol.workspace = true
+crab-registry.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

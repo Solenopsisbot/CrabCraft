@@ -182,6 +182,7 @@ side-by-side rather than by rewriting the core.
 
 | Crate | Responsibility |
 |-------|----------------|
+| `crab-core` | Renderer-neutral protocol/session profiles, typed commands/events, deterministic snapshots, screen stack, and semantic replay |
 | `crab-protocol` | Wire codecs (VarInt/VarLong/String/UUID/Position), NBT, the `Packet` trait, and per-version packet definitions (`versions::v1_20_1`) |
 | `crab-net` | Async connection: length framing, zlib compression sublayer, AES-128-CFB8 encryption, connection state |
 | `crab-world` | Chunk/section decoding (paletted containers), the `World` block store, dimension extents |
@@ -195,6 +196,7 @@ side-by-side rather than by rewriting the core.
 
 See [Architecture](docs/ARCHITECTURE.md) for data flow and crate boundaries,
 [Protocol support](docs/PROTOCOL.md) for the version matrix,
+[Extending Crabcraft](docs/EXTENDING.md) for the supported extension seams,
 [Asset pipeline](docs/ASSETS.md) for runtime asset resolution, and
 [Contributing](CONTRIBUTING.md) before sending a change.
 
@@ -254,6 +256,12 @@ cargo run -p crab-render --example offscreen -- out.png
 ```
 
 Set `RUST_LOG=crab_net=trace` (etc.) for verbose packet logging.
+
+Set `CRABCRAFT_REPLAY_OUT=/path/to/replay.json` to write a deterministic
+semantic trace for a session. User-authored chat, command, book, and rename text
+is redacted. Server resource-pack parsing and atlas/model preparation run on a
+bounded worker; the current generation remains active unless the replacement is
+fully validated and committed.
 
 ### Spinning up a local test server
 

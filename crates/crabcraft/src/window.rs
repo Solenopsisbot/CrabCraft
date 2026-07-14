@@ -1,6 +1,6 @@
 //! Live windowed renderer: a winit window + wgpu surface that draws the world
 //! from [`Shared`] as a first-person player, with cached per-chunk meshes that
-//! rebuild only when a chunk changes (drained from `Shared::dirty_chunks`).
+//! rebuild only when a chunk changes (drained from the coalescing invalidation queue).
 //!
 //! NOTE: this needs a display to actually run; it is compile-verified here but
 //! not click-tested in the headless build environment.
@@ -8,19 +8,20 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use crab_assets::{Atlas, EntityAtlas, GuiAtlas, ItemAtlas};
-use crab_protocol::versions::v1_20_1::play::PlaceRecipe;
+use crab_core::{ClientCommand, ConnectionPhase, RecipeKey, ScreenStack, UiScreen};
 use crab_render::{
     block_item_mesh, block_state_item_mesh, box_mesh, build_block_pipeline, build_hud_pipelines,
     container_geometry, entity_armour_mesh, entity_mesh, entity_mesh_with_pose, furnace_geometry,
-    hud_geometry, inventory_geometry, item_model_mesh, mesh_region, simple_container_geometry,
-    status_effect_geometry, upload_atlas, upload_texture, CameraUniform, HudPipelines, Vertex,
-    DEPTH_FORMAT,
+    hud_geometry, inventory_geometry, item_model_mesh, mesh_region_with_registry,
+    simple_container_geometry, status_effect_geometry, upload_atlas, upload_texture, CameraUniform,
+    HudPipelines, Vertex, DEPTH_FORMAT,
 };
+use crab_world::WorldSnapshot;
 use glam::Vec3;
 use wgpu::util::DeviceExt;
 use winit::application::ApplicationHandler;
@@ -30,6 +31,7 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
 
 use crate::client::{ContainerState, CraftingRecipe, EnvironmentState, Shared};
+use crate::resource::ResourceManager;
 
 /// Max chunk columns re-meshed per frame (bounds per-frame CPU during loads).
 const REMESH_BUDGET: usize = 4;
@@ -188,6 +190,7 @@ fn first_person_camera(
 }
 
 fn third_person_camera_distance(
+    registries: crab_registry::RegistrySet,
     world: &crab_world::World,
     player_pos: Vec3,
     eye_height: f32,
@@ -210,7 +213,8 @@ fn third_person_camera_distance(
         view
     };
     let origin = player_pos + Vec3::Y * eye_height;
-    let Some(hit) = crab_physics::raycast(
+    let Some(hit) = crab_physics::raycast_in(
+        registries,
         world,
         origin.as_dvec3().to_array(),
         direction.as_dvec3().to_array(),
@@ -1866,12 +1870,13 @@ struct App {
     shared: Arc<Shared>,
     atlas: Arc<Atlas>,
     /// Atlas snapshot source shared with the background mesher.
-    atlas_slot: Arc<RwLock<Arc<Atlas>>>,
+    atlas_slot: Arc<RwLock<AtlasGeneration>>,
     entity_atlas: Arc<EntityAtlas>,
     item_atlas: Arc<ItemAtlas>,
     gui_atlas: Arc<GuiAtlas>,
     /// Finished chunk meshes from the background mesher thread.
-    mesh_rx: Receiver<((i32, i32), Vec<Vertex>)>,
+    mesh_rx: Receiver<MeshOutput>,
+    asset_generation: u64,
     gfx: Option<Graphics>,
     /// Look angles in degrees (Minecraft convention).
     yaw: f32,
@@ -1894,23 +1899,19 @@ struct App {
     selected_name_time: f32,
     debug_open: bool,
     smoothed_fps: f32,
-    /// Whether the inventory panel is open (E toggles).
-    inventory_open: bool,
+    screens: ScreenStack,
     /// Client-side readable/writable book screen opened from the held item.
     book: Option<BookScreen>,
     /// Last observed server-container state, for cursor capture transitions.
     container_seen: bool,
     resource_pack_seen: bool,
     applied_resource_pack: Option<PathBuf>,
-    /// Chat input state: open + the line being typed.
-    chat_open: bool,
+    requested_resource_pack: Option<PathBuf>,
+    resource_manager: ResourceManager,
+    /// Chat input buffer owned by the chat screen.
     chat_buffer: String,
     /// Cursor position in NDC (for inventory/menu hit-testing).
     cursor: (f32, f32),
-    /// Whether the pause menu is open (Esc).
-    menu_open: bool,
-    controls_help_open: bool,
-    options_open: bool,
     fov_degrees: f32,
     mouse_sensitivity: f32,
     perspective: Perspective,
@@ -1949,26 +1950,54 @@ struct EntityAnim {
     age: f32,
 }
 
+#[derive(Clone)]
+struct AtlasGeneration {
+    id: u64,
+    atlas: Arc<Atlas>,
+}
+
+struct MeshOutput {
+    coord: (i32, i32),
+    world: WorldSnapshot,
+    asset_generation: u64,
+    vertices: Vec<Vertex>,
+}
+
+struct AppResources {
+    atlas_slot: Arc<RwLock<AtlasGeneration>>,
+    entity_atlas: Arc<EntityAtlas>,
+    item_atlas: Arc<ItemAtlas>,
+    gui_atlas: Arc<GuiAtlas>,
+    crack: Option<(Vec<u8>, u32, u32)>,
+    manager: ResourceManager,
+}
+
 impl App {
-    fn new(
-        shared: Arc<Shared>,
-        atlas_slot: Arc<RwLock<Arc<Atlas>>>,
-        entity_atlas: Arc<EntityAtlas>,
-        item_atlas: Arc<ItemAtlas>,
-        gui_atlas: Arc<GuiAtlas>,
-        mesh_rx: Receiver<((i32, i32), Vec<Vertex>)>,
-        crack: Option<(Vec<u8>, u32, u32)>,
-    ) -> Self {
-        let atlas = Arc::clone(&atlas_slot.read().unwrap());
+    fn screen_open(&self, screen: UiScreen) -> bool {
+        self.screens.contains(screen)
+    }
+
+    fn set_screen_open(&mut self, screen: UiScreen, open: bool) {
+        if open {
+            self.screens.open(screen);
+        } else {
+            self.screens.close(screen);
+        }
+    }
+
+    fn new(shared: Arc<Shared>, resources: AppResources, mesh_rx: Receiver<MeshOutput>) -> Self {
+        let atlas_generation = resources.atlas_slot.read().unwrap().clone();
+        let atlas = Arc::clone(&atlas_generation.atlas);
         Self {
             shared,
             atlas,
-            atlas_slot,
-            entity_atlas,
-            item_atlas,
-            gui_atlas,
+            atlas_slot: resources.atlas_slot,
+            entity_atlas: resources.entity_atlas,
+            item_atlas: resources.item_atlas,
+            gui_atlas: resources.gui_atlas,
             mesh_rx,
-            crack,
+            asset_generation: atlas_generation.id,
+            crack: resources.crack,
             gfx: None,
             yaw: 0.0,
             pitch: 0.0,
@@ -1986,17 +2015,15 @@ impl App {
             selected_name_time: 0.0,
             debug_open: false,
             smoothed_fps: 60.0,
-            inventory_open: false,
+            screens: ScreenStack::default(),
             book: None,
             container_seen: false,
             resource_pack_seen: false,
             applied_resource_pack: None,
-            chat_open: false,
+            requested_resource_pack: None,
+            resource_manager: resources.manager,
             chat_buffer: String::new(),
             cursor: (0.0, 0.0),
-            menu_open: false,
-            controls_help_open: false,
-            options_open: false,
             fov_degrees: 70.0,
             mouse_sensitivity: 0.12,
             perspective: Perspective::FirstPerson,
@@ -2347,7 +2374,7 @@ impl App {
     }
 
     fn item_screen_open(&self) -> bool {
-        self.inventory_open || self.server_container_open() || self.book.is_some()
+        self.screen_open(UiScreen::Inventory) || self.server_container_open() || self.book.is_some()
     }
 
     fn open_held_book(&mut self) -> bool {
@@ -2410,6 +2437,7 @@ impl App {
             sign_title: String::new(),
             submitted_title: None,
         });
+        self.screens.open(UiScreen::Book);
         self.set_cursor_free(true);
         true
     }
@@ -2419,14 +2447,13 @@ impl App {
             return;
         };
         if book.writable && book.dirty {
-            self.shared.edit_book_outbox.lock().unwrap().push(
-                crab_protocol::versions::v1_20_1::play::EditBook {
-                    slot: book.hotbar_slot,
-                    pages: book.pages,
-                    title: book.submitted_title,
-                },
-            );
+            self.shared.queue_command(ClientCommand::EditBook {
+                slot: book.hotbar_slot,
+                pages: book.pages,
+                title: book.submitted_title,
+            });
         }
+        self.screens.close(UiScreen::Book);
         self.set_cursor_free(false);
     }
 
@@ -2486,10 +2513,7 @@ impl App {
 
     fn choose_resource_pack(&self, accepted: bool) {
         self.shared
-            .resource_pack_outbox
-            .lock()
-            .unwrap()
-            .push(accepted);
+            .queue_command(ClientCommand::ResourcePackDecision(accepted));
         *self.shared.resource_pack_prompt_open.lock().unwrap() = false;
     }
 
@@ -2507,7 +2531,7 @@ impl App {
 
     fn crafting_recipe_context(&self) -> Option<RecipeContext> {
         let aspect = self.gfx.as_ref().map_or(1.0, Graphics::aspect);
-        if self.inventory_open && !self.server_container_open() {
+        if self.screen_open(UiScreen::Inventory) && !self.server_container_open() {
             return Some(RecipeContext {
                 panel: crab_render::inventory_rect(aspect),
                 window_id: 0,
@@ -2573,15 +2597,19 @@ impl App {
                     };
                     let cell = recipe_book_cell_rect(rect, visible);
                     if cx >= cell.0 && cx <= cell.2 && cy >= cell.1 && cy <= cell.3 {
-                        self.shared
-                            .place_recipe_outbox
-                            .lock()
-                            .unwrap()
-                            .push(PlaceRecipe {
-                                window_id: context.window_id,
-                                recipe: recipe.id.clone(),
-                                make_all: shift,
-                            });
+                        let recipe = if self.shared.context.protocol.number() >= 768 {
+                            recipe.id.parse().map_or_else(
+                                |_| RecipeKey::Namespaced(recipe.id.clone()),
+                                RecipeKey::Numeric,
+                            )
+                        } else {
+                            RecipeKey::Namespaced(recipe.id.clone())
+                        };
+                        self.shared.queue_command(ClientCommand::PlaceRecipe {
+                            window_id: context.window_id,
+                            recipe,
+                            make_all: shift,
+                        });
                         return;
                     }
                 }
@@ -2619,11 +2647,10 @@ impl App {
                     let (x0, y0, x1, y1) = recipe_button_rect(texture, page, visible, aspect);
                     if cx >= x0 && cx <= x1 && cy >= y0 && cy <= y1 {
                         if let Ok(button_id) = i8::try_from(index) {
-                            self.shared
-                                .menu_button_outbox
-                                .lock()
-                                .unwrap()
-                                .push((container.window_id, button_id));
+                            self.shared.queue_command(ClientCommand::PressMenuButton {
+                                window_id: container.window_id,
+                                button_id,
+                            });
                         }
                         return;
                     }
@@ -2633,11 +2660,10 @@ impl App {
                 for option in 0..3 {
                     let (x0, y0, x1, y1) = crab_render::enchantment_option_rect(rect, option);
                     if cx >= x0 && cx <= x1 && cy >= y0 && cy <= y1 {
-                        self.shared
-                            .enchant_outbox
-                            .lock()
-                            .unwrap()
-                            .push((container.window_id, option as i8));
+                        self.shared.queue_command(ClientCommand::ChooseEnchantment {
+                            window_id: container.window_id,
+                            enchantment: option as i8,
+                        });
                         return;
                     }
                 }
@@ -2651,12 +2677,12 @@ impl App {
                     crab_render::furnace_slot_rect(rect, slot)
                 };
                 if cx >= x0 && cx <= x1 && cy >= y0 && cy <= y1 {
-                    self.shared.click_outbox.lock().unwrap().push((
-                        container.window_id,
-                        slot as i16,
+                    self.shared.queue_command(ClientCommand::ClickContainer {
+                        window_id: container.window_id,
+                        slot: slot as i16,
                         button,
-                        i32::from(shift),
-                    ));
+                        mode: i32::from(shift),
+                    });
                     return;
                 }
             }
@@ -2666,12 +2692,12 @@ impl App {
         for slot in 0..46usize {
             let (x0, y0, x1, y1) = crab_render::inventory_slot_rect(rect, slot);
             if cx >= x0 && cx <= x1 && cy >= y0 && cy <= y1 {
-                self.shared.click_outbox.lock().unwrap().push((
-                    0,
-                    slot as i16,
+                self.shared.queue_command(ClientCommand::ClickContainer {
+                    window_id: 0,
+                    slot: slot as i16,
                     button,
-                    i32::from(shift),
-                ));
+                    mode: i32::from(shift),
+                });
                 return;
             }
         }
@@ -2715,7 +2741,7 @@ impl App {
             }
             return None;
         }
-        if self.inventory_open {
+        if self.screen_open(UiScreen::Inventory) {
             let rect = crab_render::inventory_rect(aspect);
             let inventory = self.shared.inventory.lock().unwrap();
             for (slot, item) in inventory.iter().enumerate() {
@@ -2761,7 +2787,7 @@ impl App {
             }
             return None;
         }
-        if self.inventory_open {
+        if self.screen_open(UiScreen::Inventory) {
             let rect = crab_render::inventory_rect(aspect);
             let metadata = self.shared.inventory_nbt.lock().unwrap();
             for slot in 0..metadata.len() {
@@ -2795,7 +2821,7 @@ impl App {
     fn menu_click(&mut self, event_loop: &ActiveEventLoop) {
         let aspect = self.gfx.as_ref().map_or(1.0, Graphics::aspect);
         let (cx, cy) = self.cursor;
-        if self.options_open {
+        if self.screen_open(UiScreen::Options) {
             for i in 0..4 {
                 let (x0, y0, x1, y1) = crab_render::menu_button_rect(aspect, i, 4);
                 if cx < x0 || cx > x1 || cy < y0 || cy > y1 {
@@ -2817,13 +2843,13 @@ impl App {
                             gfx.window.set_fullscreen(fullscreen);
                         }
                     }
-                    _ => self.options_open = false,
+                    _ => self.set_screen_open(UiScreen::Options, false),
                 }
                 return;
             }
             return;
         }
-        let buttons: &[&str] = if self.controls_help_open {
+        let buttons: &[&str] = if self.screen_open(UiScreen::Controls) {
             &DONE_BUTTON
         } else {
             &MENU_BUTTONS
@@ -2831,17 +2857,17 @@ impl App {
         for (i, _) in buttons.iter().enumerate() {
             let (x0, y0, x1, y1) = crab_render::menu_button_rect(aspect, i, buttons.len());
             if cx >= x0 && cx <= x1 && cy >= y0 && cy <= y1 {
-                if self.controls_help_open {
-                    self.controls_help_open = false;
+                if self.screen_open(UiScreen::Controls) {
+                    self.set_screen_open(UiScreen::Controls, false);
                     return;
                 }
                 match i {
                     0 => {
-                        self.menu_open = false;
+                        self.set_screen_open(UiScreen::Pause, false);
                         self.set_cursor_free(false);
                     }
-                    1 => self.options_open = true,
-                    2 => self.controls_help_open = true,
+                    1 => self.set_screen_open(UiScreen::Options, true),
+                    2 => self.set_screen_open(UiScreen::Controls, true),
                     _ => event_loop.exit(),
                 }
                 return;
@@ -2851,7 +2877,7 @@ impl App {
 
     /// Opens/closes the inventory, freeing or recapturing the cursor.
     fn set_inventory_open(&mut self, open: bool) {
-        self.inventory_open = open;
+        self.set_screen_open(UiScreen::Inventory, open);
         self.set_cursor_free(open);
     }
 
@@ -2869,10 +2895,7 @@ impl App {
             .map(|c| c.window_id);
         if let Some(window_id) = server_id {
             self.shared
-                .close_container_outbox
-                .lock()
-                .unwrap()
-                .push(window_id);
+                .queue_command(ClientCommand::CloseContainer(window_id));
             *self.shared.carried.lock().unwrap() = None;
             self.container_seen = false;
             self.set_cursor_free(false);
@@ -2886,8 +2909,8 @@ impl App {
     fn update_input(&mut self, dt: f32) {
         // While a UI is open, freeze movement/look input.
         if self.item_screen_open()
-            || self.chat_open
-            || self.menu_open
+            || self.screen_open(UiScreen::Chat)
+            || self.screen_open(UiScreen::Pause)
             || self.resource_pack_prompt().is_some()
         {
             self.flight_toggle_pending = false;
@@ -2962,7 +2985,13 @@ impl App {
         };
         for _ in 0..REMESH_BUDGET {
             match self.mesh_rx.try_recv() {
-                Ok((coord, verts)) => gfx.upload_chunk(coord, &verts),
+                Ok(output) => {
+                    let current = output.asset_generation == self.asset_generation
+                        && output.world.is_current(&self.shared.world.lock().unwrap());
+                    if current {
+                        gfx.upload_chunk(output.coord, &output.vertices);
+                    }
+                }
                 Err(_) => break,
             }
         }
@@ -2973,26 +3002,28 @@ impl App {
     /// installed; failures produce status 2 and leave the previous assets live.
     fn apply_pending_resource_pack(&mut self) {
         let pending = self.shared.cached_resource_pack.lock().unwrap().clone();
-        let Some(path) = pending.filter(|path| self.applied_resource_pack.as_ref() != Some(path))
-        else {
+        if let Some(path) = pending.filter(|path| {
+            self.applied_resource_pack.as_ref() != Some(path)
+                && self.requested_resource_pack.as_ref() != Some(path)
+        }) {
+            if self.resource_manager.request(path.clone()).is_ok() {
+                self.requested_resource_pack = Some(path);
+            }
+        }
+
+        let Some(prepared) = self.resource_manager.try_recv() else {
             return;
         };
-        self.applied_resource_pack = Some(path.clone());
-
-        let result = (|| -> anyhow::Result<()> {
-            let block_names: Vec<String> = crab_registry::blocks()
-                .iter()
-                .map(|block| block.name.to_owned())
-                .collect();
-            let item_names: Vec<String> = crab_registry::items()
-                .iter()
-                .map(|item| item.name.to_owned())
-                .collect();
-            let atlas = Arc::new(crab_assets::load_block_atlas(&path, &block_names)?);
-            let item_atlas = Arc::new(crab_assets::load_item_atlas(&path, &item_names)?);
-            let gui_atlas = Arc::new(crab_assets::load_gui_atlas(&path)?);
-            let crack = crab_assets::load_destroy_stages(&path);
-            let entity_atlas = load_resource_entity_atlas(&path)
+        self.requested_resource_pack = None;
+        self.applied_resource_pack = Some(prepared.archive.clone());
+        let path = prepared.archive;
+        let result = prepared.resources.map(|resources| {
+            let atlas = Arc::new(resources.blocks);
+            let item_atlas = Arc::new(resources.items);
+            let gui_atlas = Arc::new(resources.gui);
+            let crack = resources.destroy_stages;
+            let entity_atlas = resources
+                .entities
                 .map(Arc::new)
                 .unwrap_or_else(|| Arc::clone(&self.entity_atlas));
 
@@ -3005,7 +3036,11 @@ impl App {
                     crack.as_ref(),
                 );
             }
-            *self.atlas_slot.write().unwrap() = Arc::clone(&atlas);
+            *self.atlas_slot.write().unwrap() = AtlasGeneration {
+                id: prepared.generation,
+                atlas: Arc::clone(&atlas),
+            };
+            self.asset_generation = prepared.generation;
             self.atlas = atlas;
             self.entity_atlas = entity_atlas;
             self.item_atlas = item_atlas;
@@ -3013,9 +3048,8 @@ impl App {
             self.crack = crack;
 
             let chunks: Vec<_> = self.shared.world.lock().unwrap().chunk_coords().collect();
-            self.shared.dirty_chunks.lock().unwrap().extend(chunks);
-            Ok(())
-        })();
+            self.shared.dirty_chunks.extend(chunks);
+        });
 
         let status = match result {
             Ok(()) => {
@@ -3033,29 +3067,9 @@ impl App {
             .swap(false, std::sync::atomic::Ordering::SeqCst)
         {
             self.shared
-                .resource_pack_status_outbox
-                .lock()
-                .unwrap()
-                .push(status);
+                .queue_command(ClientCommand::ResourcePackStatus(status));
         }
     }
-}
-
-fn load_resource_entity_atlas(path: &std::path::Path) -> Option<EntityAtlas> {
-    let mut models = PathBuf::from(std::env::var_os("CRABCRAFT_ENTITY_MODELS")?);
-    if !models.join("cow.geo.json").exists() {
-        for sub in ["resource_pack/models/entity", "models/entity", "entity"] {
-            if models.join(sub).join("cow.geo.json").exists() {
-                models = models.join(sub);
-                break;
-            }
-        }
-    }
-    let types: Vec<(i32, String)> = crab_registry::entities()
-        .iter()
-        .map(|entity| (entity.id as i32, entity.name.to_owned()))
-        .collect();
-    Some(crab_assets::load_entity_atlas(path, &models, &types))
 }
 
 /// Background thread: drains dirty chunks, meshes them (skipping air-only
@@ -3063,40 +3077,42 @@ fn load_resource_entity_atlas(path: &std::path::Path) -> Option<EntityAtlas> {
 /// meshing work off the frame loop.
 fn mesher_loop(
     shared: Arc<Shared>,
-    atlas_slot: Arc<RwLock<Arc<Atlas>>>,
-    tx: Sender<((i32, i32), Vec<Vertex>)>,
+    atlas_slot: Arc<RwLock<AtlasGeneration>>,
+    tx: SyncSender<MeshOutput>,
 ) {
     while shared.running.load(Ordering::SeqCst) {
-        let batch: Vec<(i32, i32)> = {
-            let mut dirty = shared.dirty_chunks.lock().unwrap();
-            let take: Vec<_> = dirty.iter().take(8).copied().collect();
-            for c in &take {
-                dirty.remove(c);
-            }
-            take
-        };
+        let batch = shared.dirty_chunks.take_batch_wait(8);
         if batch.is_empty() {
-            std::thread::sleep(Duration::from_millis(4));
             continue;
         }
         for (cx, cz) in batch {
-            let atlas = Arc::clone(&atlas_slot.read().unwrap());
-            let verts = {
+            let atlas = atlas_slot.read().unwrap().clone();
+            let world = {
                 let world = shared.world.lock().unwrap();
-                match world.occupied_y_bounds(cx, cz) {
-                    Some((min_y, max_y)) => {
-                        mesh_region(
-                            &world,
-                            &atlas,
-                            [cx * 16, min_y, cz * 16],
-                            [cx * 16 + 15, max_y, cz * 16 + 15],
-                        )
-                        .vertices
-                    }
-                    None => Vec::new(),
-                }
+                world.snapshot_region(cx, cz)
             };
-            if tx.send(((cx, cz), verts)).is_err() {
+            let vertices = match world.occupied_y_bounds(cx, cz) {
+                Some((min_y, max_y)) => {
+                    mesh_region_with_registry(
+                        &world,
+                        &atlas.atlas,
+                        [cx * 16, min_y, cz * 16],
+                        [cx * 16 + 15, max_y, cz * 16 + 15],
+                        shared.context.registries,
+                    )
+                    .vertices
+                }
+                None => Vec::new(),
+            };
+            if tx
+                .send(MeshOutput {
+                    coord: (cx, cz),
+                    world,
+                    asset_generation: atlas.id,
+                    vertices,
+                })
+                .is_err()
+            {
                 return;
             }
         }
@@ -3129,7 +3145,10 @@ impl ApplicationHandler for App {
     }
 
     fn device_event(&mut self, _event_loop: &ActiveEventLoop, _id: DeviceId, event: DeviceEvent) {
-        if self.item_screen_open() || self.chat_open || self.menu_open {
+        if self.item_screen_open()
+            || self.screen_open(UiScreen::Chat)
+            || self.screen_open(UiScreen::Pause)
+        {
             return; // don't turn the view while a UI is focused
         }
         if let DeviceEvent::MouseMotion { delta } = event {
@@ -3167,19 +3186,19 @@ impl ApplicationHandler for App {
             } => {
                 let pressed = state == ElementState::Pressed;
                 // Chat input swallows all keys while open.
-                if self.chat_open {
+                if self.screen_open(UiScreen::Chat) {
                     if pressed {
                         match code {
                             KeyCode::Escape => {
-                                self.chat_open = false;
+                                self.set_screen_open(UiScreen::Chat, false);
                                 self.chat_buffer.clear();
                             }
                             KeyCode::Enter | KeyCode::NumpadEnter => {
                                 let msg = std::mem::take(&mut self.chat_buffer);
                                 if !msg.trim().is_empty() {
-                                    self.shared.chat_outbox.lock().unwrap().push(msg);
+                                    self.shared.queue_command(ClientCommand::SendChat(msg));
                                 }
-                                self.chat_open = false;
+                                self.set_screen_open(UiScreen::Chat, false);
                             }
                             KeyCode::Backspace => {
                                 self.chat_buffer.pop();
@@ -3290,10 +3309,7 @@ impl ApplicationHandler for App {
                     }
                     if changed {
                         self.shared
-                            .rename_outbox
-                            .lock()
-                            .unwrap()
-                            .push(self.anvil_name.clone());
+                            .queue_command(ClientCommand::RenameItem(self.anvil_name.clone()));
                     }
                     return;
                 }
@@ -3301,15 +3317,15 @@ impl ApplicationHandler for App {
                     // Esc closes the inventory, else toggles the pause menu.
                     if self.resource_pack_prompt().is_some() {
                         self.choose_resource_pack(false);
-                    } else if self.controls_help_open {
-                        self.controls_help_open = false;
-                    } else if self.options_open {
-                        self.options_open = false;
+                    } else if self.screen_open(UiScreen::Controls) {
+                        self.set_screen_open(UiScreen::Controls, false);
+                    } else if self.screen_open(UiScreen::Options) {
+                        self.set_screen_open(UiScreen::Options, false);
                     } else if self.item_screen_open() {
                         self.close_item_screen();
                     } else {
-                        self.menu_open = !self.menu_open;
-                        self.set_cursor_free(self.menu_open);
+                        self.screens.toggle(UiScreen::Pause);
+                        self.set_cursor_free(self.screen_open(UiScreen::Pause));
                     }
                 } else if code == KeyCode::Escape {
                     // ignore Esc release / auto-repeat
@@ -3323,7 +3339,7 @@ impl ApplicationHandler for App {
                         return;
                     }
                     if !self.item_screen_open()
-                        && !self.menu_open
+                        && !self.screen_open(UiScreen::Pause)
                         && !repeat
                         && code == KeyCode::KeyF
                     {
@@ -3331,7 +3347,7 @@ impl ApplicationHandler for App {
                         return;
                     }
                     if !self.item_screen_open()
-                        && !self.menu_open
+                        && !self.screen_open(UiScreen::Pause)
                         && !repeat
                         && code == KeyCode::Space
                     {
@@ -3346,12 +3362,12 @@ impl ApplicationHandler for App {
                         }
                     }
                     if !self.item_screen_open() && !repeat && code == KeyCode::KeyT {
-                        self.chat_open = true;
+                        self.set_screen_open(UiScreen::Chat, true);
                         self.chat_buffer.clear();
                         return;
                     }
                     if !self.item_screen_open() && !repeat && code == KeyCode::Slash {
-                        self.chat_open = true;
+                        self.set_screen_open(UiScreen::Chat, true);
                         self.chat_buffer = "/".to_string();
                         return;
                     }
@@ -3359,7 +3375,7 @@ impl ApplicationHandler for App {
                         if self.server_container_open() {
                             self.close_item_screen();
                         } else {
-                            let open = !self.inventory_open;
+                            let open = !self.screen_open(UiScreen::Inventory);
                             self.set_inventory_open(open);
                         }
                     }
@@ -3395,7 +3411,7 @@ impl ApplicationHandler for App {
                     return;
                 }
                 // While the pause menu is open, clicks hit buttons.
-                if self.menu_open {
+                if self.screen_open(UiScreen::Pause) {
                     if pressed && button == MouseButton::Left {
                         self.menu_click(event_loop);
                     }
@@ -3450,11 +3466,10 @@ impl ApplicationHandler for App {
                             return;
                         };
                         self.bundle_selection = Some((slot, next));
-                        self.shared
-                            .bundle_selection_outbox
-                            .lock()
-                            .unwrap()
-                            .push((slot, next));
+                        self.shared.queue_command(ClientCommand::SelectBundleItem {
+                            slot_id: slot,
+                            selected_item_index: next,
+                        });
                         return;
                     }
                     if self.recipe_book_open && self.crafting_recipe_context().is_some() {
@@ -3485,7 +3500,7 @@ impl ApplicationHandler for App {
                     }
                     return;
                 }
-                if self.chat_open || self.menu_open {
+                if self.screen_open(UiScreen::Chat) || self.screen_open(UiScreen::Pause) {
                     return;
                 }
                 // Scroll cycles the hotbar slot (up = previous, down = next).
@@ -3574,7 +3589,7 @@ impl ApplicationHandler for App {
                 let hovered_bundle = self.hovered_bundle();
                 let hovered_item = self.hovered_item();
                 let container = self.shared.container.lock().unwrap().clone();
-                let inv_icons = (self.inventory_open && container.is_none())
+                let inv_icons = (self.screen_open(UiScreen::Inventory) && container.is_none())
                     .then(|| inventory_icons(&self.shared, &self.item_atlas));
                 let container_icons = container
                     .as_ref()
@@ -3677,6 +3692,7 @@ impl ApplicationHandler for App {
                 }
                 box_v.extend(celestial_mesh(eye, environment, self.atlas.white_uv()));
                 let third_person_distance = third_person_camera_distance(
+                    self.shared.context.registries,
                     &self.shared.world.lock().unwrap(),
                     eye,
                     if player.swimming || player.gliding {
@@ -3690,6 +3706,11 @@ impl ApplicationHandler for App {
                     self.pitch,
                     self.perspective,
                 );
+                let inventory_open = self.screen_open(UiScreen::Inventory);
+                let chat_open = self.screen_open(UiScreen::Chat);
+                let pause_open = self.screen_open(UiScreen::Pause);
+                let options_open = self.screen_open(UiScreen::Options);
+                let controls_open = self.screen_open(UiScreen::Controls);
                 if let Some(gfx) = self.gfx.as_mut() {
                     // Reconcile the surface with the window's real drawable size
                     // every frame. winit/macOS can deliver a stale initial size
@@ -3778,7 +3799,7 @@ impl ApplicationHandler for App {
                         let (color, text) = book_geometry(gui, book, self.cursor, aspect);
                         gfx.set_hud(&color, &[], &[], &text);
                         gfx.render(&camera, clear);
-                    } else if self.menu_open {
+                    } else if pause_open {
                         // Pause menu replaces the HUD; highlight the hovered button.
                         let option_labels = [
                             format!("FOV: {}", self.fov_degrees as i32),
@@ -3798,9 +3819,9 @@ impl ApplicationHandler for App {
                         ];
                         let option_refs: Vec<&str> =
                             option_labels.iter().map(String::as_str).collect();
-                        let buttons: &[&str] = if self.options_open {
+                        let buttons: &[&str] = if options_open {
                             &option_refs
-                        } else if self.controls_help_open {
+                        } else if controls_open {
                             &DONE_BUTTON
                         } else {
                             &MENU_BUTTONS
@@ -3813,12 +3834,8 @@ impl ApplicationHandler for App {
                         });
                         let (mc, mut mg, _) =
                             crab_render::menu_geometry(gui, buttons, hovered, aspect);
-                        if self.controls_help_open || self.options_open {
-                            let title = if self.options_open {
-                                "Options"
-                            } else {
-                                "Controls"
-                            };
+                        if controls_open || options_open {
+                            let title = if options_open { "Options" } else { "Controls" };
                             let title_h = 0.085;
                             let title_w =
                                 gui.text_width(title) * (title_h / 8.0) / aspect.max(0.01);
@@ -3831,10 +3848,8 @@ impl ApplicationHandler for App {
                                 title_h,
                                 aspect,
                             );
-                            for (line, text) in CONTROL_HELP
-                                .iter()
-                                .enumerate()
-                                .filter(|_| !self.options_open)
+                            for (line, text) in
+                                CONTROL_HELP.iter().enumerate().filter(|_| !options_open)
                             {
                                 let h = 0.043;
                                 let width = gui.text_width(text) * (h / 8.0) / aspect.max(0.01);
@@ -3866,9 +3881,9 @@ impl ApplicationHandler for App {
                             &self.shared,
                             gui,
                             aspect,
-                            self.inventory_open && container.is_none(),
+                            inventory_open && container.is_none(),
                         );
-                        if !self.inventory_open && container.is_none() && !self.chat_open {
+                        if !inventory_open && container.is_none() && !chat_open {
                             hud_text.extend(sign_text_geometry(&self.shared, gui, &camera, aspect));
                         }
                         if show_first_person_items {
@@ -4201,13 +4216,8 @@ impl ApplicationHandler for App {
                                 );
                             }
                         }
-                        let (chat_c, chat_t) = chat_geometry(
-                            &self.shared,
-                            gui,
-                            self.chat_open,
-                            &self.chat_buffer,
-                            aspect,
-                        );
+                        let (chat_c, chat_t) =
+                            chat_geometry(&self.shared, gui, chat_open, &self.chat_buffer, aspect);
                         hud_c.extend(chat_c);
                         hud_text.extend(chat_t);
                         if let Some(inv) = &inv_icons {
@@ -4424,7 +4434,7 @@ impl ApplicationHandler for App {
                                 }
                             }
                         }
-                        if self.inventory_open && container.is_none() {
+                        if inventory_open && container.is_none() {
                             if let Some(preview) =
                                 inventory_player_preview(&self.entity_atlas, self.cursor, aspect)
                             {
@@ -4440,11 +4450,7 @@ impl ApplicationHandler for App {
                     }
                 }
 
-                if !self
-                    .shared
-                    .running
-                    .load(std::sync::atomic::Ordering::SeqCst)
-                {
+                if self.shared.snapshot().phase == ConnectionPhase::Closed {
                     event_loop.exit();
                 }
             }
@@ -4460,15 +4466,17 @@ impl ApplicationHandler for App {
             self.container_seen = server_open;
             self.resource_pack_seen = resource_pack_open;
             if server_open {
-                self.inventory_open = false;
+                self.set_inventory_open(false);
                 self.anvil_name.clear();
                 self.recipe_page = 0;
             }
+            self.set_screen_open(UiScreen::ServerContainer, server_open);
+            self.set_screen_open(UiScreen::ResourcePackPrompt, resource_pack_open);
             self.set_cursor_free(
                 server_open
-                    || self.inventory_open
-                    || self.chat_open
-                    || self.menu_open
+                    || self.screen_open(UiScreen::Inventory)
+                    || self.screen_open(UiScreen::Chat)
+                    || self.screen_open(UiScreen::Pause)
                     || resource_pack_open,
             );
         }
@@ -4488,12 +4496,17 @@ pub fn run(
     crack: Option<(Vec<u8>, u32, u32)>,
 ) -> anyhow::Result<()> {
     let atlas = Arc::new(atlas);
-    let atlas_slot = Arc::new(RwLock::new(Arc::clone(&atlas)));
+    let atlas_slot = Arc::new(RwLock::new(AtlasGeneration {
+        id: 0,
+        atlas: Arc::clone(&atlas),
+    }));
     let entity_atlas = Arc::new(entity_atlas);
     let item_atlas = Arc::new(item_atlas);
     let gui_atlas = Arc::new(gui_atlas);
+    let entity_models = std::env::var_os("CRABCRAFT_ENTITY_MODELS").map(PathBuf::from);
+    let resource_manager = ResourceManager::new(shared.context.registries, entity_models);
     // Spawn the background mesher.
-    let (mesh_tx, mesh_rx) = std::sync::mpsc::channel();
+    let (mesh_tx, mesh_rx) = std::sync::mpsc::sync_channel(64);
     {
         let shared = Arc::clone(&shared);
         let atlas_slot = Arc::clone(&atlas_slot);
@@ -4501,15 +4514,15 @@ pub fn run(
     }
 
     let event_loop = EventLoop::new()?;
-    let mut app = App::new(
-        shared,
+    let resources = AppResources {
         atlas_slot,
         entity_atlas,
         item_atlas,
         gui_atlas,
-        mesh_rx,
         crack,
-    );
+        manager: resource_manager,
+    };
+    let mut app = App::new(shared, resources, mesh_rx);
     event_loop.run_app(&mut app)?;
     Ok(())
 }

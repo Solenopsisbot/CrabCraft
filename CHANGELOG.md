@@ -7,6 +7,12 @@ remains the detailed source of truth.
 
 ### Added
 
+- A renderer-neutral `crab-core` with immutable session profiles, bounded typed
+  commands, deterministic events/snapshots, a modal screen stack, and redacted
+  semantic replay recording.
+- Revisioned copy-on-write world snapshots, event-driven bounded meshing, stale
+  result rejection, and transactional asynchronous resource generations.
+- An extension guide covering protocol, command, state, UI, and worker seams.
 - Protocol profiles for Java Edition 1.20.2 and 1.20.3/1.20.4, including the
   Configuration state, registry data, chunk batches, NBT components, and
   versioned resource-pack packets. The 1.20.4 core path is live-tested against

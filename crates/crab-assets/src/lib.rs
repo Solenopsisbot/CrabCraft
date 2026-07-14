@@ -44,6 +44,50 @@ pub enum AssetError {
     Image(#[from] image::ImageError),
 }
 
+/// Complete CPU-side resource generation built transactionally before any GPU
+/// resources are replaced.
+pub struct ResourceSet {
+    pub blocks: Atlas,
+    pub items: ItemAtlas,
+    pub gui: GuiAtlas,
+    pub entities: Option<EntityAtlas>,
+    pub destroy_stages: Option<(Vec<u8>, u32, u32)>,
+}
+
+/// Loads every CPU-side resource derived from one validated archive. Callers
+/// can perform this on a worker and commit the returned set atomically.
+pub fn load_resource_set(
+    archive: &Path,
+    registries: crab_registry::RegistrySet,
+    entity_models: Option<&Path>,
+) -> Result<ResourceSet, AssetError> {
+    let block_names: Vec<String> = registries
+        .blocks()
+        .iter()
+        .map(|block| block.name.to_owned())
+        .collect();
+    let item_names: Vec<String> = registries
+        .items()
+        .iter()
+        .map(|item| item.name.to_owned())
+        .collect();
+    let entities = entity_models.map(|models| {
+        let types: Vec<(i32, String)> = registries
+            .entities()
+            .iter()
+            .map(|entity| (entity.id as i32, entity.name.to_owned()))
+            .collect();
+        load_entity_atlas(archive, models, &types)
+    });
+    Ok(ResourceSet {
+        blocks: load_block_atlas_with_registry(archive, &block_names, registries)?,
+        items: load_item_atlas(archive, &item_names)?,
+        gui: load_gui_atlas(archive)?,
+        entities,
+        destroy_stages: load_destroy_stages(archive),
+    })
+}
+
 const TILE: u32 = 16;
 /// Order matches `crab-render`'s face order: +X, -X, +Y, -Y, +Z, -Z.
 const FACE_NAMES: [&str; 6] = ["east", "west", "up", "down", "south", "north"];
@@ -450,16 +494,17 @@ fn load_state_models<R: Read + std::io::Seek>(
     cache: &mut HashMap<String, Option<Resolved>>,
     tex_paths: &mut BTreeSet<String>,
     bare: &str,
+    registries: crab_registry::RegistrySet,
 ) -> HashMap<u32, Vec<ParsedStatePart>> {
     let Some(definition) = read_blockstate(archive, bare) else {
         return HashMap::new();
     };
-    let Some(block) = crab_registry::block_by_name(bare) else {
+    let Some(block) = registries.block_by_name(bare) else {
         return HashMap::new();
     };
     let mut states = HashMap::new();
     for state in block.min_state..=block.max_state {
-        let Some(properties) = crab_registry::block_state_properties(state) else {
+        let Some(properties) = registries.block_state_properties(state) else {
             continue;
         };
         let mut choices: Vec<&ModelChoice> = Vec::new();
@@ -525,6 +570,15 @@ fn load_state_models<R: Read + std::io::Seek>(
 /// Loads block models + textures for `block_names` from `jar_path` and builds an
 /// atlas. Blocks that aren't full cubes get a flat fallback colour.
 pub fn load_block_atlas(jar_path: &Path, block_names: &[String]) -> Result<Atlas, AssetError> {
+    load_block_atlas_with_registry(jar_path, block_names, crab_registry::RegistrySet::global())
+}
+
+/// Session-scoped form of [`load_block_atlas`].
+pub fn load_block_atlas_with_registry(
+    jar_path: &Path,
+    block_names: &[String],
+    registries: crab_registry::RegistrySet,
+) -> Result<Atlas, AssetError> {
     let file = File::open(jar_path)?;
     let mut archive = zip::ZipArchive::new(BufReader::new(file))?;
 
@@ -542,6 +596,7 @@ pub fn load_block_atlas(jar_path: &Path, block_names: &[String]) -> Result<Atlas
             &mut cache,
             &mut tex_paths,
             bare,
+            registries,
         ));
         if bare.ends_with("_door") && !bare.ends_with("_trapdoor") {
             for half in ["bottom", "top"] {

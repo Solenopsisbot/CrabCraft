@@ -10,13 +10,15 @@
 //! with a Microsoft account (device-code flow) and can join real servers.
 
 mod client;
+mod resource;
 mod window;
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use client::{configured_protocol_number, connect_and_play, LoginMode, Shared};
+use client::{configured_session_context, connect_and_play, LoginMode, Shared};
+use crab_core::SessionContext;
 use tracing_subscriber::EnvFilter;
 
 fn main() -> Result<()> {
@@ -27,7 +29,10 @@ fn main() -> Result<()> {
         .with_target(false)
         .init();
 
-    crab_registry::set_protocol(configured_protocol_number()?);
+    let context = configured_session_context()?;
+    // Compatibility selection for renderer/physics functions that have not yet
+    // accepted their session registry explicitly.
+    crab_registry::set_protocol(context.protocol.number());
 
     // Leading flags (any order): `render`, `online`.
     let mut args: Vec<String> = std::env::args().skip(1).collect();
@@ -53,24 +58,24 @@ fn main() -> Result<()> {
         .unwrap_or_else(|| "127.0.0.1:25565".to_string());
 
     if online {
-        run_online(addr, render)
+        run_online(addr, render, context)
     } else {
         let username = args.get(1).cloned().unwrap_or_else(|| "Ferris".to_string());
         let login = LoginMode::Offline { username };
         if render {
-            run_windowed(addr, login, None)
+            run_windowed(addr, login, None, context)
         } else {
             let secs: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(35);
-            run_headless(addr, login, Some(Duration::from_secs(secs)))
+            run_headless(addr, login, Some(Duration::from_secs(secs)), context)
         }
     }
 }
 
 /// Online mode: Microsoft device-code login first, then connect.
-fn run_online(addr: String, render: bool) -> Result<()> {
+fn run_online(addr: String, render: bool, context: SessionContext) -> Result<()> {
     if render {
         // Auth happens on the network thread; the window opens immediately.
-        run_windowed_online(addr)
+        run_windowed_online(addr, context)
     } else {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -80,7 +85,8 @@ fn run_online(addr: String, render: bool) -> Result<()> {
                 .await
                 .context("Microsoft login")?;
             tracing::info!(user = %session.username, "authenticated");
-            let shared = Arc::new(Shared::new());
+            let shared = Arc::new(Shared::with_context(context));
+            configure_replay(&shared);
             init_sound(&shared);
             connect_and_play(&addr, LoginMode::Online(session), shared, None).await
         })
@@ -88,25 +94,36 @@ fn run_online(addr: String, render: bool) -> Result<()> {
 }
 
 /// Headless: run the client to completion on a tokio runtime.
-fn run_headless(addr: String, login: LoginMode, deadline: Option<Duration>) -> Result<()> {
+fn run_headless(
+    addr: String,
+    login: LoginMode,
+    deadline: Option<Duration>,
+    context: SessionContext,
+) -> Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    let shared = Arc::new(Shared::new());
+    let shared = Arc::new(Shared::with_context(context));
+    configure_replay(&shared);
     init_sound(&shared);
     rt.block_on(connect_and_play(&addr, login, shared, deadline))
 }
 
 /// Loads the block texture atlas from the client jar named by `CRABCRAFT_JAR`,
 /// or falls back to flat colours if unset/unreadable.
-fn load_atlas() -> crab_assets::Atlas {
+fn load_atlas(registries: crab_registry::RegistrySet) -> crab_assets::Atlas {
     match std::env::var("CRABCRAFT_JAR") {
         Ok(jar) => {
-            let names: Vec<String> = crab_registry::blocks()
+            let names: Vec<String> = registries
+                .blocks()
                 .iter()
                 .map(|b| b.name.to_string())
                 .collect();
-            match crab_assets::load_block_atlas(std::path::Path::new(&jar), &names) {
+            match crab_assets::load_block_atlas_with_registry(
+                std::path::Path::new(&jar),
+                &names,
+                registries,
+            ) {
                 Ok(atlas) => {
                     tracing::info!(width = atlas.width, "loaded textures from {jar}");
                     atlas
@@ -128,11 +145,12 @@ fn load_atlas() -> crab_assets::Atlas {
 
 /// Loads the flat item-icon atlas (for the hotbar) from `CRABCRAFT_JAR`, or an
 /// empty atlas (no icons) if unset/unreadable.
-fn load_item_atlas() -> crab_assets::ItemAtlas {
+fn load_item_atlas(registries: crab_registry::RegistrySet) -> crab_assets::ItemAtlas {
     let Ok(jar) = std::env::var("CRABCRAFT_JAR") else {
         return crab_assets::ItemAtlas::empty();
     };
-    let names: Vec<String> = crab_registry::items()
+    let names: Vec<String> = registries
+        .items()
         .iter()
         .map(|i| i.name.to_string())
         .collect();
@@ -184,7 +202,7 @@ fn load_gui_atlas() -> crab_assets::GuiAtlas {
 /// Loads 3D entity models + textures: geometry from `CRABCRAFT_ENTITY_MODELS`
 /// (a bedrock-samples `models/entity` dir) and textures from `CRABCRAFT_JAR`.
 /// Returns an empty atlas (entities render as boxes) if either is unset.
-fn load_entity_atlas() -> crab_assets::EntityAtlas {
+fn load_entity_atlas(registries: crab_registry::RegistrySet) -> crab_assets::EntityAtlas {
     let empty =
         || crab_assets::load_entity_atlas(std::path::Path::new(""), std::path::Path::new(""), &[]);
     let (Ok(jar), Ok(dir)) = (
@@ -216,7 +234,8 @@ fn load_entity_atlas() -> crab_assets::EntityAtlas {
         })
         .unwrap_or(0);
 
-    let types: Vec<(i32, String)> = crab_registry::entities()
+    let types: Vec<(i32, String)> = registries
+        .entities()
         .iter()
         .map(|e| (e.id as i32, e.name.to_string()))
         .collect();
@@ -286,13 +305,19 @@ fn init_sound(shared: &Arc<Shared>) {
 }
 
 /// Windowed: networking on a background thread, rendering on the main thread.
-fn run_windowed(addr: String, login: LoginMode, deadline: Option<Duration>) -> Result<()> {
-    let shared = Arc::new(Shared::new());
+fn run_windowed(
+    addr: String,
+    login: LoginMode,
+    deadline: Option<Duration>,
+    context: SessionContext,
+) -> Result<()> {
+    let shared = Arc::new(Shared::with_context(context));
+    configure_replay(&shared);
     configure_window_assets(&shared);
     init_sound(&shared);
-    let atlas = load_atlas();
-    let entity_atlas = load_entity_atlas();
-    let item_atlas = load_item_atlas();
+    let atlas = load_atlas(context.registries);
+    let entity_atlas = load_entity_atlas(context.registries);
+    let item_atlas = load_item_atlas(context.registries);
     spawn_net_thread(addr, login, Arc::clone(&shared), deadline);
     let gui_atlas = load_gui_atlas();
     let crack = load_destroy_stages();
@@ -300,13 +325,14 @@ fn run_windowed(addr: String, login: LoginMode, deadline: Option<Duration>) -> R
 }
 
 /// Windowed online: authenticate on the network thread, then connect.
-fn run_windowed_online(addr: String) -> Result<()> {
-    let shared = Arc::new(Shared::new());
+fn run_windowed_online(addr: String, context: SessionContext) -> Result<()> {
+    let shared = Arc::new(Shared::with_context(context));
+    configure_replay(&shared);
     configure_window_assets(&shared);
     init_sound(&shared);
-    let atlas = load_atlas();
-    let entity_atlas = load_entity_atlas();
-    let item_atlas = load_item_atlas();
+    let atlas = load_atlas(context.registries);
+    let entity_atlas = load_entity_atlas(context.registries);
+    let item_atlas = load_item_atlas(context.registries);
     let net_shared = Arc::clone(&shared);
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_multi_thread()
@@ -343,6 +369,12 @@ fn configure_window_assets(shared: &Shared) {
         .store(true, std::sync::atomic::Ordering::SeqCst);
     *shared.base_resource_jar.lock().unwrap() =
         std::env::var_os("CRABCRAFT_JAR").map(std::path::PathBuf::from);
+}
+
+fn configure_replay(shared: &Shared) {
+    if let Some(path) = std::env::var_os("CRABCRAFT_REPLAY_OUT") {
+        shared.enable_replay(std::path::PathBuf::from(path));
+    }
 }
 
 fn spawn_net_thread(
