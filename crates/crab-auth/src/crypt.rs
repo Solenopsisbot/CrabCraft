@@ -11,7 +11,7 @@ use crate::AuthError;
 /// A fresh random 16-byte AES shared secret.
 pub fn random_shared_secret() -> [u8; 16] {
     let mut secret = [0u8; 16];
-    rand::thread_rng().fill_bytes(&mut secret);
+    rand::rng().fill_bytes(&mut secret);
     secret
 }
 
@@ -38,7 +38,9 @@ pub fn minecraft_digest(data: &[u8]) -> String {
 /// public key — used for both the shared secret and the verify token.
 pub fn encrypt_to_server(public_key_der: &[u8], data: &[u8]) -> Result<Vec<u8>, AuthError> {
     let key = RsaPublicKey::from_public_key_der(public_key_der)?;
-    let mut rng = rand::thread_rng();
+    // `rsa` 0.9 uses rand_core 0.6, while rand 0.9 uses rand_core 0.9. Use
+    // the RNG re-exported by `rsa` so the cryptographic trait versions match.
+    let mut rng = rsa::rand_core::OsRng;
     Ok(key.encrypt(&mut rng, Pkcs1v15Encrypt, data)?)
 }
 
@@ -94,7 +96,7 @@ mod tests {
         use rsa::pkcs8::EncodePublicKey;
         use rsa::RsaPrivateKey;
 
-        let mut rng = rand::thread_rng();
+        let mut rng = rsa::rand_core::OsRng;
         let private = RsaPrivateKey::new(&mut rng, 1024).expect("keygen");
         let public = RsaPublicKey::from(&private);
         let der = public.to_public_key_der().expect("der");
