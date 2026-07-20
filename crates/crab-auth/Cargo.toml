@@ -10,7 +10,7 @@ repository.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 tokio.workspace = true
-sha1 = "0.10"
+sha1 = "0.11"
 rsa = "0.9"
 rand = "0.9"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
