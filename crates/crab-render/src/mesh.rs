@@ -92,10 +92,19 @@ const FACES: [Face; 6] = [
 
 /// Whether `state` is a full opaque cube, so it hides neighbouring faces.
 fn occludes(registries: crab_registry::RegistrySet, atlas: &Atlas, state: u32) -> bool {
-    !registries.is_air(state)
-        && registries
-            .block_name(state)
-            .is_some_and(|name| atlas.is_state_cube(state, name))
+    let Some(name) = registries.block_name(state) else {
+        return false;
+    };
+    // Fluids use a full-cube texture atlas entry only as a lookup fallback;
+    // their mesh is a translucent, sub-height surface and must not hide the
+    // solid block faces behind it.
+    if matches!(
+        name,
+        "minecraft:water" | "minecraft:bubble_column" | "minecraft:lava"
+    ) {
+        return false;
+    }
+    !registries.is_air(state) && atlas.is_state_cube(state, name)
 }
 
 fn block_model_seed(cell: [i32; 3], part: usize) -> u64 {
@@ -835,7 +844,10 @@ fn rotate_point(p: [f32; 3], rot: &crab_assets::ElementRotation) -> [f32; 3] {
         rot.origin[1] / 16.0,
         rot.origin[2] / 16.0,
     ];
-    let a = rot.angle.to_radians();
+    // Minecraft model rotations use clockwise-positive angles when viewed
+    // from the positive axis. Our coordinate transform is right-handed, so
+    // negate the JSON angle to match the vanilla convention.
+    let a = -rot.angle.to_radians();
     let (s, c) = (a.sin(), a.cos());
     let mut d = [p[0] - o[0], p[1] - o[1], p[2] - o[2]];
     let rescale = if rot.rescale { 1.0 / c.abs() } else { 1.0 };
@@ -1021,7 +1033,7 @@ fn rotate_element_normal(
     mut normal: [f32; 3],
     rotation: &crab_assets::ElementRotation,
 ) -> [f32; 3] {
-    let angle = rotation.angle.to_radians();
+    let angle = -rotation.angle.to_radians();
     let (sin, cos) = angle.sin_cos();
     match rotation.axis {
         0 => {
@@ -1048,15 +1060,17 @@ fn rotate_model(mut point: [f32; 3], rotation: [f32; 3], around_center: bool) ->
     point[0] -= center;
     point[1] -= center;
     point[2] -= center;
-    let (sx, cx) = rotation[0].to_radians().sin_cos();
+    // Block-model JSON rotations are clockwise-positive in Minecraft model
+    // space; negate all three Euler angles for this right-handed transform.
+    let (sx, cx) = (-rotation[0].to_radians()).sin_cos();
     let (y, z) = (point[1], point[2]);
     point[1] = y * cx - z * sx;
     point[2] = y * sx + z * cx;
-    let (sy, cy) = rotation[1].to_radians().sin_cos();
+    let (sy, cy) = (-rotation[1].to_radians()).sin_cos();
     let (x, z) = (point[0], point[2]);
     point[0] = x * cy + z * sy;
     point[2] = -x * sy + z * cy;
-    let (sz, cz) = rotation[2].to_radians().sin_cos();
+    let (sz, cz) = (-rotation[2].to_radians()).sin_cos();
     let (x, y) = (point[0], point[1]);
     point[0] = x * cz - y * sz;
     point[1] = x * sz + y * cz;
@@ -1451,6 +1465,71 @@ pub fn entity_mesh_with_pose(
     attack_progress: f32,
     pose: i32,
 ) -> Vec<Vertex> {
+    entity_mesh_with_look_internal(
+        geo,
+        offset,
+        uv_origin,
+        uv_size,
+        limb_swing,
+        limb_amount,
+        scale,
+        yaw_deg,
+        head_yaw_deg,
+        0.0,
+        attack_progress,
+        pose,
+    )
+}
+
+/// Builds a posed entity mesh while also applying a look pitch to head bones.
+/// This is used for the local third-person player, whose camera pitch is not a
+/// field carried by the generic remote-entity metadata.
+#[allow(clippy::too_many_arguments)]
+pub fn entity_mesh_with_look(
+    geo: &crab_assets::EntityGeometry,
+    offset: [f32; 3],
+    uv_origin: [f32; 2],
+    uv_size: [f32; 2],
+    limb_swing: f32,
+    limb_amount: f32,
+    scale: f32,
+    yaw_deg: f32,
+    head_yaw_deg: f32,
+    head_pitch_deg: f32,
+    attack_progress: f32,
+    pose: i32,
+) -> Vec<Vertex> {
+    entity_mesh_with_look_internal(
+        geo,
+        offset,
+        uv_origin,
+        uv_size,
+        limb_swing,
+        limb_amount,
+        scale,
+        yaw_deg,
+        head_yaw_deg,
+        head_pitch_deg,
+        attack_progress,
+        pose,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn entity_mesh_with_look_internal(
+    geo: &crab_assets::EntityGeometry,
+    offset: [f32; 3],
+    uv_origin: [f32; 2],
+    uv_size: [f32; 2],
+    limb_swing: f32,
+    limb_amount: f32,
+    scale: f32,
+    yaw_deg: f32,
+    head_yaw_deg: f32,
+    head_pitch_deg: f32,
+    attack_progress: f32,
+    pose: i32,
+) -> Vec<Vertex> {
     // Whole-model facing: Minecraft yaw 0 = south (+Z) and increases clockwise
     // (90 = west/-X). Our model's front (head) is at -Z and we mirror X, so the
     // spin that lands yaw 0 facing +Z (calibrated by render) is `-yaw`.
@@ -1486,8 +1565,18 @@ pub fn entity_mesh_with_pose(
         };
         let pose_rotation = pose_bone_rotation(&bone.name, pose);
         let ambient_rotation = ambient_bone_rotation(&bone.name, limb_swing, limb_amount);
+        let look_pitch = if bone.name.to_ascii_lowercase().contains("head") {
+            head_pitch_deg.clamp(-90.0, 90.0)
+        } else {
+            0.0
+        };
         let euler = [
-            -bone.rotation[0] + swing + attack_swing + pose_rotation[0] + ambient_rotation[0],
+            -bone.rotation[0]
+                + swing
+                + attack_swing
+                + pose_rotation[0]
+                + ambient_rotation[0]
+                + look_pitch,
             -bone.rotation[1] + head_turn + pose_rotation[1] + ambient_rotation[1],
             -bone.rotation[2] + pose_rotation[2] + ambient_rotation[2],
         ];
@@ -1774,6 +1863,31 @@ mod tests {
     }
 
     #[test]
+    fn fluids_do_not_occlude_solid_faces() {
+        let registries = crab_registry::RegistrySet::global();
+        let atlas = Atlas::debug_uniform();
+        let mut world = world_with_chunk0();
+        let stone = registries
+            .blocks()
+            .iter()
+            .find(|block| block.name == "minecraft:stone")
+            .unwrap()
+            .default_state;
+        let water = registries
+            .blocks()
+            .iter()
+            .find(|block| block.name == "minecraft:water")
+            .unwrap()
+            .default_state;
+        world.set_block_state(5, -60, 5, stone);
+        world.set_block_state(6, -60, 5, water);
+        let mesh = mesh_region_with_registry(&world, &atlas, [5, -60, 5], [6, -60, 5], registries);
+        // The stone's east face remains visible through the water. The water
+        // itself culls its west face against the solid neighbour.
+        assert_eq!(mesh.vertices.len(), 66);
+    }
+
+    #[test]
     fn dropped_block_item_emits_textured_cube_faces() {
         let atlas = Atlas::debug_uniform();
         let vertices = block_item_mesh(&atlas, "minecraft:stone", [0.0, 0.0, 0.0], 0.36, 45.0);
@@ -1784,12 +1898,25 @@ mod tests {
     #[test]
     fn uvlock_keeps_top_texture_aligned_after_model_rotation() {
         let (u, v) = uvlock_coordinates(2, [0.0, 90.0, 0.0], 0.0, 0.0);
-        assert!((u - 0.0).abs() < 1e-5);
-        assert!((v - 1.0).abs() < 1e-5);
+        assert!((u - 1.0).abs() < 1e-5);
+        assert!(v.abs() < 1e-5);
 
         let (u, v) = uvlock_coordinates(4, [0.0, 90.0, 0.0], 0.0, 0.0);
-        assert!((u - 0.0).abs() < 1e-5);
+        assert!(u.abs() < 1e-5);
         assert!((v - 0.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn blockstate_rotations_follow_vanilla_axes() {
+        // Vine's north-facing plane starts at z=0.05. Vanilla's y=90
+        // application turns it onto the east (+X) wall, while x=270 turns it
+        // onto the top (+Y) face.
+        let east = rotate_model([0.5, 0.5, 0.05], [0.0, 90.0, 0.0], true);
+        assert!((east[0] - 0.95).abs() < 1e-5);
+        assert!((east[2] - 0.5).abs() < 1e-5);
+        let top = rotate_model([0.5, 0.5, 0.05], [270.0, 0.0, 0.0], true);
+        assert!((top[1] - 0.95).abs() < 1e-5);
+        assert!((top[2] - 0.5).abs() < 1e-5);
     }
 
     #[test]

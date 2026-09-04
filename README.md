@@ -1,6 +1,6 @@
 # Crabcraft
 
-A Minecraft **Java Edition 1.20.1–1.21.5** client written from scratch in **pure Rust**.
+A Minecraft **Java Edition 1.20.1–1.21.6** client written from scratch in **pure Rust**.
 
 [![CI](https://github.com/Solenopsisbot/CrabCraft/actions/workflows/ci.yml/badge.svg)](https://github.com/Solenopsisbot/CrabCraft/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
@@ -12,8 +12,8 @@ connection like a real player, simulates physics, renders the world, and
 connection.
 
 Protocol 763 (1.20/1.20.1) is the default. Set `CRABCRAFT_PROTOCOL=764`, `765`,
-`766`, `767`, `768`, `769`, `770`, or a matching version string (`1.20.2` through
-`1.21.5`) for newer servers. Protocol 764+ includes the Configuration state, registry transfer,
+`766`, `767`, `768`, `769`, `770`, `771`, or a matching version string (`1.20.2` through
+`1.21.6`) for newer servers. Protocol 764+ includes the Configuration state, registry transfer,
 network-NBT chunk data, chunk-batch acknowledgement, and versioned packet-ID
 profiles. Protocol 765 additionally handles NBT text components, UUID-addressed
 resource packs and removal, score reset/format packets, and play-to-configuration
@@ -40,6 +40,10 @@ Protocol 770 adds the 1.21.5 Spring to Life registries, the revised chunk
 heightmap array, chat checksum, shifted game-test/play packet maps, and the
 reorganized 96-type item-component registry.
 
+Protocol 771 adds the 1.21.6 registries, the fixed-length paletted chunk
+containers, the changed game-mode packet insertion, and the 1.21.6 component
+stack layouts used by the live client path.
+
 Crabcraft is under active development. The feature inventory below distinguishes
 implemented behavior from the remaining parity work; it is not yet a drop-in
 replacement for Mojang's client.
@@ -47,7 +51,7 @@ replacement for Mojang's client.
 ## What works today
 
 The core path is verified end-to-end against vanilla 1.20.1, 1.20.4, 1.20.6,
-1.21.1, 1.21.3, 1.21.4, and 1.21.5 servers (offline mode unless noted), with protocol codecs and mappings
+1.21.1, 1.21.3, 1.21.4, 1.21.5, and 1.21.6 servers (offline mode unless noted), with protocol codecs and mappings
 tested for every supported profile:
 
 - TCP connection, handshake, and **login** (with packet compression)
@@ -65,15 +69,17 @@ tested for every supported profile:
   **element models** so slabs/stairs/plants/lanterns render as real shapes +
   vanilla-derived omitted-face UVs + namespaced resource-pack references +
   grass/foliage tint), with opaque-first and back-to-front translucent passes
-  so water/glass appearance is stable while moving the camera; offscreen mode
-  + a live windowed viewer
+  so water/glass appearance is stable while moving the camera; vanilla
+  blockstate rotations, UV locking, waterlogged fluid layers, and fluid-safe
+  face culling are applied before upload; offscreen mode + a live windowed viewer
 - **Player control**: first-person WASD/jump/look in the window, driven through
   the physics sim and sent to the server, with **Control or double-tap W sprint** and
   **Shift sneak** (including crouched speed, eye height, and server pose state),
   plus reliable vanilla-style **double-Space Creative/Spectator flight**,
   Spectator noclip, and **F main/offhand swapping** with local prediction
 - **Camera perspectives**: **F5** cycles first person, third-person rear, and
-  third-person front views; third person renders the local animated player and
+  third-person front views; third person renders the local animated player with
+  body yaw and head pitch following the camera and
   hides first-person hand overlays, with camera distance pulled forward by
   nearby blocks to avoid wall clipping
 - **Advanced movement**: pitch-directed sprint-swimming with low pose/eye

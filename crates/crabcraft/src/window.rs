@@ -17,9 +17,10 @@ use crab_core::{ClientCommand, ConnectionPhase, RecipeKey, ScreenStack, UiScreen
 use crab_render::{
     block_item_mesh, block_state_item_mesh, box_mesh, build_block_pipeline, build_hud_pipelines,
     build_translucent_pipeline, container_geometry, entity_armour_mesh, entity_mesh,
-    entity_mesh_with_pose, furnace_geometry, hud_geometry, inventory_geometry, item_model_mesh,
-    mesh_region_with_registry, simple_container_geometry, status_effect_geometry, upload_atlas,
-    upload_texture, CameraUniform, HudPipelines, Vertex, DEPTH_FORMAT,
+    entity_mesh_with_look, entity_mesh_with_pose, furnace_geometry, hud_geometry,
+    inventory_geometry, item_model_mesh, mesh_region_with_registry, simple_container_geometry,
+    status_effect_geometry, upload_atlas, upload_texture, CameraUniform, HudPipelines, Vertex,
+    DEPTH_FORMAT,
 };
 use crab_world::WorldSnapshot;
 use glam::Vec3;
@@ -4508,7 +4509,7 @@ impl ApplicationHandler for App {
                             0
                         };
                         let (body_yaw, head_yaw) = local_player_model_yaws(self.yaw);
-                        model_v.extend(entity_mesh_with_pose(
+                        model_v.extend(entity_mesh_with_look(
                             &model.geo,
                             [eye.x, eye.y, eye.z],
                             [model.atlas_x, model.atlas_y],
@@ -4521,6 +4522,7 @@ impl ApplicationHandler for App {
                             1.0,
                             body_yaw,
                             head_yaw,
+                            self.pitch,
                             hand_swing,
                             pose,
                         ));
@@ -5892,6 +5894,32 @@ mod tests {
             &geometry, [0.0; 3], [0.0; 2], [64.0; 2], 0.0, 0.0, 1.0, 90.0, 90.0, 0.0, 0,
         );
         assert_ne!(yaw_zero[0].position, yaw_ninety[0].position);
+    }
+
+    #[test]
+    fn local_player_head_follows_camera_pitch() {
+        let geometry = crab_assets::EntityGeometry {
+            texture_width: 64.0,
+            texture_height: 64.0,
+            bones: vec![crab_assets::entity::Bone {
+                name: "head".to_string(),
+                pivot: [0.0, 8.0, 0.0],
+                rotation: [0.0; 3],
+                cubes: vec![crab_assets::entity::Cube {
+                    origin: [-4.0, 8.0, -2.0],
+                    size: [8.0, 8.0, 8.0],
+                    uv: [0.0, 0.0],
+                    mirror: false,
+                }],
+            }],
+        };
+        let level = crab_render::entity_mesh_with_look(
+            &geometry, [0.0; 3], [0.0; 2], [64.0; 2], 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0,
+        );
+        let looking_down = crab_render::entity_mesh_with_look(
+            &geometry, [0.0; 3], [0.0; 2], [64.0; 2], 0.0, 0.0, 1.0, 0.0, 0.0, 45.0, 0.0, 0,
+        );
+        assert_ne!(level[0].position, looking_down[0].position);
     }
 
     #[test]

@@ -150,6 +150,41 @@ impl Chunk {
         Self::parse_section_data(buf, x, z, section_count)
     }
 
+    /// Decodes protocol 771's chunk form. Its heightmap header matches 770;
+    /// section paletted containers use the fixed-length representation decoded
+    /// by [`parse_section_771`].
+    pub fn parse_771<B: Buf>(buf: &mut B, section_count: usize) -> Result<Self, ProtoError> {
+        let x = buf.read_i32()?;
+        let z = buf.read_i32()?;
+        let heightmap_count = buf.read_varint()?;
+        if !(0..=256).contains(&heightmap_count) {
+            return Err(ProtoError::InvalidEnum {
+                type_name: "protocol 771 chunk heightmap count",
+                value: i64::from(heightmap_count),
+            });
+        }
+        for _ in 0..heightmap_count {
+            let _heightmap_type = buf.read_varint()?;
+            let data_count = buf.read_varint()?;
+            if !(0..=4096).contains(&data_count) {
+                return Err(ProtoError::InvalidEnum {
+                    type_name: "protocol 771 heightmap long count",
+                    value: i64::from(data_count),
+                });
+            }
+            for _ in 0..data_count {
+                let _ = buf.read_i64()?;
+            }
+        }
+        let data = buf.read_byte_array()?;
+        let mut cursor: &[u8] = &data;
+        let mut sections = Vec::with_capacity(section_count);
+        for _ in 0..section_count {
+            sections.push(parse_section_771(&mut cursor)?);
+        }
+        Ok(Chunk { x, z, sections })
+    }
+
     fn parse_with_nbt<B: Buf>(
         buf: &mut B,
         section_count: usize,
@@ -214,6 +249,37 @@ fn parse_section<B: Buf>(buf: &mut B) -> Result<Section, ProtoError> {
     })
 }
 
+/// Decodes the 1.21.6 section form. The section header and block/biome
+/// containers are the same as the 1.20-era format, except the packed-long
+/// array length is no longer written on the wire: its size is implied by the
+/// entry count and bits-per-entry.
+fn parse_section_771<B: Buf>(buf: &mut B) -> Result<Section, ProtoError> {
+    let block_count = buf.read_i16()?;
+    let blocks = match read_paletted_771(buf, SECTION_VOLUME, 8)? {
+        Paletted::Single(value) => BlockStates::Uniform(value),
+        Paletted::Values(values) => BlockStates::Array(
+            values
+                .into_boxed_slice()
+                .try_into()
+                .map_err(|_| ProtoError::UnexpectedEof { needed: 0 })?,
+        ),
+    };
+    let biomes = match read_paletted_771(buf, SECTION_BIOMES, 3)? {
+        Paletted::Single(value) => Biomes::Uniform(value),
+        Paletted::Values(values) => Biomes::Array(
+            values
+                .into_boxed_slice()
+                .try_into()
+                .map_err(|_| ProtoError::UnexpectedEof { needed: 0 })?,
+        ),
+    };
+    Ok(Section {
+        block_count,
+        blocks,
+        biomes,
+    })
+}
+
 /// Result of decoding a paletted container.
 enum Paletted {
     /// Every entry is this value (bitsPerEntry == 0).
@@ -234,19 +300,39 @@ fn read_paletted<B: Buf>(
 ) -> Result<Paletted, ProtoError> {
     let bits = buf.read_u8()?;
 
+    // A packed long cannot represent more than 64 bits per entry. Reject an
+    // invalid network value before calculating `64 / bits`; otherwise a
+    // hostile or version-mismatched chunk would panic on division by zero.
+    if bits > 64 {
+        return Err(ProtoError::InvalidEnum {
+            type_name: "chunk palette bits per entry",
+            value: i64::from(bits),
+        });
+    }
+
     if bits == 0 {
         // Single-valued palette: one value, then a (zero-length) data array.
         let value = buf.read_varint()? as u32;
-        let data_len = buf.read_varint()?.max(0);
-        for _ in 0..data_len {
-            let _ = buf.read_i64()?;
+        let data_len = buf.read_varint()?;
+        if data_len != 0 {
+            return Err(ProtoError::InvalidEnum {
+                type_name: "chunk single palette data length",
+                value: i64::from(data_len),
+            });
         }
         return Ok(Paletted::Single(value));
     }
 
     let palette = if bits <= max_indirect_bits {
-        let len = buf.read_varint()?.max(0) as usize;
-        let mut palette = Vec::with_capacity(len.min(4096));
+        let len = buf.read_varint()?;
+        if len < 0 || usize::try_from(len).unwrap_or(usize::MAX) > entries {
+            return Err(ProtoError::InvalidEnum {
+                type_name: "chunk palette length",
+                value: i64::from(len),
+            });
+        }
+        let len = len as usize;
+        let mut palette = Vec::with_capacity(len);
         for _ in 0..len {
             palette.push(buf.read_varint()? as u32);
         }
@@ -255,20 +341,32 @@ fn read_paletted<B: Buf>(
         None // direct palette: packed values are global IDs
     };
 
-    let data_len = buf.read_varint()?.max(0) as usize;
-    let mut longs = Vec::with_capacity(data_len.min(1024));
+    let data_len = buf.read_varint()?;
+    let bits_usize = usize::from(bits);
+    let entries_per_long = 64 / bits_usize;
+    let max_data_len = entries.div_ceil(entries_per_long);
+    if data_len < 0 || usize::try_from(data_len).unwrap_or(usize::MAX) > max_data_len {
+        return Err(ProtoError::InvalidEnum {
+            type_name: "chunk packed data length",
+            value: i64::from(data_len),
+        });
+    }
+    let data_len = data_len as usize;
+    let mut longs = Vec::with_capacity(data_len);
     for _ in 0..data_len {
         longs.push(buf.read_i64()? as u64);
     }
 
-    let bits = bits as usize;
-    let entries_per_long = 64 / bits;
-    let mask = (1u64 << bits) - 1;
+    let mask = if bits_usize == 64 {
+        u64::MAX
+    } else {
+        (1u64 << bits_usize) - 1
+    };
 
     let mut out = Vec::with_capacity(entries);
     for i in 0..entries {
         let long_index = i / entries_per_long;
-        let offset = (i % entries_per_long) * bits;
+        let offset = (i % entries_per_long) * bits_usize;
         let raw = longs
             .get(long_index)
             .map(|l| (l >> offset) & mask)
@@ -280,6 +378,68 @@ fn read_paletted<B: Buf>(
         out.push(value);
     }
     Ok(Paletted::Values(out))
+}
+
+/// Reads a 1.21.6 paletted container whose packed-long count is implicit.
+fn read_paletted_771<B: Buf>(
+    buf: &mut B,
+    entries: usize,
+    max_indirect_bits: u8,
+) -> Result<Paletted, ProtoError> {
+    let bits = buf.read_u8()?;
+    if bits > 64 {
+        return Err(ProtoError::InvalidEnum {
+            type_name: "protocol 771 chunk palette bits per entry",
+            value: i64::from(bits),
+        });
+    }
+    if bits == 0 {
+        return Ok(Paletted::Single(buf.read_varint()? as u32));
+    }
+
+    let palette = if bits <= max_indirect_bits {
+        let len = buf.read_varint()?.max(0) as usize;
+        if len > 4096 {
+            return Err(ProtoError::InvalidEnum {
+                type_name: "protocol 771 chunk palette length",
+                value: i64::try_from(len).unwrap_or(i64::MAX),
+            });
+        }
+        let mut palette = Vec::with_capacity(len);
+        for _ in 0..len {
+            palette.push(buf.read_varint()? as u32);
+        }
+        Some(palette)
+    } else {
+        None
+    };
+
+    let bits_usize = usize::from(bits);
+    let entries_per_long = 64 / bits_usize;
+    let data_len = entries.div_ceil(entries_per_long);
+    let mut longs = Vec::with_capacity(data_len);
+    for _ in 0..data_len {
+        longs.push(buf.read_i64()? as u64);
+    }
+    let mask = if bits == 64 {
+        u64::MAX
+    } else {
+        (1u64 << bits) - 1
+    };
+    let mut values = Vec::with_capacity(entries);
+    for index in 0..entries {
+        let long = longs[index / entries_per_long];
+        let offset = (index % entries_per_long) * bits_usize;
+        let raw = (long >> offset) & mask;
+        values.push(
+            palette
+                .as_ref()
+                .and_then(|values| values.get(raw as usize))
+                .copied()
+                .unwrap_or(raw as u32),
+        );
+    }
+    Ok(Paletted::Values(values))
 }
 
 #[cfg(test)]
@@ -381,6 +541,64 @@ mod tests {
         let chunk = Chunk::parse_770(&mut input, 0).unwrap();
         assert_eq!((chunk.x, chunk.z), (-4, 7));
         assert!(chunk.sections.is_empty());
+        assert!(input.is_empty());
+    }
+
+    #[test]
+    fn protocol_771_uses_implicit_paletted_array_lengths() {
+        let mut section = Vec::new();
+        section.put_i16(1);
+        section.push(4); // block bits
+        section.put_varint(2);
+        section.put_varint(0);
+        section.put_varint(42);
+        let mut packed = [0i64; 256];
+        packed[0] = 0x11; // first four entries: 1, 1, 0, 0
+        for value in packed {
+            section.put_i64(value);
+        }
+        section.push(1); // biome bits
+        section.put_varint(2);
+        section.put_varint(0);
+        section.put_varint(7);
+        section.put_i64(0xffffffffffffffff_u64 as i64);
+
+        let mut packet = Vec::new();
+        packet.put_i32(-2);
+        packet.put_i32(5);
+        packet.put_varint(0); // no heightmaps
+        packet.put_varint(i32::try_from(section.len()).unwrap());
+        packet.extend_from_slice(&section);
+
+        let mut input = packet.as_slice();
+        let chunk = Chunk::parse_771(&mut input, 1).unwrap();
+        assert_eq!((chunk.x, chunk.z), (-2, 5));
+        assert_eq!(chunk.sections[0].block_state(0, 0, 0), 42);
+        assert_eq!(chunk.sections[0].block_state(1, 0, 0), 42);
+        assert_eq!(chunk.sections[0].block_state(2, 0, 0), 0);
+        assert_eq!(chunk.sections[0].biome(0, 0, 0), 7);
+        assert!(input.is_empty());
+    }
+
+    #[test]
+    fn protocol_771_uniform_palettes_do_not_consume_a_data_length() {
+        let mut section = Vec::new();
+        section.put_i16(0);
+        section.push(0);
+        section.put_varint(3);
+        section.push(0);
+        section.put_varint(9);
+
+        let mut packet = Vec::new();
+        packet.put_i32(0);
+        packet.put_i32(0);
+        packet.put_varint(0);
+        packet.put_varint(i32::try_from(section.len()).unwrap());
+        packet.extend_from_slice(&section);
+        let mut input = packet.as_slice();
+        let chunk = Chunk::parse_771(&mut input, 1).unwrap();
+        assert!(matches!(chunk.sections[0].blocks, BlockStates::Uniform(3)));
+        assert!(matches!(chunk.sections[0].biomes, Biomes::Uniform(9)));
         assert!(input.is_empty());
     }
 }

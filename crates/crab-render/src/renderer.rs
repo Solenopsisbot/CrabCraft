@@ -117,6 +117,7 @@ pub fn build_block_pipeline(
         &texture_bgl,
         "block pipeline",
         true,
+        wgpu::CompareFunction::Less,
     );
 
     (pipeline, camera_bgl, texture_bgl)
@@ -138,6 +139,9 @@ pub fn build_translucent_pipeline(
         texture_bgl,
         "translucent block pipeline",
         false,
+        // Transparent faces must survive a depth tie with the opaque face
+        // underneath them (water often shares the same block boundary).
+        wgpu::CompareFunction::LessEqual,
     )
 }
 
@@ -148,6 +152,7 @@ fn create_block_pipeline(
     texture_bgl: &wgpu::BindGroupLayout,
     label: &str,
     depth_write_enabled: bool,
+    depth_compare: wgpu::CompareFunction,
 ) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("block shader"),
@@ -185,7 +190,7 @@ fn create_block_pipeline(
         depth_stencil: Some(wgpu::DepthStencilState {
             format: DEPTH_FORMAT,
             depth_write_enabled,
-            depth_compare: wgpu::CompareFunction::Less,
+            depth_compare,
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),
