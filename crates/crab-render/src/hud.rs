@@ -245,6 +245,7 @@ pub fn hud_geometry(
     gui: &GuiAtlas,
     health: f32,
     food: i32,
+    air_supply: i32,
     xp_bar: f32,
     xp_level: i32,
     selected: usize,
@@ -345,6 +346,21 @@ pub fn hud_geometry(
         let (by0, by1) = (bar.3 + 0.012, bar.3 + 0.042);
         let fd = (food as f32 / 20.0).clamp(0.0, 1.0);
         push_color_quad(&mut c, 0.5 - 0.48 * fd, by0, 0.5, by1, [0.55, 0.40, 0.15]);
+    }
+
+    if air_supply < 300 {
+        if let (Some(full), Some(burst)) = (gui.sprite("air_full"), gui.sprite("air_burst")) {
+            let air = air_supply.clamp(0, 300);
+            let full_count = air * 10 / 300;
+            for index in 0..full_count {
+                let x = 169.0 - index as f32 * 8.0;
+                spr(&mut g, x, 23.0, 9.0, 9.0, full);
+            }
+            if air > 0 && air % 30 != 0 && full_count < 10 {
+                let x = 169.0 - full_count as f32 * 8.0;
+                spr(&mut g, x, 23.0, 9.0, 9.0, burst);
+            }
+        }
     }
 
     // XP level number, centred just above the xp bar (green, in the gui/font).
@@ -1124,7 +1140,7 @@ mod tests {
         let gui = crab_assets::GuiAtlas::empty();
         let uv = [0.0, 0.0, 0.5, 0.5];
         let hotbar = [Some(uv), None, Some(uv), None, None, None, None, None, None];
-        let (_color, _g, item) = hud_geometry(&gui, 20.0, 20, 0.0, 0, 2, &hotbar, 1.0);
+        let (_color, _g, item) = hud_geometry(&gui, 20.0, 20, 300, 0.0, 0, 2, &hotbar, 1.0);
         // 2 filled slots -> 2 textured quads -> 12 vertices.
         assert_eq!(item.len(), 12);
     }
@@ -1143,7 +1159,7 @@ mod tests {
             None,
             None,
         ];
-        let (_c, _g, t) = hud_geometry(&gui, 20.0, 20, 0.0, 0, 0, &hotbar, 1.0);
+        let (_c, _g, t) = hud_geometry(&gui, 20.0, 20, 300, 0.0, 0, 0, &hotbar, 1.0);
         // First vertex is the top-left corner -> (u0, v0).
         assert_eq!([t[0][2], t[0][3]], [0.1, 0.2]);
         // Third vertex is bottom-right -> (u1, v1).

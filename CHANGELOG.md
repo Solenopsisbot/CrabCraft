@@ -52,6 +52,8 @@ remains the detailed source of truth.
 - Registry-complete entity geometry/texture resolution, built-in textured
   boats and rafts, item/block-shaped entity rendering, and ambient wing, fin,
   tail, and paddle animation.
+- Vanilla-derived mining-tool tags from the selected client jar, including
+  material speeds and status-effect modifiers for predicted break timing.
 
 ### Changed
 
@@ -87,3 +89,10 @@ remains the detailed source of truth.
 - Protocol 768/769 held-item use now includes the required camera rotation, and
   modern component-era particle packets decode their particle ID after the fixed
   header instead of using the legacy prefix order.
+- Jump collision now follows vanilla rising-before-gravity ordering; swimming
+  projects movement through camera pitch, climbables require explicit vertical
+  input, and local underwater air supply is tracked for the HUD.
+- Underwater presentation now uses camera-point detection, smoothed pose
+  transitions, and distance fog. Atlas UVs address outer texel centers to avoid
+  subpixel texture bleed, and directional block placement plus attached 3D
+  held-item geometry follow the active registry.

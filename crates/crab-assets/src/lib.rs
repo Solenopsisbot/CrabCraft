@@ -1432,8 +1432,10 @@ fn blit_tile(atlas: &mut [u8], dim: u32, slot: u32, tile: &[u8]) {
 fn slot_uv(slot: u32, grid: u32) -> [f32; 4] {
     let (col, row) = (slot % grid, slot / grid);
     let step = 1.0 / grid as f32;
-    // Inset by a fraction of a texel to avoid bleeding with nearest sampling.
-    let inset = step * 0.001;
+    // Address the centers of the outer texels. Sampling exactly on a tile
+    // boundary can select an adjacent atlas tile as small faces move by a
+    // subpixel, which presents as camera-dependent texture flicker.
+    let inset = step / (TILE as f32 * 2.0);
     let u0 = col as f32 * step + inset;
     let v0 = row as f32 * step + inset;
     [u0, v0, u0 + step - 2.0 * inset, v0 + step - 2.0 * inset]
@@ -1516,6 +1518,14 @@ mod tests {
             &serde_json::json!({"AND": [{"north": "true"}, {"half": "bottom"}]}),
             &properties,
         ));
+    }
+
+    #[test]
+    fn atlas_tiles_address_outer_texel_centers() {
+        let uv = slot_uv(1, 4);
+        let atlas_pixels = (4 * TILE) as f32;
+        assert!((uv[0] * atlas_pixels - 16.5).abs() < 1e-5);
+        assert!((uv[2] * atlas_pixels - 31.5).abs() < 1e-5);
     }
 
     #[test]

@@ -354,6 +354,43 @@ fn horizontal_rotation(name: &str, offset: usize) -> Option<[f32; 3]> {
     Some([0.0, yaw, 0.0])
 }
 
+fn state_property_rotation(
+    registries: crab_registry::RegistrySet,
+    state: u32,
+    name: &str,
+) -> [f32; 3] {
+    if let Some(axis) = registries.block_state_property(state, "axis") {
+        return match axis {
+            "x" => [0.0, 0.0, -90.0],
+            "z" => [90.0, 0.0, 0.0],
+            _ => [0.0; 3],
+        };
+    }
+    if let Some(facing) = registries.block_state_property(state, "facing") {
+        return match facing {
+            "south" => [0.0, 180.0, 0.0],
+            "west" => [0.0, 270.0, 0.0],
+            "east" => [0.0, 90.0, 0.0],
+            "up" => [270.0, 0.0, 0.0],
+            "down" => [90.0, 0.0, 0.0],
+            _ => [0.0; 3],
+        };
+    }
+    if let Some(rotation) = registries
+        .block_state_property(state, "rotation")
+        .and_then(|rotation| rotation.parse::<f32>().ok())
+    {
+        return [0.0, rotation * 22.5, 0.0];
+    }
+    registries
+        .block_for_state(state)
+        .and_then(|block| {
+            let offset = (state - block.min_state) as usize;
+            axis_rotation(name, offset).or_else(|| horizontal_rotation(name, offset))
+        })
+        .unwrap_or([0.0; 3])
+}
+
 fn campfire_visual(offset: usize) -> (&'static str, f32) {
     let facing = (offset / 8).min(3);
     let lit = (offset % 8) / 4 == 0;
@@ -712,12 +749,7 @@ pub fn mesh_region_with_registry(
                 // model's element geometry.
                 if let Some(default_elements) = atlas.block_elements(name) {
                     let mut elements = default_elements;
-                    let mut model_rotation = registries
-                        .block_for_state(state)
-                        .and_then(|block| {
-                            horizontal_rotation(name, (state - block.min_state) as usize)
-                        })
-                        .unwrap_or([0.0, 0.0, 0.0]);
+                    let mut model_rotation = state_property_rotation(registries, state, name);
                     if name.ends_with("_stairs") {
                         if let Some(block) = registries.block_for_state(state) {
                             let offset = (state - block.min_state) as usize;
@@ -756,13 +788,7 @@ pub fn mesh_region_with_registry(
 
                 // Full cube (or flat fallback): one quad per non-occluded face.
                 let model = atlas.model(name);
-                let rotation = registries
-                    .block_for_state(state)
-                    .and_then(|block| {
-                        let offset = (state - block.min_state) as usize;
-                        axis_rotation(name, offset).or_else(|| horizontal_rotation(name, offset))
-                    })
-                    .unwrap_or([0.0, 0.0, 0.0]);
+                let rotation = state_property_rotation(registries, state, name);
                 for (fi, face) in FACES.iter().enumerate() {
                     let normal = rotate_model(face.normal, rotation, false);
                     let direction = [
@@ -1981,6 +2007,24 @@ mod tests {
         assert_eq!(
             horizontal_rotation("minecraft:loom", 3),
             Some([0.0, 90.0, 0.0])
+        );
+
+        let registries = crab_registry::RegistrySet::global();
+        let observer = registries.block_by_name("observer").unwrap();
+        let east = (observer.min_state..=observer.max_state)
+            .find(|state| registries.block_state_property(*state, "facing") == Some("east"))
+            .unwrap();
+        assert_eq!(
+            state_property_rotation(registries, east, "minecraft:observer"),
+            [0.0, 90.0, 0.0]
+        );
+        let log = registries.block_by_name("oak_log").unwrap();
+        let z = (log.min_state..=log.max_state)
+            .find(|state| registries.block_state_property(*state, "axis") == Some("z"))
+            .unwrap();
+        assert_eq!(
+            state_property_rotation(registries, z, "minecraft:oak_log"),
+            [90.0, 0.0, 0.0]
         );
         assert_eq!(
             horizontal_rotation("minecraft:white_glazed_terracotta", 0),

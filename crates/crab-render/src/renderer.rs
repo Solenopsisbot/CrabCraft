@@ -18,6 +18,9 @@ use crate::mesh::{Mesh, Vertex};
 pub struct CameraUniform {
     pub view_proj: [[f32; 4]; 4],
     pub lighting: [f32; 4],
+    pub eye: [f32; 4],
+    pub fog_color: [f32; 4],
+    pub fog_params: [f32; 4],
 }
 
 impl CameraUniform {
@@ -25,6 +28,9 @@ impl CameraUniform {
         Self {
             view_proj: camera.view_proj().to_cols_array_2d(),
             lighting: [1.0, 0.0, 0.0, 0.0],
+            eye: [camera.eye.x, camera.eye.y, camera.eye.z, 0.0],
+            fog_color: [0.0; 4],
+            fog_params: [0.0; 4],
         }
     }
 
@@ -32,6 +38,21 @@ impl CameraUniform {
         Self {
             view_proj: camera.view_proj().to_cols_array_2d(),
             lighting: [light.clamp(0.08, 1.0), 0.0, 0.0, 0.0],
+            eye: [camera.eye.x, camera.eye.y, camera.eye.z, 0.0],
+            fog_color: [0.0; 4],
+            fog_params: [0.0; 4],
+        }
+    }
+
+    /// Camera uniform with linear distance fog for submerged rendering.
+    #[must_use]
+    pub fn with_fog(camera: &Camera, light: f32, color: [f32; 3], start: f32, end: f32) -> Self {
+        Self {
+            view_proj: camera.view_proj().to_cols_array_2d(),
+            lighting: [light.clamp(0.08, 1.0), 0.0, 0.0, 0.0],
+            eye: [camera.eye.x, camera.eye.y, camera.eye.z, 0.0],
+            fog_color: [color[0], color[1], color[2], 1.0],
+            fog_params: [start.max(0.0), end.max(start + 0.01), 1.0, 0.0],
         }
     }
 }

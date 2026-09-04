@@ -4,6 +4,9 @@
 struct Camera {
     view_proj: mat4x4<f32>,
     lighting: vec4<f32>,
+    eye: vec4<f32>,
+    fog_color: vec4<f32>,
+    fog_params: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> camera: Camera;
 
@@ -24,6 +27,7 @@ struct VsOut {
     @location(1) tint: vec3<f32>,
     @location(2) normal: vec3<f32>,
     @location(3) opacity: f32,
+    @location(4) world_position: vec3<f32>,
 };
 
 @vertex
@@ -34,6 +38,7 @@ fn vs_main(in: VsIn) -> VsOut {
     out.tint = in.tint;
     out.normal = in.normal;
     out.opacity = in.opacity;
+    out.world_position = in.position;
     return out;
 }
 
@@ -48,5 +53,13 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let n = normalize(in.normal);
     let diffuse = max(dot(n, light_dir), 0.0);
     let shade = max(0.08, (0.35 + 0.65 * diffuse) * camera.lighting.x);
-    return vec4<f32>(sampled.rgb * in.tint * shade, alpha);
+    let lit = sampled.rgb * in.tint * shade;
+    let distance_from_eye = distance(in.world_position, camera.eye.xyz);
+    let fog_amount = clamp(
+        (distance_from_eye - camera.fog_params.x) /
+            max(camera.fog_params.y - camera.fog_params.x, 0.01),
+        0.0,
+        1.0,
+    ) * camera.fog_params.z;
+    return vec4<f32>(mix(lit, camera.fog_color.rgb, fog_amount), alpha);
 }

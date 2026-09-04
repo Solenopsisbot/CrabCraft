@@ -58,8 +58,8 @@ tested for every supported profile:
 - **Block registry**: resolves block-state IDs to names like
   `minecraft:grass_block` (1003 blocks)
 - **Dimension extents**: reads real `min_y`/`height` from the Join Game NBT codec
-- **Physics**: AABB-vs-voxel collision + gravity; the client is physically
-  simulated and the server accepts its movement
+- **Physics**: AABB-vs-voxel collision + gravity with vanilla tick ordering;
+  the 0.42-block/tick jump reaches about 1.25 blocks and clears a full block
 - **Rendering**: a `wgpu` voxel renderer (face-culled meshing, depth, lighting)
   with **textures loaded from your client jar** (atlas-stitched cube models +
   **element models** so slabs/stairs/plants/lanterns render as real shapes +
@@ -76,14 +76,16 @@ tested for every supported profile:
   third-person front views; third person renders the local animated player and
   hides first-person hand overlays, with camera distance pulled forward by
   nearby blocks to avoid wall clipping
-- **Advanced movement**: sprint-swimming with low pose/eye height,
-  vine/ladder climbing, speed-sensitive camera FOV, and equipped-Elytra
+- **Advanced movement**: pitch-directed sprint-swimming with low pose/eye
+  height, vine/ladder climbing, speed-sensitive camera FOV, and equipped-Elytra
   fall-flying initiation with reduced glide gravity
 - **Vehicles**: local mount/dismount tracking, camera/seat synchronization,
   server-authoritative ridden-entity movement, horse-style steering/jump input,
   and predicted boat turning, travel, and individual paddle controls
 - **Fluid movement**: water/lava and waterlogged-block detection, reduced
-  movement, buoyant gravity, terminal speed, **Space** ascent, and **Shift** descent
+  movement, buoyant gravity, terminal speed, **Space** ascent, **Shift** descent,
+  underwater distance fog, and a 300-tick air supply with bubble HUD; drowning
+  damage remains server-authoritative
 - **World ambience**: server-synchronized day/night sky brightness plus
   rain/thunder darkening from vanilla game-state events, with matching dynamic
   terrain illumination and depth-tested moving sun/moon geometry
@@ -105,7 +107,8 @@ tested for every supported profile:
   unresolved block/item models instead of silently claiming complete coverage
 - **Entity presentation**: packet-driven arm swings, hurt reactions, independent
   head rotation, metadata-driven crouch/swim/glide/sleep/death/sit poses,
-  main/offhand items, visible material-coloured armour layers,
+  attached 3D main/offhand items for remote players, visible
+  material-coloured armour layers,
   bobbing/rotating 3D per-face dropped block models with short-horizon fall
   prediction, and full-scale falling blocks selected from the server's exact
   block-state ID
@@ -125,9 +128,10 @@ tested for every supported profile:
   books support editing, pagination, saving, title entry, and signing through
   the vanilla Edit Book packet
 - **Combat**: **left-click attacks** the mob you're aiming at (within reach) via
-  a swing + InteractEntity; verified to damage and kill a mob on a live server
-- **Survival vitals**: tracks **health/food**, and on death sends a respawn
-  request automatically
+  a swing + InteractEntity; the server derives damage from the selected held
+  item, enchantments, effects, and cooldown rather than trusting client damage
+- **Survival vitals**: tracks **health/food/air**, renders vanilla air bubbles,
+  and on death sends a respawn request automatically
 - **HUD**: rendered with the **real Minecraft GUI textures** + bitmap font —
   hotbar widget (number-key/scroll selection), **hearts/hunger + XP bar & level**
   (from `icons.png`) with pixel-correct aspect, and **stack-size numbers** on
@@ -162,8 +166,12 @@ tested for every supported profile:
 - **Status effects**: authoritative add/remove/expiry tracking with Speed,
   Slowness, Haste, Mining Fatigue, Jump Boost, Levitation, and Slow Falling
   applied to local movement, mining, and gravity, plus vanilla HUD icons
+- **Mining tools**: pickaxe/axe/shovel/hoe effectiveness is loaded from the
+  selected client jar's vanilla `mineable/*` block tags, with material speeds
+  applied before Haste and Mining Fatigue
 - **Item/block use**: empty-hand interactions, doors/buttons/containers while
-  holding blocks, air-use for food/bows/buckets/shields, and release-use packets
+  holding blocks, hold-to-eat food even while aiming at ordinary blocks,
+  air-use for bows/buckets/shields, and release-use packets
 - **Pause/options menus**: **Esc** opens a menu with the vanilla button sprites,
   an in-game controls reference, and live FOV, mouse-sensitivity, and fullscreen
   settings; focus regain immediately refreshes the drawable and resets stale

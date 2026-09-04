@@ -29,7 +29,7 @@ use crab_protocol::versions::v1_20_1::play::{
     KeepAlive, KeepAliveResponse, OpenScreen, Ping, PlaceRecipe, PlayDisconnect, PlayerCommand,
     PlayerDigging, Pong, RenameItem, ResourcePackStatus, ServerboundPlayerAbilities,
     SetContainerContent, SetContainerData, SetContainerSlot, SetHealth, SetHeldItem,
-    SetPlayerPosition, SetPlayerPositionRotation, SlotItem, SteerBoat, SteerVehicle, SwingArm,
+    SetPlayerPositionRotation, SlotItem, SteerBoat, SteerVehicle, SwingArm,
     SynchronizePlayerPosition, SystemChat, UseItem, UseItemOn, VehicleMove,
 };
 use crab_protocol::versions::v1_20_2::configuration::{
@@ -46,6 +46,7 @@ use crab_protocol::versions::v1_21_2::{configuration as configuration768, play a
 use crab_protocol::versions::v1_21_4::play as play769;
 use crab_protocol::versions::v1_21_5::play as play770;
 use crab_protocol::BufExt;
+use crab_registry::RegistrySet;
 use crab_world::{Chunk, World};
 use sha1::{Digest, Sha1};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -448,6 +449,8 @@ pub struct PlayerState {
     /// Current health (0..=20) and food (0..=20).
     pub health: f32,
     pub food: i32,
+    /// Remaining underwater breath in ticks (vanilla maximum: 300).
+    pub air_supply: i32,
     /// Selected hotbar slot (0..=8).
     pub selected_slot: u8,
     /// Game mode: 0 = survival, 1 = creative, 2 = adventure, 3 = spectator.
@@ -481,6 +484,7 @@ impl Default for PlayerState {
             vel: [0.0; 3],
             health: 20.0,
             food: 20,
+            air_supply: 300,
             selected_slot: 0,
             gamemode: 0,
             xp_bar: 0.0,
@@ -612,12 +616,12 @@ fn controlled_boat_step(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum FluidKind {
+pub(crate) enum FluidKind {
     Water,
     Lava,
 }
 
-fn fluid_kind_at(
+pub(crate) fn fluid_kind_at(
     registries: crab_registry::RegistrySet,
     world: &World,
     feet: [f64; 3],
@@ -648,6 +652,29 @@ fn fluid_kind_at(
         }
     }
     water.then_some(FluidKind::Water)
+}
+
+/// Resolves the fluid occupying one camera point. Unlike [`fluid_kind_at`],
+/// this does not widen the query to the player's collision box, so a nearby
+/// water block cannot incorrectly apply underwater presentation to the camera.
+pub(crate) fn fluid_kind_at_point(
+    registries: crab_registry::RegistrySet,
+    world: &World,
+    point: [f64; 3],
+) -> Option<FluidKind> {
+    let state = world.block_state(
+        point[0].floor() as i32,
+        point[1].floor() as i32,
+        point[2].floor() as i32,
+    )?;
+    match registries.block_name(state) {
+        Some("minecraft:lava") => Some(FluidKind::Lava),
+        Some("minecraft:water") => Some(FluidKind::Water),
+        _ if registries.block_state_property(state, "waterlogged") == Some("true") => {
+            Some(FluidKind::Water)
+        }
+        _ => None,
+    }
 }
 
 fn touching_climbable(
@@ -710,6 +737,27 @@ fn jump_velocity(jump_boost_level: u32) -> f64 {
     8.4 + 2.0 * f64::from(jump_boost_level)
 }
 
+fn climb_velocity(current: f64, jump: bool, sneak: bool) -> f64 {
+    if sneak {
+        0.0
+    } else if jump {
+        3.0
+    } else {
+        current.max(-3.0)
+    }
+}
+
+fn updated_air_supply(current: i32, head_submerged: bool, vulnerable: bool) -> i32 {
+    if !vulnerable {
+        return 300;
+    }
+    if head_submerged {
+        (current - 1).max(0)
+    } else {
+        (current + 4).min(300)
+    }
+}
+
 fn effect_mining_multiplier(effects: &HashMap<i32, ActiveEffect>) -> f64 {
     let haste = 1.0 + 0.2 * f64::from(effect_level(effects, 3));
     let fatigue = 0.3_f64.powi(effect_level(effects, 4).min(4) as i32);
@@ -723,6 +771,130 @@ fn adjusted_break_ticks(ticks: u32, effects: &HashMap<i32, ActiveEffect>) -> u32
     (f64::from(ticks) / effect_mining_multiplier(effects))
         .ceil()
         .clamp(1.0, f64::from(u32::MAX)) as u32
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MiningTool {
+    Pickaxe,
+    Axe,
+    Shovel,
+    Hoe,
+    Shears,
+}
+
+fn mining_tool(item_name: &str) -> Option<MiningTool> {
+    let name = item_name.strip_prefix("minecraft:").unwrap_or(item_name);
+    if name.ends_with("_pickaxe") {
+        Some(MiningTool::Pickaxe)
+    } else if name.ends_with("_axe") {
+        Some(MiningTool::Axe)
+    } else if name.ends_with("_shovel") {
+        Some(MiningTool::Shovel)
+    } else if name.ends_with("_hoe") {
+        Some(MiningTool::Hoe)
+    } else if name == "shears" {
+        Some(MiningTool::Shears)
+    } else {
+        None
+    }
+}
+
+fn mining_tool_speed(item_name: &str) -> f64 {
+    let name = item_name.strip_prefix("minecraft:").unwrap_or(item_name);
+    if name == "shears" {
+        return 5.0;
+    }
+    if name.starts_with("wooden_") {
+        2.0
+    } else if name.starts_with("stone_") {
+        4.0
+    } else if name.starts_with("iron_") {
+        6.0
+    } else if name.starts_with("diamond_") {
+        8.0
+    } else if name.starts_with("netherite_") {
+        9.0
+    } else if name.starts_with("golden_") {
+        12.0
+    } else {
+        1.0
+    }
+}
+
+fn load_mining_tools() -> HashMap<String, MiningTool> {
+    let Some(path) = std::env::var_os("CRABCRAFT_JAR") else {
+        return HashMap::new();
+    };
+    load_mining_tools_from_jar(Path::new(&path))
+}
+
+fn load_mining_tools_from_jar(path: &Path) -> HashMap<String, MiningTool> {
+    let Ok(file) = File::open(path) else {
+        return HashMap::new();
+    };
+    let Ok(mut archive) = zip::ZipArchive::new(file) else {
+        return HashMap::new();
+    };
+    let mut rules = HashMap::new();
+    for (name, tool) in [
+        ("pickaxe", MiningTool::Pickaxe),
+        ("axe", MiningTool::Axe),
+        ("shovel", MiningTool::Shovel),
+        ("hoe", MiningTool::Hoe),
+    ] {
+        let path = format!("data/minecraft/tags/blocks/mineable/{name}.json");
+        let Ok(mut file) = archive.by_name(&path) else {
+            continue;
+        };
+        let mut json = String::new();
+        if file.read_to_string(&mut json).is_err() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&json) else {
+            continue;
+        };
+        let Some(entries) = value.get("values").and_then(serde_json::Value::as_array) else {
+            continue;
+        };
+        for entry in entries {
+            let block = entry
+                .as_str()
+                .or_else(|| entry.get("id").and_then(serde_json::Value::as_str));
+            if let Some(block) = block.filter(|block| !block.starts_with('#')) {
+                rules.insert(block.to_string(), tool);
+            }
+        }
+    }
+    rules
+}
+
+fn break_ticks_with_tool(
+    registries: RegistrySet,
+    mining_tools: &HashMap<String, MiningTool>,
+    state: u32,
+    held_item: Option<&str>,
+    effects: &HashMap<i32, ActiveEffect>,
+) -> Option<u32> {
+    let block = registries.block_for_state(state)?;
+    if block.hardness < 0.0 {
+        return None;
+    }
+    let preferred = mining_tools.get(block.name).copied();
+    let effective = held_item
+        .and_then(mining_tool)
+        .is_some_and(|tool| Some(tool) == preferred);
+    let speed = if effective {
+        held_item.map_or(1.0, mining_tool_speed)
+    } else {
+        1.0
+    };
+    let divisor = if block.needs_tool && !effective {
+        100.0
+    } else {
+        30.0
+    };
+    let ticks = (f64::from(block.hardness) * divisor / speed).ceil() as u32;
+    Some(adjusted_break_ticks(ticks, effects))
 }
 
 fn flight_speed(ability_speed: f32, sprinting: bool) -> f64 {
@@ -784,6 +956,8 @@ pub struct Shared {
     core: Mutex<CoreRuntime>,
     snapshot: RwLock<Arc<ClientSnapshot>>,
     replay_output: Mutex<Option<PathBuf>>,
+    /// Authoritative `mineable/*` block tags loaded from the selected client jar.
+    mining_tools: HashMap<String, MiningTool>,
     pub world: Mutex<World>,
     /// Registry codec received during 764's Configuration state.
     pub registry_codec: Mutex<Option<crab_protocol::nbt::Nbt>>,
@@ -861,11 +1035,18 @@ impl Shared {
     pub fn with_context(context: SessionContext) -> Self {
         let core = ClientCore::new(context);
         let snapshot = Arc::new(core.snapshot().clone());
+        let mining_tools = load_mining_tools();
+        if mining_tools.is_empty() && std::env::var_os("CRABCRAFT_JAR").is_some() {
+            tracing::warn!(
+                "client jar did not expose mineable block tags; tool acceleration disabled"
+            );
+        }
         Self {
             context,
             core: Mutex::new(CoreRuntime { core, replay: None }),
             snapshot: RwLock::new(snapshot),
             replay_output: Mutex::new(None),
+            mining_tools,
             world: Mutex::new(World::overworld()),
             registry_codec: Mutex::new(None),
             player: Mutex::new(PlayerState::default()),
@@ -2693,6 +2874,20 @@ where
                         )
                             == Some(FluidKind::Water)
                     };
+                    let head_submerged = {
+                        let world = shared.world.lock().unwrap();
+                        fluid_kind_at(
+                            shared.context.registries,
+                            &world,
+                            [snapshot.x, snapshot.y + 1.62, snapshot.z],
+                            0.02,
+                        ) == Some(FluidKind::Water)
+                    };
+                    snapshot.air_supply = updated_air_supply(
+                        snapshot.air_supply,
+                        head_submerged,
+                        matches!(snapshot.gamemode, 0 | 2),
+                    );
                     snapshot.swimming = in_water
                         && snapshot.sprinting
                         && controls.forward > 0.0
@@ -2766,6 +2961,7 @@ where
                     player.flying = snapshot.flying;
                     player.swimming = snapshot.swimming;
                     player.gliding = snapshot.gliding;
+                    player.air_supply = snapshot.air_supply;
                 }
 
                 // Hotbar slot change (number keys / scroll): tell the server and
@@ -2976,8 +3172,21 @@ where
                                     .unwrap()
                                     .block_state(target[0], target[1], target[2])
                                     .unwrap_or(0);
-                                if let Some(ticks) = crab_registry::break_ticks(state) {
-                                    let ticks = adjusted_break_ticks(ticks, &effects);
+                                let held_item = shared
+                                    .inventory
+                                    .lock()
+                                    .unwrap()
+                                    .get(36 + controls.selected_slot as usize)
+                                    .copied()
+                                    .flatten()
+                                    .and_then(|item| item_name_for_slot(item.item_id));
+                                if let Some(ticks) = break_ticks_with_tool(
+                                    shared.context.registries,
+                                    &shared.mining_tools,
+                                    state,
+                                    held_item,
+                                    &effects,
+                                ) {
                                     block_sequence += 1;
                                     conn.send(&dig_packet(0, target, face, block_sequence)).await?;
                                     if snapshot.gamemode == 1 || ticks == 0 {
@@ -3031,6 +3240,9 @@ where
                                 .copied()
                                 .flatten()
                         };
+                        let held_name = held
+                            .and_then(|item| u32::try_from(item.item_id).ok())
+                            .and_then(|id| shared.context.registries.item_name(id));
                         if let Some(hit) = hit {
                             block_sequence += 1;
                             if protocol == ProtocolVersion::V1_21_5 {
@@ -3088,7 +3300,30 @@ where
                             let target_name = block_name_at(shared, hit.block);
                             let may_place = snapshot.sneaking
                                 || target_name.is_none_or(|name| !is_interactable_block(name));
-                            if let (true, Some(state)) = (may_place, placeable_state(held)) {
+                            if may_place && held_name.is_some_and(is_food_item) {
+                                // Vanilla falls through from an unhandled block
+                                // interaction to the held item's `use`, which is
+                                // what starts the server-authoritative eating timer.
+                                block_sequence += 1;
+                                send_main_hand_use(
+                                    conn,
+                                    protocol,
+                                    block_sequence,
+                                    controls.yaw,
+                                    controls.pitch,
+                                )
+                                .await?;
+                            }
+                            if let (true, Some(state)) = (
+                                may_place,
+                                placeable_state(
+                                    shared.context.registries,
+                                    held,
+                                    hit.face,
+                                    controls.yaw,
+                                    controls.pitch,
+                                ),
+                            ) {
                                 let p = hit.place_position();
                                 shared
                                     .world
@@ -3102,37 +3337,14 @@ where
                             }
                         } else {
                             block_sequence += 1;
-                            if protocol == ProtocolVersion::V1_21_5 {
-                                conn.send_unmapped(&play770::UseItem {
-                                    hand: 0,
-                                    sequence: block_sequence,
-                                    yaw: controls.yaw,
-                                    pitch: controls.pitch,
-                                })
-                                .await?;
-                            } else if protocol == ProtocolVersion::V1_21_4 {
-                                conn.send_unmapped(&play769::UseItem {
-                                    hand: 0,
-                                    sequence: block_sequence,
-                                    yaw: controls.yaw,
-                                    pitch: controls.pitch,
-                                })
-                                .await?;
-                            } else if protocol == ProtocolVersion::V1_21_2 {
-                                conn.send_unmapped(&play768::UseItem {
-                                    hand: 0,
-                                    sequence: block_sequence,
-                                    yaw: controls.yaw,
-                                    pitch: controls.pitch,
-                                })
-                                .await?;
-                            } else {
-                                conn.send(&UseItem {
-                                    hand: 0,
-                                    sequence: block_sequence,
-                                })
-                                .await?;
-                            }
+                            send_main_hand_use(
+                                conn,
+                                protocol,
+                                block_sequence,
+                                controls.yaw,
+                                controls.pitch,
+                            )
+                            .await?;
                         }
                     }
                     if release_use_edge {
@@ -3200,6 +3412,15 @@ where
                                 vx = 0.0;
                                 vz = 0.0;
                             }
+                            let swim_vertical = if snapshot.swimming {
+                                let pitch = f64::from(controls.pitch).to_radians();
+                                let forward = f64::from(controls.forward.max(0.0));
+                                vx *= pitch.cos().abs();
+                                vz *= pitch.cos().abs();
+                                -pitch.sin() * speed * forward
+                            } else {
+                                0.0
+                            };
                             let mut vel = snapshot.vel;
                             vel[0] = vx;
                             vel[2] = vz;
@@ -3217,6 +3438,8 @@ where
                                         vel[1] = 3.0;
                                     } else if controls.sneak {
                                         vel[1] = -3.0;
+                                    } else if snapshot.swimming {
+                                        vel[1] += (swim_vertical - vel[1]) * 0.35;
                                     }
                                     (4.0, -3.0)
                                 }
@@ -3236,13 +3459,11 @@ where
                                             .max(-12.0);
                                         (2.5, -12.0)
                                     } else if climbable {
-                                        vel[1] = if controls.sneak {
-                                            0.0
-                                        } else if controls.jump || controls.forward > 0.0 {
-                                            3.0
-                                        } else {
-                                            vel[1].max(-3.0)
-                                        };
+                                        vel[1] = climb_velocity(
+                                            vel[1],
+                                            controls.jump,
+                                            controls.sneak,
+                                        );
                                         (0.0, -3.0)
                                     } else {
                                     if controls.jump && snapshot.on_ground {
@@ -3325,10 +3546,17 @@ where
                         })
                         .await?;
                     } else {
-                        conn.send(&SetPlayerPosition {
+                        {
+                            let mut player = shared.player.lock().unwrap();
+                            player.yaw = controls.yaw;
+                            player.pitch = controls.pitch;
+                        }
+                        conn.send(&SetPlayerPositionRotation {
                             x: snapshot.x,
                             y: snapshot.y,
                             z: snapshot.z,
+                            yaw: controls.yaw,
+                            pitch: controls.pitch,
                             on_ground: snapshot.on_ground,
                         })
                         .await?;
@@ -4030,6 +4258,9 @@ fn handle_entity_metadata(
             }
             1 => {
                 let v = b.read_varint()?;
+                if index == 1 && id == shared.player.lock().unwrap().entity_id {
+                    shared.player.lock().unwrap().air_supply = v.clamp(0, 300);
+                }
                 if index == 16 && is_sizable && v > 0 {
                     set_entity_size(shared, id, v as f32);
                 }
@@ -5646,12 +5877,84 @@ fn block_name_at(shared: &Arc<Shared>, block: [i32; 3]) -> Option<&'static str> 
 /// isn't a real, non-air block. Empty hand (`None`), air (item id 0), zero-count
 /// slots, and non-block items all yield `None`, so right-clicking them places
 /// nothing and plays no sound — regardless of which hotbar slot is selected.
-fn placeable_state(held: Option<SlotItem>) -> Option<u32> {
+fn placeable_state(
+    registries: crab_registry::RegistrySet,
+    held: Option<SlotItem>,
+    clicked_face: [i32; 3],
+    yaw: f32,
+    pitch: f32,
+) -> Option<u32> {
     let it = held.filter(|it| it.count > 0)?;
     let id = u32::try_from(it.item_id).ok().filter(|&id| id != 0)?;
-    let name = crab_registry::item_name(id)?;
-    let state = crab_registry::block_by_name(name)?.default_state;
-    (!crab_registry::is_air(state)).then_some(state)
+    let name = registries.item_name(id)?;
+    let block = registries.block_by_name(name)?;
+    if registries.is_air(block.default_state) {
+        return None;
+    }
+
+    let mut desired = Vec::<(&str, String)>::new();
+    if block
+        .properties
+        .iter()
+        .any(|property| property.name == "axis")
+    {
+        let axis = if clicked_face[0] != 0 {
+            "x"
+        } else if clicked_face[2] != 0 {
+            "z"
+        } else {
+            "y"
+        };
+        desired.push(("axis", axis.to_string()));
+    }
+    if let Some(facing) = block
+        .properties
+        .iter()
+        .find(|property| property.name == "facing")
+    {
+        let supports_vertical = facing.values.contains(&"up") && facing.values.contains(&"down");
+        let value = if supports_vertical && pitch > 55.0 {
+            "up"
+        } else if supports_vertical && pitch < -55.0 {
+            "down"
+        } else {
+            match ((yaw.rem_euclid(360.0) / 90.0).round() as i32).rem_euclid(4) {
+                1 => "east",
+                2 => "south",
+                3 => "west",
+                _ => "north",
+            }
+        };
+        desired.push(("facing", value.to_string()));
+    }
+    if block
+        .properties
+        .iter()
+        .any(|property| property.name == "rotation")
+    {
+        let rotation = (((yaw + 180.0) * 16.0 / 360.0 + 0.5).floor() as i32).rem_euclid(16);
+        desired.push(("rotation", rotation.to_string()));
+    }
+    if desired.is_empty() {
+        return Some(block.default_state);
+    }
+
+    let default_properties = registries.block_state_properties(block.default_state)?;
+    (block.min_state..=block.max_state)
+        .filter(|state| {
+            desired.iter().all(|(property, value)| {
+                registries.block_state_property(*state, property) == Some(value.as_str())
+            })
+        })
+        .min_by_key(|state| {
+            default_properties
+                .iter()
+                .filter(|(property, value)| {
+                    registries.block_state_property(*state, property) != Some(*value)
+                })
+                .count()
+        })
+        .or(Some(block.default_state))
 }
 
 fn is_interactable_block(name: &str) -> bool {
@@ -5696,6 +5999,52 @@ fn is_interactable_block(name: &str) -> bool {
         || bare.ends_with("_bed")
         || bare.ends_with("_cauldron")
         || bare.starts_with("potted_")
+}
+
+pub(crate) fn is_food_item(name: &str) -> bool {
+    matches!(
+        name.strip_prefix("minecraft:").unwrap_or(name),
+        "apple"
+            | "mushroom_stew"
+            | "bread"
+            | "porkchop"
+            | "cooked_porkchop"
+            | "golden_apple"
+            | "enchanted_golden_apple"
+            | "cod"
+            | "salmon"
+            | "tropical_fish"
+            | "pufferfish"
+            | "cooked_cod"
+            | "cooked_salmon"
+            | "cookie"
+            | "melon_slice"
+            | "dried_kelp"
+            | "beef"
+            | "cooked_beef"
+            | "chicken"
+            | "cooked_chicken"
+            | "rotten_flesh"
+            | "spider_eye"
+            | "carrot"
+            | "potato"
+            | "baked_potato"
+            | "poisonous_potato"
+            | "golden_carrot"
+            | "pumpkin_pie"
+            | "rabbit"
+            | "cooked_rabbit"
+            | "rabbit_stew"
+            | "mutton"
+            | "cooked_mutton"
+            | "chorus_fruit"
+            | "beetroot"
+            | "beetroot_soup"
+            | "suspicious_stew"
+            | "sweet_berries"
+            | "glow_berries"
+            | "honey_bottle"
+    )
 }
 
 /// Maximum stack size for an item id (default 64).
@@ -6013,6 +6362,46 @@ fn break_block_local(shared: &Arc<Shared>, block: [i32; 3]) {
     mark_dirty(shared, block[0] >> 4, block[2] >> 4);
 }
 
+async fn send_main_hand_use<S>(
+    conn: &mut Connection<S>,
+    protocol: ProtocolVersion,
+    sequence: i32,
+    yaw: f32,
+    pitch: f32,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    if protocol == ProtocolVersion::V1_21_5 {
+        conn.send_unmapped(&play770::UseItem {
+            hand: 0,
+            sequence,
+            yaw,
+            pitch,
+        })
+        .await?;
+    } else if protocol == ProtocolVersion::V1_21_4 {
+        conn.send_unmapped(&play769::UseItem {
+            hand: 0,
+            sequence,
+            yaw,
+            pitch,
+        })
+        .await?;
+    } else if protocol == ProtocolVersion::V1_21_2 {
+        conn.send_unmapped(&play768::UseItem {
+            hand: 0,
+            sequence,
+            yaw,
+            pitch,
+        })
+        .await?;
+    } else {
+        conn.send(&UseItem { hand: 0, sequence }).await?;
+    }
+    Ok(())
+}
+
 /// Sends a "cancel dig" (status 1) for any in-progress dig and returns `None`.
 async fn cancel_dig<S>(
     conn: &mut Connection<S>,
@@ -6252,20 +6641,46 @@ mod tests {
 
     #[test]
     fn only_real_blocks_are_placeable() {
+        let registries = crab_registry::RegistrySet::global();
+        let place = |held| placeable_state(registries, held, [0, 1, 0], 0.0, 0.0);
         // Empty hand -> nothing (this is the no-op, silent case for any slot).
-        assert_eq!(placeable_state(None), None);
+        assert_eq!(place(None), None);
         // Air (item id 0) -> nothing (was the phantom "stone place" leak).
-        assert_eq!(placeable_state(slot(0, 1)), None);
+        assert_eq!(place(slot(0, 1)), None);
         // A zero-count slot -> nothing.
-        assert_eq!(placeable_state(slot(1, 0)), None);
+        assert_eq!(place(slot(1, 0)), None);
         // A non-block item (diamond sword) -> nothing.
-        assert_eq!(placeable_state(slot(797, 1)), None);
+        assert_eq!(place(slot(797, 1)), None);
         // A real block (stone, item id 1) -> its non-air default state.
-        let state = placeable_state(slot(1, 64)).expect("stone is placeable");
+        let state = place(slot(1, 64)).expect("stone is placeable");
         assert!(!crab_registry::is_air(state));
         assert_eq!(
             crab_registry::block_by_name("stone").unwrap().default_state,
             state
+        );
+
+        let item_id = |name| {
+            registries
+                .items()
+                .iter()
+                .find(|item| item.name == name)
+                .unwrap()
+                .id as i32
+        };
+        let log =
+            placeable_state(registries, slot(item_id("oak_log"), 1), [1, 0, 0], 0.0, 0.0).unwrap();
+        assert_eq!(registries.block_state_property(log, "axis"), Some("x"));
+        let furnace = placeable_state(
+            registries,
+            slot(item_id("furnace"), 1),
+            [0, 1, 0],
+            90.0,
+            0.0,
+        )
+        .unwrap();
+        assert_eq!(
+            registries.block_state_property(furnace, "facing"),
+            Some("east")
         );
     }
 
@@ -6337,7 +6752,13 @@ mod tests {
         assert_eq!(canonical_clientbound_768_id(0x76), ID_COLLECT_ITEM);
         assert_eq!(canonical_clientbound_768_id(0x70), -1); // start configuration
         assert_eq!(serverbound_768_id(State::Play, ClickContainer::ID), 0x10);
-        assert_eq!(serverbound_768_id(State::Play, SetPlayerPosition::ID), 0x1c);
+        assert_eq!(
+            serverbound_768_id(
+                State::Play,
+                crab_protocol::versions::v1_20_1::play::SetPlayerPosition::ID,
+            ),
+            0x1c
+        );
         assert_eq!(serverbound_768_id(State::Play, UseItem::ID), 0x3b);
         assert_eq!(serverbound_768_id(State::Configuration, 0x03), 0x04);
     }
@@ -6484,10 +6905,157 @@ mod tests {
     }
 
     #[test]
+    fn remote_player_equipment_tracks_held_item() {
+        let shared = Arc::new(Shared::new());
+        let mut spawn = Vec::new();
+        spawn.put_varint(12);
+        spawn.put_uuid(uuid::Uuid::nil());
+        spawn.put_f64(1.0);
+        spawn.put_f64(2.0);
+        spawn.put_f64(3.0);
+        spawn.put_u8(0);
+        spawn.put_u8(0);
+        handle_spawn_player(
+            &crab_net::RawPacket {
+                id: ID_SPAWN_PLAYER,
+                body: spawn.into(),
+            },
+            &shared,
+        )
+        .unwrap();
+
+        let sword = crab_registry::items()
+            .iter()
+            .find(|item| item.name == "diamond_sword")
+            .unwrap()
+            .id as i32;
+        let mut equipment = Vec::new();
+        equipment.put_varint(12);
+        equipment.put_u8(0); // main hand, final entry
+        equipment.put_bool(true);
+        equipment.put_varint(sword);
+        equipment.put_i8(1);
+        equipment.put_u8(0); // empty NBT
+        handle_entity_equipment(
+            &crab_net::RawPacket {
+                id: ID_ENTITY_EQUIPMENT,
+                body: equipment.into(),
+            },
+            &shared,
+            ProtocolVersion::V1_20_1,
+        )
+        .unwrap();
+        assert_eq!(
+            shared.entities.lock().unwrap().get(&12).unwrap().equipment[0],
+            Some(sword)
+        );
+    }
+
+    #[test]
     fn jump_velocity_matches_vanilla_tick_units() {
         assert!((jump_velocity(0) - 8.4).abs() < f64::EPSILON);
         assert!((jump_velocity(1) - 10.4).abs() < f64::EPSILON);
         assert!((jump_velocity(3) - 14.4).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn climbables_require_explicit_vertical_input() {
+        assert_eq!(climb_velocity(0.0, false, false), 0.0);
+        assert_eq!(climb_velocity(-8.0, false, false), -3.0);
+        assert_eq!(climb_velocity(0.0, true, false), 3.0);
+        assert_eq!(climb_velocity(-1.0, false, true), 0.0);
+    }
+
+    #[test]
+    fn underwater_air_drains_and_recovers_at_vanilla_rates() {
+        assert_eq!(updated_air_supply(300, true, true), 299);
+        assert_eq!(updated_air_supply(1, true, true), 0);
+        assert_eq!(updated_air_supply(0, true, true), 0);
+        assert_eq!(updated_air_supply(100, false, true), 104);
+        assert_eq!(updated_air_supply(299, false, true), 300);
+        assert_eq!(updated_air_supply(12, true, false), 300);
+    }
+
+    #[test]
+    fn matching_tools_reduce_break_time_for_their_blocks() {
+        let registries = RegistrySet::global();
+        let effects = HashMap::new();
+        let stone = registries.block_by_name("stone").unwrap().default_state;
+        let dirt = registries.block_by_name("dirt").unwrap().default_state;
+        let log = registries.block_by_name("oak_log").unwrap().default_state;
+        let mining_tools = HashMap::from([
+            ("minecraft:stone".to_string(), MiningTool::Pickaxe),
+            ("minecraft:dirt".to_string(), MiningTool::Shovel),
+            ("minecraft:oak_log".to_string(), MiningTool::Axe),
+        ]);
+
+        let bare_stone =
+            break_ticks_with_tool(registries, &mining_tools, stone, None, &effects).unwrap();
+        let pick_stone = break_ticks_with_tool(
+            registries,
+            &mining_tools,
+            stone,
+            Some("diamond_pickaxe"),
+            &effects,
+        )
+        .unwrap();
+        let axe_stone = break_ticks_with_tool(
+            registries,
+            &mining_tools,
+            stone,
+            Some("diamond_axe"),
+            &effects,
+        )
+        .unwrap();
+        assert!(pick_stone < bare_stone);
+        assert_eq!(axe_stone, bare_stone);
+
+        let bare_dirt =
+            break_ticks_with_tool(registries, &mining_tools, dirt, None, &effects).unwrap();
+        let shovel_dirt = break_ticks_with_tool(
+            registries,
+            &mining_tools,
+            dirt,
+            Some("iron_shovel"),
+            &effects,
+        )
+        .unwrap();
+        assert!(shovel_dirt < bare_dirt);
+
+        let bare_log =
+            break_ticks_with_tool(registries, &mining_tools, log, None, &effects).unwrap();
+        let axe_log =
+            break_ticks_with_tool(registries, &mining_tools, log, Some("stone_axe"), &effects)
+                .unwrap();
+        assert!(axe_log < bare_log);
+    }
+
+    #[test]
+    fn mining_rules_are_loaded_from_vanilla_block_tags() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "crabcraft-mining-tags-{}-{nonce}.jar",
+            std::process::id()
+        ));
+        let pickaxe =
+            br#"{"values":["minecraft:stone",{"id":"minecraft:iron_ore","required":false}]}"#;
+        let axe = br#"{"values":["minecraft:oak_log"]}"#;
+        std::fs::write(
+            &path,
+            zip_bytes(&[
+                ("data/minecraft/tags/blocks/mineable/pickaxe.json", pickaxe),
+                ("data/minecraft/tags/blocks/mineable/axe.json", axe),
+            ]),
+        )
+        .unwrap();
+        let rules = load_mining_tools_from_jar(&path);
+        assert_eq!(rules.get("minecraft:stone"), Some(&MiningTool::Pickaxe));
+        assert_eq!(rules.get("minecraft:iron_ore"), Some(&MiningTool::Pickaxe));
+        assert_eq!(rules.get("minecraft:oak_log"), Some(&MiningTool::Axe));
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -7068,6 +7636,22 @@ mod tests {
             ),
             Some(FluidKind::Water)
         );
+        assert_eq!(
+            fluid_kind_at_point(
+                crab_registry::RegistrySet::global(),
+                &world,
+                [8.5, -58.5, 8.5]
+            ),
+            Some(FluidKind::Water)
+        );
+        assert_eq!(
+            fluid_kind_at_point(
+                crab_registry::RegistrySet::global(),
+                &world,
+                [8.5, -57.5, 8.5]
+            ),
+            None
+        );
         let lava = crab_registry::block_by_name("lava").unwrap().default_state;
         world.set_block_state(8, -59, 8, lava);
         assert_eq!(
@@ -7121,6 +7705,9 @@ mod tests {
             assert!(is_interactable_block(name));
         }
         assert!(!is_interactable_block("minecraft:stone"));
+        assert!(is_food_item("minecraft:bread"));
+        assert!(is_food_item("golden_apple"));
+        assert!(!is_food_item("diamond_pickaxe"));
     }
 
     #[test]
