@@ -74,8 +74,11 @@ particle-list insertion; older profiles retain the preceding serializer ID.
 
 The window renderer partitions each chunk's triangles by vertex opacity. Opaque
 chunks and entities write depth first; translucent chunks are then sorted
-back-to-front and depth-tested without writing depth. This prevents hash-map
-iteration or camera motion from changing overlapping water/glass results. The
+back-to-front and depth-tested without writing depth. The translucent pipeline
+allows equal-depth interfaces so a water surface can blend over the solid face
+at its boundary, while fluid atlas fallback entries never participate in solid
+face occlusion. This prevents hash-map iteration or camera motion from changing
+overlapping water/glass results. The
 rest of the frame is HUD backgrounds, depth-cleared 3D block/item overlays and
 the inventory player viewport, then HUD item/text foregrounds.
 The preview reuses the entity atlas and humanoid mesh but owns a separate camera

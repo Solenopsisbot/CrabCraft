@@ -431,7 +431,9 @@ Microsoft account. Using the official server jar:
 - [x] Protocol 770 / 1.21.5 Spring to Life registries, shifted packet maps,
   chunk heightmap arrays, chat checksum, reorganized components, and official-server
   core/component live validation
-- [ ] Protocol 771+ (newer than 1.21.5) registries and packet schemas
+- [x] Protocol 771 / 1.21.6 registries, shifted packet maps, fixed-length chunk
+  palettes, component payloads, and official-server core validation
+- [ ] Protocol 772+ (newer than 1.21.6) registries and packet schemas
 - [ ] (Far future, maybe) Forge mod support — see the note below
 
 ### On Forge mods

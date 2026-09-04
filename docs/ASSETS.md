@@ -48,6 +48,8 @@ Water, bubble columns, and lava are vanilla special renderers and therefore do
 not have ordinary block model JSON. The atlas loader explicitly maps their
 `*_still` textures to top/bottom faces and `*_flow` textures to side faces;
 water retains biome tint and the renderer's translucent opacity.
+Fluid atlas entries are explicitly excluded from opaque face-culling decisions,
+so a solid block face remains available to render behind a water volume.
 The same client jar supplies the `mineable/*` block tags used for tool
 effectiveness and the `icons.png` air-bubble sprites. Underwater visibility is
 then bounded by renderer distance fog rather than treating water as an
