@@ -42,7 +42,8 @@ impl Packet for ClientCommand {
 }
 
 impl Packet for ChatCommand {
-    const ID: i32 = 0x04;
+    // 1.21.8 inserts Change Game Mode before the legacy command slot.
+    const ID: i32 = 0x06;
     const STATE: State = State::Play;
     const BOUND: Bound = Bound::Serverbound;
 
