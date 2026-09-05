@@ -1114,6 +1114,195 @@ pub fn box_mesh(min: [f32; 3], max: [f32; 3], uv: [f32; 4], tint: [f32; 3]) -> V
     verts
 }
 
+fn oriented_box_at(
+    center: [f32; 3],
+    local_center: [f32; 3],
+    size: [f32; 3],
+    yaw_degrees: f32,
+    uv: [f32; 4],
+    tint: [f32; 3],
+) -> Vec<Vertex> {
+    let mut vertices = box_mesh(
+        [
+            local_center[0] - size[0] * 0.5,
+            local_center[1] - size[1] * 0.5,
+            local_center[2] - size[2] * 0.5,
+        ],
+        [
+            local_center[0] + size[0] * 0.5,
+            local_center[1] + size[1] * 0.5,
+            local_center[2] + size[2] * 0.5,
+        ],
+        uv,
+        tint,
+    );
+    let (sin_yaw, cos_yaw) = yaw_degrees.to_radians().sin_cos();
+    for vertex in &mut vertices {
+        let [x, y, z] = vertex.position;
+        vertex.position = [
+            center[0] + x * cos_yaw + z * sin_yaw,
+            center[1] + y,
+            center[2] - x * sin_yaw + z * cos_yaw,
+        ];
+        let [nx, ny, nz] = vertex.normal;
+        vertex.normal = [
+            nx * cos_yaw + nz * sin_yaw,
+            ny,
+            -nx * sin_yaw + nz * cos_yaw,
+        ];
+    }
+    vertices
+}
+
+/// Builds the four-sided wood frame used by item-frame and glow-item-frame
+/// entities. The contained item is rendered separately from the item atlas.
+#[must_use]
+pub fn item_frame_mesh(
+    center: [f32; 3],
+    yaw_degrees: f32,
+    glowing: bool,
+    white_uv: [f32; 4],
+) -> Vec<Vertex> {
+    // The vanilla frame model is a full block wide/high (the renderer moves
+    // it 15/32 of a block toward the attached face). Keep the border at the
+    // same two-pixel proportion as the client model.
+    let width = 1.0;
+    let height = 1.0;
+    let thickness = 0.125;
+    let depth = 0.125;
+    let tint = if glowing {
+        [0.95, 0.95, 0.55]
+    } else {
+        [0.62, 0.39, 0.18]
+    };
+    let mut vertices = Vec::with_capacity(5 * 36);
+    for (offset, size) in [
+        (
+            [0.0, (height - thickness) * 0.5, 0.0],
+            [width, thickness, depth],
+        ),
+        (
+            [0.0, -(height - thickness) * 0.5, 0.0],
+            [width, thickness, depth],
+        ),
+        (
+            [-(width - thickness) * 0.5, 0.0, 0.0],
+            [thickness, height, depth],
+        ),
+        (
+            [(width - thickness) * 0.5, 0.0, 0.0],
+            [thickness, height, depth],
+        ),
+        (
+            [0.0, 0.0, depth * -0.5],
+            [
+                width - thickness * 2.0,
+                height - thickness * 2.0,
+                depth * 0.4,
+            ],
+        ),
+    ] {
+        vertices.extend(oriented_box_at(
+            center,
+            offset,
+            size,
+            yaw_degrees,
+            white_uv,
+            tint,
+        ));
+    }
+    vertices
+}
+
+/// Builds a thin, correctly-sized painting slab. The selected painting art is
+/// supplied as the atlas rectangle; both faces are emitted so front/back
+/// camera approaches remain visible.
+#[must_use]
+pub fn painting_mesh(
+    center: [f32; 3],
+    width: f32,
+    height: f32,
+    yaw_degrees: f32,
+    uv: [f32; 4],
+) -> Vec<Vertex> {
+    oriented_box_at(
+        center,
+        [0.0, 0.0, 0.0],
+        [width.max(0.0625), height.max(0.0625), 0.0625],
+        yaw_degrees,
+        uv,
+        [1.0, 1.0, 1.0],
+    )
+}
+
+/// Builds the horizontal effect disc used by area-effect-cloud entities.
+#[must_use]
+pub fn area_effect_cloud_mesh(
+    center: [f32; 3],
+    radius: f32,
+    color: [f32; 3],
+    white_uv: [f32; 4],
+) -> Vec<Vertex> {
+    let radius = radius.max(0.01);
+    let segments = 16usize;
+    let mut vertices = Vec::with_capacity(segments * 6);
+    let [u0, v0, u1, v1] = white_uv;
+    for segment in 0..segments {
+        let a0 = segment as f32 / segments as f32 * std::f32::consts::TAU;
+        let a1 = (segment + 1) as f32 / segments as f32 * std::f32::consts::TAU;
+        let p0 = [
+            center[0] + a0.cos() * radius,
+            center[1] + 0.01,
+            center[2] + a0.sin() * radius,
+        ];
+        let p1 = [
+            center[0] + a1.cos() * radius,
+            center[1] + 0.01,
+            center[2] + a1.sin() * radius,
+        ];
+        for (position, uv) in [
+            (
+                [center[0], center[1] + 0.01, center[2]],
+                [u0 + (u1 - u0) * 0.5, v0 + (v1 - v0) * 0.5],
+            ),
+            (p0, [u0, v0]),
+            (p1, [u1, v0]),
+        ] {
+            vertices.push(Vertex {
+                position,
+                normal: [0.0, 1.0, 0.0],
+                uv,
+                tint: color,
+                opacity: 0.45,
+            });
+        }
+    }
+    vertices
+}
+
+/// Builds a deterministic vanilla-style lightning zig-zag from the entity's
+/// position. Vanilla randomizes each bolt client-side; the bounded pattern is
+/// stable for replay/render tests while preserving its characteristic shape.
+#[must_use]
+pub fn lightning_bolt_mesh(center: [f32; 3], age: f32, white_uv: [f32; 4]) -> Vec<Vertex> {
+    let mut vertices = Vec::new();
+    let phase = age * 0.7;
+    for segment in 0..6 {
+        let t = segment as f32 / 6.0;
+        let x = (phase + segment as f32 * 1.7).sin() * 0.45;
+        let z = (phase * 0.8 + segment as f32 * 2.1).cos() * 0.45;
+        vertices.extend(oriented_box_at(
+            [center[0], center[1], center[2]],
+            [x, (1.0 - t) * 3.0, z],
+            [0.08, 0.62, 0.08],
+            0.0,
+            white_uv,
+            [0.55, 0.75, 1.0],
+        ));
+    }
+    vertices
+}
+
 /// Builds a miniature six-face block model for dropped block items.
 #[must_use]
 pub fn block_item_mesh(
@@ -1421,7 +1610,7 @@ fn ambient_bone_rotation(name: &str, phase: f32, amount: f32) -> [f32; 3] {
     }
 }
 
-/// Builds a standing 3D mesh for a Bedrock entity geometry. This compatibility
+/// Builds a standing 3D mesh for an entity box/bone geometry. This compatibility
 /// entry point is used by examples and previews; live entities use
 /// [`entity_mesh_with_pose`] with their server metadata pose.
 ///
@@ -1590,8 +1779,8 @@ fn entity_mesh_with_look_internal(
             -bone.rotation[2] + pose_rotation[2] + ambient_rotation[2],
         ];
         let whole_rotation = whole_pose_rotation(pose);
-        // Bedrock model space -> world: rotate about the bone pivot, then /16,
-        // X negated (Bedrock/Java mirror), spin by the entity yaw about the
+        // Entity model space -> world: rotate about the bone pivot, then /16,
+        // X negated (Java's model mirror), spin by the entity yaw about the
         // vertical axis, then translate to the feet offset.
         let place = |px: f32, py: f32, pz: f32| {
             let r = rotate_euler([px, py, pz], bone.pivot, euler);
@@ -1913,6 +2102,29 @@ mod tests {
         let vertices = block_item_mesh(&atlas, "minecraft:stone", [0.0, 0.0, 0.0], 0.36, 45.0);
         assert_eq!(vertices.len(), 36);
         assert!(vertices.iter().all(|vertex| vertex.opacity == 1.0));
+    }
+
+    #[test]
+    fn special_entity_meshes_have_bounded_geometry() {
+        let uv = [0.0, 0.0, 1.0, 1.0];
+        let cases = [
+            item_frame_mesh([0.0; 3], 45.0, false, uv),
+            painting_mesh([0.0; 3], 2.0, 1.0, 90.0, uv),
+            area_effect_cloud_mesh([0.0; 3], 3.0, [0.2, 0.4, 0.8], uv),
+            lightning_bolt_mesh([0.0; 3], 0.5, uv),
+        ];
+        assert_eq!(cases[0].len(), 180); // four bars + backing panel
+        assert_eq!(cases[1].len(), 36);
+        assert_eq!(cases[2].len(), 16 * 3);
+        assert_eq!(cases[3].len(), 6 * 36);
+        for mesh in cases {
+            assert!(mesh.iter().all(|vertex| {
+                vertex.position.iter().all(|value| value.is_finite())
+                    && vertex.normal.iter().all(|value| value.is_finite())
+                    && vertex.uv.iter().all(|value| value.is_finite())
+                    && vertex.opacity.is_finite()
+            }));
+        }
     }
 
     #[test]

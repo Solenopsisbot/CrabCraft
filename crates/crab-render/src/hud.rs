@@ -245,7 +245,29 @@ pub fn hud_geometry(
     gui: &GuiAtlas,
     health: f32,
     food: i32,
-    air_supply: i32,
+    _air_supply: i32,
+    xp_bar: f32,
+    xp_level: i32,
+    selected: usize,
+    hotbar: &[Option<[f32; 4]>],
+    aspect: f32,
+) -> (Vec<ColorVertex>, Vec<TexVertex>, Vec<TexVertex>) {
+    hud_geometry_with_air(
+        gui, health, food, 300, true, xp_bar, xp_level, selected, hotbar, aspect,
+    )
+}
+
+/// Variant of [`hud_geometry`] with the local air supply and game-mode status.
+/// Creative and spectator HUDs retain the hotbar/XP/crosshair, but suppress
+/// survival-only hearts, hunger, and oxygen bubbles.
+#[must_use]
+#[allow(clippy::too_many_arguments)]
+pub fn hud_geometry_with_air(
+    gui: &GuiAtlas,
+    health: f32,
+    food: i32,
+    air: i32,
+    show_survival_bars: bool,
     xp_bar: f32,
     xp_level: i32,
     selected: usize,
@@ -306,59 +328,59 @@ pub fn hud_geometry(
             spr(&mut g, 0.0, 4.0, 182.0 * frac, 5.0, cuv);
         }
     }
-    if let (Some(hbg), Some(hfull), Some(hhalf)) = (
-        gui.sprite("heart_bg"),
-        gui.sprite("heart_full"),
-        gui.sprite("heart_half"),
-    ) {
-        for i in 0..10 {
-            let x = i as f32 * 8.0;
-            spr(&mut g, x, 12.0, 9.0, 9.0, hbg);
-            let level = health - i as f32 * 2.0;
-            if level >= 2.0 {
-                spr(&mut g, x, 12.0, 9.0, 9.0, hfull);
-            } else if level >= 1.0 {
-                spr(&mut g, x, 12.0, 9.0, 9.0, hhalf);
+    if show_survival_bars {
+        if let (Some(hbg), Some(hfull), Some(hhalf)) = (
+            gui.sprite("heart_bg"),
+            gui.sprite("heart_full"),
+            gui.sprite("heart_half"),
+        ) {
+            for i in 0..10 {
+                let x = i as f32 * 8.0;
+                spr(&mut g, x, 12.0, 9.0, 9.0, hbg);
+                let level = health - i as f32 * 2.0;
+                if level >= 2.0 {
+                    spr(&mut g, x, 12.0, 9.0, 9.0, hfull);
+                } else if level >= 1.0 {
+                    spr(&mut g, x, 12.0, 9.0, 9.0, hhalf);
+                }
             }
+        } else {
+            // No jar icons: fall back to a coloured health bar.
+            let (by0, by1) = (bar.3 + 0.012, bar.3 + 0.042);
+            let hp = (health / 20.0).clamp(0.0, 1.0);
+            push_color_quad(&mut c, -0.5, by0, -0.5 + 0.48 * hp, by1, [0.85, 0.15, 0.15]);
         }
-    } else {
-        // No jar icons: fall back to a coloured health bar.
-        let (by0, by1) = (bar.3 + 0.012, bar.3 + 0.042);
-        let hp = (health / 20.0).clamp(0.0, 1.0);
-        push_color_quad(&mut c, -0.5, by0, -0.5 + 0.48 * hp, by1, [0.85, 0.15, 0.15]);
-    }
-    if let (Some(fbg), Some(ffull), Some(fhalf)) = (
-        gui.sprite("food_bg"),
-        gui.sprite("food_full"),
-        gui.sprite("food_half"),
-    ) {
-        for i in 0..10 {
-            let x = 169.0 - i as f32 * 8.0;
-            spr(&mut g, x, 12.0, 9.0, 9.0, fbg);
-            let level = food as f32 - i as f32 * 2.0;
-            if level >= 2.0 {
-                spr(&mut g, x, 12.0, 9.0, 9.0, ffull);
-            } else if level >= 1.0 {
-                spr(&mut g, x, 12.0, 9.0, 9.0, fhalf);
+        if let (Some(fbg), Some(ffull), Some(fhalf)) = (
+            gui.sprite("food_bg"),
+            gui.sprite("food_full"),
+            gui.sprite("food_half"),
+        ) {
+            for i in 0..10 {
+                let x = 169.0 - i as f32 * 8.0;
+                spr(&mut g, x, 12.0, 9.0, 9.0, fbg);
+                let level = food as f32 - i as f32 * 2.0;
+                if level >= 2.0 {
+                    spr(&mut g, x, 12.0, 9.0, 9.0, ffull);
+                } else if level >= 1.0 {
+                    spr(&mut g, x, 12.0, 9.0, 9.0, fhalf);
+                }
             }
+        } else {
+            let (by0, by1) = (bar.3 + 0.012, bar.3 + 0.042);
+            let fd = (food as f32 / 20.0).clamp(0.0, 1.0);
+            push_color_quad(&mut c, 0.5 - 0.48 * fd, by0, 0.5, by1, [0.55, 0.40, 0.15]);
         }
-    } else {
-        let (by0, by1) = (bar.3 + 0.012, bar.3 + 0.042);
-        let fd = (food as f32 / 20.0).clamp(0.0, 1.0);
-        push_color_quad(&mut c, 0.5 - 0.48 * fd, by0, 0.5, by1, [0.55, 0.40, 0.15]);
-    }
-
-    if air_supply < 300 {
-        if let (Some(full), Some(burst)) = (gui.sprite("air_full"), gui.sprite("air_burst")) {
-            let air = air_supply.clamp(0, 300);
-            let full_count = air * 10 / 300;
-            for index in 0..full_count {
-                let x = 169.0 - index as f32 * 8.0;
-                spr(&mut g, x, 23.0, 9.0, 9.0, full);
-            }
-            if air > 0 && air % 30 != 0 && full_count < 10 {
-                let x = 169.0 - full_count as f32 * 8.0;
-                spr(&mut g, x, 23.0, 9.0, 9.0, burst);
+        if air < 300 {
+            if let (Some(full), Some(pop)) = (gui.sprite("bubble_full"), gui.sprite("bubble_pop")) {
+                for i in 0..10 {
+                    let x = 169.0 - i as f32 * 8.0;
+                    let level = air - i * 30;
+                    if level >= 30 {
+                        spr(&mut g, x, 22.0, 9.0, 9.0, full);
+                    } else if level > 0 {
+                        spr(&mut g, x, 22.0, 9.0, 9.0, pop);
+                    }
+                }
             }
         }
     }
@@ -1143,6 +1165,17 @@ mod tests {
         let (_color, _g, item) = hud_geometry(&gui, 20.0, 20, 300, 0.0, 0, 2, &hotbar, 1.0);
         // 2 filled slots -> 2 textured quads -> 12 vertices.
         assert_eq!(item.len(), 12);
+    }
+
+    #[test]
+    fn creative_hud_omits_survival_status_bars() {
+        let gui = crab_assets::GuiAtlas::empty();
+        let hotbar = [None; 9];
+        let (survival, _, _) =
+            hud_geometry_with_air(&gui, 20.0, 20, 120, true, 0.0, 0, 0, &hotbar, 1.0);
+        let (creative, _, _) =
+            hud_geometry_with_air(&gui, 20.0, 20, 120, false, 0.0, 0, 0, &hotbar, 1.0);
+        assert!(survival.len() > creative.len());
     }
 
     #[test]

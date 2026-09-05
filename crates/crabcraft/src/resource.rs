@@ -26,19 +26,15 @@ pub struct ResourceManager {
 }
 
 impl ResourceManager {
-    pub fn new(registries: RegistrySet, entity_models: Option<PathBuf>) -> Self {
-        let entity_models = entity_models.map(normalize_models_dir);
+    pub fn new(registries: RegistrySet) -> Self {
         let (request_tx, request_rx) = mpsc::sync_channel::<Request>(1);
         let (result_tx, result_rx) = mpsc::sync_channel(1);
         std::thread::Builder::new()
             .name("crab-resource-builder".to_owned())
             .spawn(move || {
                 while let Ok(request) = request_rx.recv() {
-                    let resources = crab_assets::load_resource_set(
-                        &request.archive,
-                        registries,
-                        entity_models.as_deref(),
-                    );
+                    let resources =
+                        crab_assets::load_resource_set(&request.archive, registries, None);
                     if result_tx
                         .send(PreparedResources {
                             generation: request.generation,
@@ -80,20 +76,6 @@ impl ResourceManager {
     }
 }
 
-fn normalize_models_dir(mut models: PathBuf) -> PathBuf {
-    if models.join("cow.geo.json").exists() {
-        return models;
-    }
-    for subdirectory in ["resource_pack/models/entity", "models/entity", "entity"] {
-        let candidate = models.join(subdirectory);
-        if candidate.join("cow.geo.json").exists() {
-            models = candidate;
-            break;
-        }
-    }
-    models
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -102,7 +84,7 @@ mod tests {
 
     #[test]
     fn failed_preparation_is_reported_without_replacing_resources() {
-        let mut manager = ResourceManager::new(RegistrySet::for_protocol(763), None);
+        let mut manager = ResourceManager::new(RegistrySet::for_protocol(763));
         let generation = manager
             .request(PathBuf::from("/crabcraft-test/missing-resource-pack.zip"))
             .unwrap();
