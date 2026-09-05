@@ -22,6 +22,7 @@ mod blocks_1_21;
 mod blocks_1_21_3;
 mod blocks_1_21_4;
 mod blocks_1_21_5;
+mod blocks_1_21_6;
 mod collision_generated;
 mod entities_1_20_1;
 mod entities_1_20_3;
@@ -29,6 +30,7 @@ mod entities_1_20_5;
 mod entities_1_21_3;
 mod entities_1_21_4;
 mod entities_1_21_5;
+mod entities_1_21_6;
 mod items_1_20_1;
 mod items_1_20_3;
 mod items_1_20_5;
@@ -36,6 +38,7 @@ mod items_1_21;
 mod items_1_21_3;
 mod items_1_21_4;
 mod items_1_21_5;
+mod items_1_21_6;
 
 pub use blocks_1_20_1::BLOCKS_1_20_1;
 pub use blocks_1_20_2::BLOCKS_1_20_2;
@@ -45,12 +48,14 @@ pub use blocks_1_21::BLOCKS_1_21;
 pub use blocks_1_21_3::BLOCKS_1_21_3;
 pub use blocks_1_21_4::BLOCKS_1_21_4;
 pub use blocks_1_21_5::BLOCKS_1_21_5;
+pub use blocks_1_21_6::BLOCKS_1_21_6;
 pub use entities_1_20_1::ENTITIES_1_20_1;
 pub use entities_1_20_3::ENTITIES_1_20_3;
 pub use entities_1_20_5::ENTITIES_1_20_5;
 pub use entities_1_21_3::ENTITIES_1_21_3;
 pub use entities_1_21_4::ENTITIES_1_21_4;
 pub use entities_1_21_5::ENTITIES_1_21_5;
+pub use entities_1_21_6::ENTITIES_1_21_6;
 pub use items_1_20_1::ITEMS_1_20_1;
 pub use items_1_20_3::ITEMS_1_20_3;
 pub use items_1_20_5::ITEMS_1_20_5;
@@ -58,6 +63,7 @@ pub use items_1_21::ITEMS_1_21;
 pub use items_1_21_3::ITEMS_1_21_3;
 pub use items_1_21_4::ITEMS_1_21_4;
 pub use items_1_21_5::ITEMS_1_21_5;
+pub use items_1_21_6::ITEMS_1_21_6;
 
 static REGISTRY_PROFILE: AtomicU8 = AtomicU8::new(0);
 
@@ -86,6 +92,7 @@ impl RegistrySet {
                 768 => 5,
                 769 => 6,
                 770 => 7,
+                771 => 8,
                 _ => 0,
             },
         }
@@ -111,6 +118,7 @@ impl RegistrySet {
             5 => BLOCKS_1_21_3,
             6 => BLOCKS_1_21_4,
             7 => BLOCKS_1_21_5,
+            8 => BLOCKS_1_21_6,
             _ => BLOCKS_1_20_1,
         }
     }
@@ -125,6 +133,7 @@ impl RegistrySet {
             5 => ITEMS_1_21_3,
             6 => ITEMS_1_21_4,
             7 => ITEMS_1_21_5,
+            8 => ITEMS_1_21_6,
             _ => ITEMS_1_20_1,
         }
     }
@@ -138,6 +147,7 @@ impl RegistrySet {
             5 => ENTITIES_1_21_3,
             6 => ENTITIES_1_21_4,
             7 => ENTITIES_1_21_5,
+            8 => ENTITIES_1_21_6,
             _ => ENTITIES_1_20_1,
         }
     }
@@ -326,6 +336,7 @@ fn collision_state_shapes(profile: u8) -> &'static [u16] {
         5 => COLLISION_STATES_1_21_3,
         6 => COLLISION_STATES_1_21_4,
         7 => COLLISION_STATES_1_21_5,
+        8 => COLLISION_STATES_1_21_6,
         _ => COLLISION_STATES_1_20_1,
     }
 }
@@ -877,5 +888,30 @@ mod tests {
         assert!(ENTITIES_1_21_5
             .iter()
             .any(|entity| entity.name == "lingering_potion"));
+
+        assert_eq!(
+            ITEMS_1_21_6
+                .iter()
+                .find(|item| item.name == "white_harness")
+                .unwrap()
+                .id,
+            802
+        );
+        assert_eq!(
+            BLOCKS_1_21_6
+                .iter()
+                .find(|block| block.name == "minecraft:dried_ghast")
+                .unwrap()
+                .default_state,
+            13_827
+        );
+        assert_eq!(
+            ENTITIES_1_21_6
+                .iter()
+                .find(|entity| entity.name == "happy_ghast")
+                .unwrap()
+                .id,
+            56
+        );
     }
 }

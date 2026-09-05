@@ -72,10 +72,17 @@ yaw, and Pose metadata are combined when CPU mesh vertices are rebuilt. Protocol
 766+ uses the shifted Pose metadata serializer introduced with the 1.20.5
 particle-list insertion; older profiles retain the preceding serializer ID.
 
-The window renderer partitions each chunk's triangles by vertex opacity. Opaque
-chunks and entities write depth first; translucent chunks are then sorted
-back-to-front and depth-tested without writing depth. This prevents hash-map
-iteration or camera motion from changing overlapping water/glass results. The
+The window renderer partitions each chunk's triangles by vertex opacity. Atlas
+tiles with alpha (including cutout plants and leaves) are marked while the
+resource pack is loaded, so model faces use the same stable translucent path as
+water and glass instead of writing conflicting depth. Opaque chunks and
+entities write depth first; translucent chunks are then sorted back-to-front
+and depth-tested without writing depth. The translucent pipeline allows
+equal-depth interfaces so a water surface can blend over the solid face at its
+boundary, while fluid atlas fallback entries never participate in solid face
+occlusion. Transparent full cubes likewise do not hide opaque neighbour faces.
+This prevents hash-map iteration or camera motion from changing overlapping
+water/glass results. The
 rest of the frame is HUD backgrounds, depth-cleared 3D block/item overlays and
 the inventory player viewport, then HUD item/text foregrounds.
 The preview reuses the entity atlas and humanoid mesh but owns a separate camera
@@ -97,13 +104,30 @@ Fluid and climbable detection resolve the active session's generated block
 registry, including the explicit `waterlogged` state property. Movement intent
 still crosses into the network thread through `Controls`; the window owns the
 double-tap-W timing latch, while the simulation owns sprint eligibility and
-vine/ladder vertical velocity.
+vine/ladder vertical velocity. Climbables limit falling while touched, but
+upward movement requires explicit jump input rather than forward movement;
+releasing jump immediately stops the upward velocity instead of carrying it to
+the top of the vine.
+Rising collision is evaluated before gravity,
+matching vanilla's tick order so the initial 0.42-block jump impulse is not
+shortened. Sprint-swimming projects forward velocity through camera pitch.
+
+The network simulation tracks the local 300-tick air supply for immediate HUD
+feedback, accepts authoritative air metadata when supplied, and leaves drowning
+damage to server health packets. The window tests the final rendered camera
+point—not the wider player collision box—for submersion and enables blue
+distance fog; this prevents unloaded or distant geometry from remaining fully
+visible through a water volume. Pose eye-height transitions are smoothed so
+swimming at the surface cannot alternate the fog state as the pose changes.
 
 Camera perspective is also window-local. F5 cycles first person and two
 third-person orbit directions; third-person views append the local humanoid to
 the model vertex stream using the same pose/walk/swing transforms as remote
 players while suppressing first-person hand quads. Its body and head yaw both
 consume the live camera yaw, so rotating the view also rotates the local model.
+Position updates retain yaw and pitch even while the local chunk is not yet
+physics-ready, so the server and other clients also observe camera rotation
+during chunk-load transitions.
 The camera arm is ray-tested against the world and shortened before projection,
 so both third-person directions stay on the player side of nearby solid blocks.
 
@@ -119,6 +143,19 @@ uses it for tooltip selection while the network layer owns the version-specific
 selection packet. Local click prediction mirrors the player-owned tail of an
 open container back into the persistent inventory snapshot immediately, so a
 crafted result updates the visible hotbar before the server confirmation.
+
+Mining effectiveness is not inferred from block names. At session creation the
+client reads `data/minecraft/tags/blocks/mineable/{pickaxe,axe,shovel,hoe}.json`
+from the selected user-provided client jar. Those version-matched block tags,
+the held tool material speed, and active mining effects determine the predicted
+break duration. If the tags are unavailable, acceleration is disabled and a
+warning is logged instead of guessing.
+
+Combat packets contain the target and attack action, not a client-authored
+damage value. The authoritative server combines the selected hotbar item with
+attack cooldown, attributes, enchantments, and effects. Food use similarly
+starts a server-owned use timer; health, hunger, and inventory changes arrive
+through normal authoritative packets.
 
 Dropped-item rendering keeps the server entity position authoritative while a
 short, bounded ballistic lookahead uses its decoded velocity and vanilla item

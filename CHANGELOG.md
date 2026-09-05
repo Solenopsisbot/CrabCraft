@@ -34,6 +34,9 @@ remains the detailed source of truth.
   shifted game-test/play packet maps, typed chunk heightmap arrays, the chat
   checksum trailer, all 96 reorganized item components, and official-server
   core plus component-rich inventory validation.
+- Protocol 771 for Java Edition 1.21.6, including generated registries, the
+  fixed-length paletted chunk-container decoder, the shifted Change Game Mode
+  packet, and an official-server core-path smoke validation.
 - Protocol-aware entity metadata components and scoreboard teams, including
   team prefixes/suffixes in sidebar and Tab-list names.
 - UUID-addressed server resource-pack stacks that can remove and rebuild any
@@ -52,11 +55,17 @@ remains the detailed source of truth.
 - Registry-complete entity geometry/texture resolution, built-in textured
   boats and rafts, item/block-shaped entity rendering, and ambient wing, fin,
   tail, and paddle animation.
+- Vanilla-derived mining-tool tags from the selected client jar, including
+  material speeds and status-effect modifiers for predicted break timing.
 
 ### Changed
 
 - Expanded collision shapes, blockstate rendering, entity animation, audio,
   movement, HUD, inventory, and workstation behavior toward vanilla parity.
+- Vanilla blockstate rotations now use the model JSON axis convention, so
+  multipart plants and directional models face the requested wall/top/side;
+  waterlogged geometry gets its translucent fluid layer and fluid faces no
+  longer incorrectly occlude solid blocks.
 - Replaced block-family state guesses in the primary rendering path with
   generated property schemas for every supported registry profile.
 - Creative flight uses vanilla-style double-Space toggling; `F` swaps hands.
@@ -65,8 +74,8 @@ remains the detailed source of truth.
 - The pause menu now includes an options screen with live FOV, mouse
   sensitivity, and fullscreen controls.
 - F5 now cycles first-person, rear third-person, and front third-person cameras;
-  third-person views render the local animated/posed player model and shorten
-  the camera arm around walls to prevent clipping.
+  third-person views render the local animated/posed player model with camera
+  yaw and pitch, and shorten the camera arm around walls to prevent clipping.
 - Entity asset resolution now covers Java family texture directories, shared
   projectile and minecart geometry, and Bedrock's plain `.json` model files,
   substantially reducing generic-box fallbacks with the documented asset setup.
@@ -87,3 +96,10 @@ remains the detailed source of truth.
 - Protocol 768/769 held-item use now includes the required camera rotation, and
   modern component-era particle packets decode their particle ID after the fixed
   header instead of using the legacy prefix order.
+- Jump collision now follows vanilla rising-before-gravity ordering; swimming
+  projects movement through camera pitch, climbables require explicit vertical
+  input, and local underwater air supply is tracked for the HUD.
+- Underwater presentation now uses camera-point detection, smoothed pose
+  transitions, and distance fog. Atlas UVs address outer texel centers to avoid
+  subpixel texture bleed, and directional block placement plus attached 3D
+  held-item geometry follow the active registry.

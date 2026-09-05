@@ -22,6 +22,13 @@ const MAX_COMPONENTS: i32 = 256;
 /// variant components, and changed several existing payloads. Keeping this
 /// decoder separate prevents those layouts from being guessed from 1.21.4.
 pub fn read_component_slot<B: Buf>(src: &mut B) -> Result<ComponentSlot, ProtoError> {
+    read_component_slot_version(src, false)
+}
+
+pub(crate) fn read_component_slot_version<B: Buf>(
+    src: &mut B,
+    protocol_771: bool,
+) -> Result<ComponentSlot, ProtoError> {
     let count = src.read_varint()?;
     if count == 0 {
         return Ok(ComponentSlot {
@@ -48,7 +55,7 @@ pub fn read_component_slot<B: Buf>(src: &mut B) -> Result<ComponentSlot, ProtoEr
     let mut values = HashMap::new();
     for _ in 0..added {
         let kind = src.read_varint()?;
-        skip_component(src, kind, &mut values)?;
+        skip_component(src, kind, &mut values, protocol_771)?;
     }
     for _ in 0..removed {
         let kind = src.read_varint()?;
@@ -76,6 +83,7 @@ fn skip_component<B: Buf>(
     src: &mut B,
     kind: i32,
     metadata: &mut HashMap<String, Nbt>,
+    protocol_771: bool,
 ) -> Result<(), ProtoError> {
     match kind {
         0 => {
@@ -126,6 +134,17 @@ fn skip_component<B: Buf>(
                 let _ = src.read_f64()?;
                 let _ = src.read_varint()?;
                 let _ = src.read_varint()?;
+                if protocol_771 {
+                    let display = src.read_varint()?;
+                    if display == 2 {
+                        let _ = nbt::read_anonymous_nbt(src)?;
+                    } else if !(0..=1).contains(&display) {
+                        return Err(ProtoError::InvalidEnum {
+                            type_name: "protocol 771 attribute display",
+                            value: i64::from(display),
+                        });
+                    }
+                }
             }
         }
         14 => {
@@ -172,7 +191,7 @@ fn skip_component<B: Buf>(
             }
         }
         22 => {
-            let _ = read_component_slot(src)?;
+            let _ = read_component_slot_version(src, protocol_771)?;
         }
         23 => {
             let _ = src.read_f32()?;
@@ -208,6 +227,10 @@ fn skip_component<B: Buf>(
             let _ = src.read_bool()?;
             let _ = src.read_bool()?;
             let _ = src.read_bool()?;
+            if protocol_771 {
+                let _ = src.read_bool()?;
+                skip_sound_holder(src)?;
+            }
         }
         29 => skip_holder_set(src)?,
         32 => {
@@ -231,13 +254,13 @@ fn skip_component<B: Buf>(
         }
         40 | 66 => {
             for _ in 0..bounded_count(src, "protocol 770 nested item count")? {
-                let _ = read_component_slot(src)?;
+                let _ = read_component_slot_version(src, protocol_771)?;
             }
         }
         41 => {
             let mut contents = Vec::new();
             for _ in 0..bounded_count(src, "protocol 770 bundle item count")? {
-                let nested = read_component_slot(src)?;
+                let nested = read_component_slot_version(src, protocol_771)?;
                 if let Some(item) = nested.item {
                     let mut entry = HashMap::new();
                     entry.insert("id".to_string(), Nbt::Int(item.item_id));

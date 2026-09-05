@@ -16,11 +16,12 @@ pub enum ProtocolVersion {
     V1_21_2,
     V1_21_4,
     V1_21_5,
+    V1_21_6,
 }
 
 impl ProtocolVersion {
     /// All supported profiles in ascending wire-version order.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::V1_20_1,
         Self::V1_20_2,
         Self::V1_20_3,
@@ -29,6 +30,7 @@ impl ProtocolVersion {
         Self::V1_21_2,
         Self::V1_21_4,
         Self::V1_21_5,
+        Self::V1_21_6,
     ];
 
     /// Numeric protocol identifier carried in the handshake.
@@ -43,6 +45,7 @@ impl ProtocolVersion {
             Self::V1_21_2 => 768,
             Self::V1_21_4 => 769,
             Self::V1_21_5 => 770,
+            Self::V1_21_6 => 771,
         }
     }
 
@@ -84,6 +87,7 @@ impl FromStr for ProtocolVersion {
             "768" | "1.21.2" | "1.21.3" => Ok(Self::V1_21_2),
             "769" | "1.21.4" => Ok(Self::V1_21_4),
             "770" | "1.21.5" => Ok(Self::V1_21_5),
+            "771" | "1.21.6" => Ok(Self::V1_21_6),
             _ => Err(ProtocolParseError(value.to_owned())),
         }
     }
@@ -91,7 +95,7 @@ impl FromStr for ProtocolVersion {
 
 /// An unsupported protocol number or version label.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
-#[error("unsupported protocol {0}; expected 763..=770 or a supported version label")]
+#[error("unsupported protocol {0}; expected 763..=771 or a supported version label")]
 pub struct ProtocolParseError(pub String);
 
 /// Immutable context shared by all adapters belonging to one session.

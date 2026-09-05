@@ -17,9 +17,10 @@ use crab_core::{ClientCommand, ConnectionPhase, RecipeKey, ScreenStack, UiScreen
 use crab_render::{
     block_item_mesh, block_state_item_mesh, box_mesh, build_block_pipeline, build_hud_pipelines,
     build_translucent_pipeline, container_geometry, entity_armour_mesh, entity_mesh,
-    entity_mesh_with_pose, furnace_geometry, hud_geometry, inventory_geometry, item_model_mesh,
-    mesh_region_with_registry, simple_container_geometry, status_effect_geometry, upload_atlas,
-    upload_texture, CameraUniform, HudPipelines, Vertex, DEPTH_FORMAT,
+    entity_mesh_with_look, entity_mesh_with_pose, furnace_geometry, hud_geometry,
+    inventory_geometry, item_model_mesh, mesh_region_with_registry, simple_container_geometry,
+    status_effect_geometry, upload_atlas, upload_texture, CameraUniform, HudPipelines, Vertex,
+    DEPTH_FORMAT,
 };
 use crab_world::WorldSnapshot;
 use glam::Vec3;
@@ -80,6 +81,27 @@ fn movement_fov(base: f32, sneaking: bool, sprinting: bool, flying: bool) -> f32
         1.0
     };
     (base * multiplier).clamp(30.0, 110.0)
+}
+
+fn smoothed_eye_height(current: f32, target: f32, dt: f32) -> f32 {
+    current + (target - current) * (1.0 - (-dt.clamp(0.0, 0.1) * 12.0).exp())
+}
+
+fn stabilized_underwater_state(
+    current: bool,
+    transition_seconds: f32,
+    detected: bool,
+    dt: f32,
+) -> (bool, f32) {
+    if detected == current {
+        return (current, 0.0);
+    }
+    let transition_seconds = transition_seconds + dt.clamp(0.0, 0.1);
+    if transition_seconds >= 0.075 {
+        (detected, 0.0)
+    } else {
+        (current, transition_seconds)
+    }
 }
 
 fn is_double_tap(previous: Option<Instant>, now: Instant) -> bool {
@@ -298,6 +320,101 @@ fn push_item_billboard(out: &mut Vec<Vertex>, pos: [f32; 3], uv: [f32; 4], yaw_d
             opacity: 1.0,
         });
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_entity_held_item(
+    block_vertices: &mut Vec<Vertex>,
+    item_vertices: &mut Vec<Vertex>,
+    block_atlas: &Atlas,
+    item_atlas: &ItemAtlas,
+    item_name: &str,
+    entity_position: [f32; 3],
+    entity_height: f32,
+    entity_yaw: f32,
+    offhand: bool,
+) -> bool {
+    let yaw = entity_yaw.to_radians();
+    let side = if offhand { -1.0 } else { 1.0 };
+    let right = [-yaw.cos(), 0.0, -yaw.sin()];
+    let center = [
+        entity_position[0] + right[0] * 0.34 * side,
+        entity_position[1] + entity_height * 0.62,
+        entity_position[2] + right[2] * 0.34 * side,
+    ];
+    if crab_registry::block_by_name(item_name).is_some() {
+        block_vertices.extend(block_item_mesh(
+            block_atlas,
+            item_name,
+            center,
+            0.38,
+            entity_yaw + 35.0 * side,
+        ));
+        return true;
+    }
+    if let Some(mut vertices) = item_model_mesh(item_atlas, item_name, [0.0; 3], 0.0) {
+        rotate_item_mesh(&mut vertices, [0.0, -entity_yaw, 35.0 * side]);
+        for vertex in &mut vertices {
+            for (axis, coordinate) in vertex.position.iter_mut().enumerate() {
+                *coordinate = center[axis] + *coordinate * 0.55;
+            }
+        }
+        item_vertices.extend(vertices);
+        return true;
+    }
+    let Some(uv) = item_atlas.icon(item_name) else {
+        return false;
+    };
+    let mut vertices = if is_handheld_item(item_name) {
+        extruded_item_model(item_atlas, item_name).unwrap_or_else(|| flat_item_model(uv))
+    } else {
+        flat_item_model(uv)
+    };
+    rotate_item_mesh(&mut vertices, [0.0, -entity_yaw, 42.0 * side]);
+    let scale = if is_handheld_item(item_name) {
+        0.52
+    } else {
+        0.36
+    };
+    for vertex in &mut vertices {
+        for (axis, coordinate) in vertex.position.iter_mut().enumerate() {
+            *coordinate = center[axis] + *coordinate * scale;
+        }
+    }
+    item_vertices.extend(vertices);
+    true
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_player_held_items(
+    block_vertices: &mut Vec<Vertex>,
+    item_vertices: &mut Vec<Vertex>,
+    block_atlas: &Atlas,
+    item_atlas: &ItemAtlas,
+    main_hand: Option<&str>,
+    offhand: Option<&str>,
+    position: [f32; 3],
+    height: f32,
+    yaw: f32,
+) -> usize {
+    [(main_hand, false), (offhand, true)]
+        .into_iter()
+        .filter(|(name, offhand)| {
+            name.is_some_and(|name| {
+                append_entity_held_item(
+                    block_vertices,
+                    item_vertices,
+                    block_atlas,
+                    item_atlas,
+                    name,
+                    position,
+                    height,
+                    yaw,
+                    *offhand,
+                )
+            })
+        })
+        .count()
 }
 
 fn box_color(type_id: i32) -> [f32; 3] {
@@ -757,11 +874,13 @@ fn recipe_book_geometry(
 
 /// Builds the 9 hotbar item-icon UVs from the player's inventory (slots 36..44).
 fn flat_item_icon(item_atlas: &ItemAtlas, name: &str) -> Option<[f32; 4]> {
-    if item_atlas.model(name).is_some() || crab_registry::block_by_name(name).is_some() {
-        None
-    } else {
-        item_atlas.icon(name)
-    }
+    // Every resolved block, element item, and generated icon now has a mesh in
+    // the depth-cleared overlay pass. Returning its flat quad here would draw
+    // over that mesh in the HUD foreground and make it appear 2D again.
+    let _resolved = crab_registry::block_by_name(name).is_some()
+        || item_atlas.model(name).is_some()
+        || item_atlas.icon(name).is_some();
+    None
 }
 
 fn hotbar_icons(shared: &Shared, item_atlas: &ItemAtlas) -> Vec<Option<[f32; 4]>> {
@@ -856,7 +975,10 @@ fn inventory_item_icon(shared: &Shared, item_atlas: &ItemAtlas, slot: usize) -> 
         .get(slot)
         .copied()
         .flatten()?;
-    let name = crab_registry::item_name(u32::try_from(item.item_id).ok()?)?;
+    let name = shared
+        .context
+        .registries
+        .item_name(u32::try_from(item.item_id).ok()?)?;
     item_atlas.icon(name)
 }
 
@@ -868,7 +990,10 @@ fn inventory_item_name(shared: &Shared, slot: usize) -> Option<&'static str> {
         .get(slot)
         .copied()
         .flatten()?;
-    crab_registry::item_name(u32::try_from(item.item_id).ok()?)
+    shared
+        .context
+        .registries
+        .item_name(u32::try_from(item.item_id).ok()?)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -877,19 +1002,233 @@ enum HudModelAtlas {
     Items,
 }
 
-fn fit_item_mesh_to_rect(vertices: &mut [Vertex], rect: HudRect, aspect: f32, tilt_degrees: f32) {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ItemPresentation {
+    Slot,
+    MainHand,
+    OffHand,
+}
+
+fn is_handheld_item(name: &str) -> bool {
+    [
+        "_sword",
+        "_pickaxe",
+        "_axe",
+        "_shovel",
+        "_hoe",
+        "fishing_rod",
+        "carrot_on_a_stick",
+        "warped_fungus_on_a_stick",
+        "trident",
+        "mace",
+    ]
+    .iter()
+    .any(|suffix| name.ends_with(suffix))
+}
+
+fn rotate_item_mesh(vertices: &mut [Vertex], rotation: [f32; 3]) {
+    for (axis, degrees) in rotation.into_iter().enumerate() {
+        if degrees == 0.0 {
+            continue;
+        }
+        let (sin, cos) = degrees.to_radians().sin_cos();
+        for vertex in vertices.iter_mut() {
+            let rotate = |value: &mut [f32; 3]| match axis {
+                0 => {
+                    let (y, z) = (value[1], value[2]);
+                    value[1] = y * cos - z * sin;
+                    value[2] = y * sin + z * cos;
+                }
+                1 => {
+                    let (x, z) = (value[0], value[2]);
+                    value[0] = x * cos + z * sin;
+                    value[2] = -x * sin + z * cos;
+                }
+                _ => {
+                    let (x, y) = (value[0], value[1]);
+                    value[0] = x * cos - y * sin;
+                    value[1] = x * sin + y * cos;
+                }
+            };
+            rotate(&mut vertex.position);
+            rotate(&mut vertex.normal);
+        }
+    }
+}
+
+fn flat_item_model(uv: [f32; 4]) -> Vec<Vertex> {
+    let [u0, v0, u1, v1] = uv;
+    let mut vertices = Vec::with_capacity(12);
+    for (normal, corners) in [
+        (
+            [0.0, 0.0, 1.0],
+            [
+                [-0.5, 0.5, 0.03, u0, v0],
+                [-0.5, -0.5, 0.03, u0, v1],
+                [0.5, -0.5, 0.03, u1, v1],
+                [0.5, 0.5, 0.03, u1, v0],
+            ],
+        ),
+        (
+            [0.0, 0.0, -1.0],
+            [
+                [0.5, 0.5, -0.03, u1, v0],
+                [0.5, -0.5, -0.03, u1, v1],
+                [-0.5, -0.5, -0.03, u0, v1],
+                [-0.5, 0.5, -0.03, u0, v0],
+            ],
+        ),
+    ] {
+        for index in [0usize, 1, 2, 0, 2, 3] {
+            let corner = corners[index];
+            vertices.push(Vertex {
+                position: [corner[0], corner[1], corner[2]],
+                normal,
+                uv: [corner[3], corner[4]],
+                tint: [1.0; 3],
+                opacity: 1.0,
+            });
+        }
+    }
+    vertices
+}
+
+/// Extrudes the opaque silhouette of a generated 16x16 item texture. Vanilla
+/// handheld tools are generated item models rather than rectangular cards: the
+/// front/back use the source pixels and only exposed pixel edges receive side
+/// faces.
+fn extruded_item_model(item_atlas: &ItemAtlas, name: &str) -> Option<Vec<Vertex>> {
+    let uv = item_atlas.icon(name)?;
+    extruded_icon_model(&item_atlas.rgba, item_atlas.width, item_atlas.height, uv)
+}
+
+fn extruded_icon_model(
+    rgba: &[u8],
+    atlas_width: u32,
+    atlas_height: u32,
+    uv: [f32; 4],
+) -> Option<Vec<Vertex>> {
+    let width = usize::try_from(atlas_width).ok()?;
+    let height = usize::try_from(atlas_height).ok()?;
+    if width == 0 || height == 0 || rgba.len() < width.checked_mul(height)?.checked_mul(4)? {
+        return None;
+    }
+    let opaque = |x: i32, y: i32| {
+        if !(0..16).contains(&x) || !(0..16).contains(&y) {
+            return false;
+        }
+        let u = uv[0] + (uv[2] - uv[0]) * (x as f32 + 0.5) / 16.0;
+        let v = uv[1] + (uv[3] - uv[1]) * (y as f32 + 0.5) / 16.0;
+        let px = ((u * atlas_width as f32).floor() as usize).min(width - 1);
+        let py = ((v * atlas_height as f32).floor() as usize).min(height - 1);
+        rgba[(py * width + px) * 4 + 3] >= 8
+    };
+    let mut vertices = Vec::new();
+    let depth = 1.0 / 32.0;
+    let mut quad = |corners: [[f32; 3]; 4], normal: [f32; 3], tex: [[f32; 2]; 4]| {
+        for index in [0usize, 1, 2, 0, 2, 3] {
+            vertices.push(Vertex {
+                position: corners[index],
+                normal,
+                uv: tex[index],
+                tint: [1.0; 3],
+                opacity: 1.0,
+            });
+        }
+    };
+    for y in 0..16 {
+        for x in 0..16 {
+            if !opaque(x, y) {
+                continue;
+            }
+            let x0 = x as f32 / 16.0 - 0.5;
+            let x1 = (x + 1) as f32 / 16.0 - 0.5;
+            let y1 = 0.5 - y as f32 / 16.0;
+            let y0 = 0.5 - (y + 1) as f32 / 16.0;
+            let u0 = uv[0] + (uv[2] - uv[0]) * x as f32 / 16.0;
+            let u1 = uv[0] + (uv[2] - uv[0]) * (x + 1) as f32 / 16.0;
+            let v0 = uv[1] + (uv[3] - uv[1]) * y as f32 / 16.0;
+            let v1 = uv[1] + (uv[3] - uv[1]) * (y + 1) as f32 / 16.0;
+            let tex = [[u0, v0], [u1, v0], [u1, v1], [u0, v1]];
+            quad(
+                [
+                    [x0, y1, depth],
+                    [x1, y1, depth],
+                    [x1, y0, depth],
+                    [x0, y0, depth],
+                ],
+                [0.0, 0.0, 1.0],
+                tex,
+            );
+            quad(
+                [
+                    [x1, y1, -depth],
+                    [x0, y1, -depth],
+                    [x0, y0, -depth],
+                    [x1, y0, -depth],
+                ],
+                [0.0, 0.0, -1.0],
+                [tex[1], tex[0], tex[3], tex[2]],
+            );
+            let edge_uv = [[u0, v0]; 4];
+            if !opaque(x - 1, y) {
+                quad(
+                    [
+                        [x0, y1, -depth],
+                        [x0, y1, depth],
+                        [x0, y0, depth],
+                        [x0, y0, -depth],
+                    ],
+                    [-1.0, 0.0, 0.0],
+                    edge_uv,
+                );
+            }
+            if !opaque(x + 1, y) {
+                quad(
+                    [
+                        [x1, y1, depth],
+                        [x1, y1, -depth],
+                        [x1, y0, -depth],
+                        [x1, y0, depth],
+                    ],
+                    [1.0, 0.0, 0.0],
+                    edge_uv,
+                );
+            }
+            if !opaque(x, y - 1) {
+                quad(
+                    [
+                        [x0, y1, -depth],
+                        [x1, y1, -depth],
+                        [x1, y1, depth],
+                        [x0, y1, depth],
+                    ],
+                    [0.0, 1.0, 0.0],
+                    edge_uv,
+                );
+            }
+            if !opaque(x, y + 1) {
+                quad(
+                    [
+                        [x0, y0, depth],
+                        [x1, y0, depth],
+                        [x1, y0, -depth],
+                        [x0, y0, -depth],
+                    ],
+                    [0.0, -1.0, 0.0],
+                    edge_uv,
+                );
+            }
+        }
+    }
+    (!vertices.is_empty()).then_some(vertices)
+}
+
+fn fit_item_mesh_to_rect(vertices: &mut [Vertex], rect: HudRect, aspect: f32, rotation: [f32; 3]) {
     if vertices.is_empty() {
         return;
     }
-    if tilt_degrees != 0.0 {
-        let (sin, cos) = tilt_degrees.to_radians().sin_cos();
-        for vertex in vertices.iter_mut() {
-            let [x, y, z] = vertex.position;
-            vertex.position = [x, y * cos - z * sin, y * sin + z * cos];
-            let [nx, ny, nz] = vertex.normal;
-            vertex.normal = [nx, ny * cos - nz * sin, ny * sin + nz * cos];
-        }
-    }
+    rotate_item_mesh(vertices, rotation);
     let min = std::array::from_fn::<_, 3, _>(|axis| {
         vertices
             .iter()
@@ -928,20 +1267,51 @@ fn hud_item_model(
     name: &str,
     rect: HudRect,
     aspect: f32,
+    presentation: ItemPresentation,
 ) -> Option<(HudModelAtlas, Vec<Vertex>)> {
+    let hand_rotation = match presentation {
+        ItemPresentation::Slot => [0.0, 0.0, 0.0],
+        ItemPresentation::MainHand => [18.0, -18.0, -38.0],
+        ItemPresentation::OffHand => [18.0, 18.0, 38.0],
+    };
+    if crab_registry::block_by_name(name).is_some() {
+        let yaw = if presentation == ItemPresentation::Slot {
+            45.0
+        } else {
+            30.0
+        };
+        let mut vertices = block_item_mesh(block_atlas, name, [0.0; 3], 1.0, yaw);
+        let rotation = if presentation == ItemPresentation::Slot {
+            [-30.0, 0.0, 0.0]
+        } else {
+            hand_rotation
+        };
+        fit_item_mesh_to_rect(&mut vertices, rect, aspect, rotation);
+        return Some((HudModelAtlas::Blocks, vertices));
+    }
     if item_atlas.model(name).is_some() {
         let mut vertices = item_model_mesh(item_atlas, name, [0.0; 3], 0.0)?;
-        fit_item_mesh_to_rect(&mut vertices, rect, aspect, 0.0);
+        fit_item_mesh_to_rect(&mut vertices, rect, aspect, hand_rotation);
         return Some((HudModelAtlas::Items, vertices));
     }
-    if crab_registry::block_by_name(name).is_some() {
-        let mut vertices = block_item_mesh(block_atlas, name, [0.0; 3], 1.0, 45.0);
-        fit_item_mesh_to_rect(&mut vertices, rect, aspect, -30.0);
-        return Some((HudModelAtlas::Blocks, vertices));
+    if let Some(uv) = item_atlas.icon(name) {
+        let mut vertices = if presentation != ItemPresentation::Slot && is_handheld_item(name) {
+            extruded_item_model(item_atlas, name).unwrap_or_else(|| flat_item_model(uv))
+        } else {
+            flat_item_model(uv)
+        };
+        let rotation = if is_handheld_item(name) {
+            hand_rotation
+        } else {
+            [0.0, 0.0, 0.0]
+        };
+        fit_item_mesh_to_rect(&mut vertices, rect, aspect, rotation);
+        return Some((HudModelAtlas::Items, vertices));
     }
     None
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_hud_item_model(
     block_vertices: &mut Vec<Vertex>,
     item_vertices: &mut Vec<Vertex>,
@@ -950,8 +1320,10 @@ fn push_hud_item_model(
     name: &str,
     rect: HudRect,
     aspect: f32,
+    presentation: ItemPresentation,
 ) -> bool {
-    let Some((atlas, vertices)) = hud_item_model(block_atlas, item_atlas, name, rect, aspect)
+    let Some((atlas, vertices)) =
+        hud_item_model(block_atlas, item_atlas, name, rect, aspect, presentation)
     else {
         return false;
     };
@@ -970,24 +1342,8 @@ fn first_person_items_geometry(
     aspect: f32,
 ) {
     let arc = (swing.clamp(0.0, 1.0) * std::f32::consts::PI).sin();
-    let handheld = |name: &str| {
-        [
-            "_sword",
-            "_pickaxe",
-            "_axe",
-            "_shovel",
-            "_hoe",
-            "fishing_rod",
-            "carrot_on_a_stick",
-            "warped_fungus_on_a_stick",
-            "trident",
-            "mace",
-        ]
-        .iter()
-        .any(|suffix| name.ends_with(suffix))
-    };
     if let Some((name, uv)) = offhand {
-        let half_size = if handheld(name) {
+        let half_size = if is_handheld_item(name) {
             [0.15 / aspect.max(0.01), 0.34]
         } else {
             [0.22 / aspect.max(0.01), 0.22]
@@ -996,12 +1352,12 @@ fn first_person_items_geometry(
             item_vertices,
             [-0.72 + arc * 0.04, -0.58 - arc * 0.05],
             half_size,
-            if handheld(name) { 0.72 } else { 0.32 },
+            if is_handheld_item(name) { 0.72 } else { 0.32 },
             uv,
         );
     }
     if let Some((name, uv)) = main_hand {
-        let half_size = if handheld(name) {
+        let half_size = if is_handheld_item(name) {
             [0.15 / aspect.max(0.01), 0.34]
         } else {
             [0.22 / aspect.max(0.01), 0.22]
@@ -1010,7 +1366,7 @@ fn first_person_items_geometry(
             item_vertices,
             [0.72 - arc * 0.22, -0.56 - arc * 0.28],
             half_size,
-            if handheld(name) {
+            if is_handheld_item(name) {
                 -0.78 - arc * 0.5
             } else {
                 -0.32 - arc * 0.5
@@ -1018,6 +1374,26 @@ fn first_person_items_geometry(
             uv,
         );
     }
+}
+
+fn main_hand_rect(swing: f32, eating_time: f32, eating: bool) -> HudRect {
+    let swing_arc = (swing * std::f32::consts::PI).sin().clamp(0.0, 1.0);
+    let eat_progress = if eating {
+        (eating_time / 0.35).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let chew = if eating {
+        (eating_time * 18.0).sin().abs() * 0.035
+    } else {
+        0.0
+    };
+    (
+        0.40 - swing_arc * 0.18 - eat_progress * 0.10,
+        -0.98 - swing_arc * 0.12 + eat_progress * 0.18 + chew,
+        0.98 - swing_arc * 0.10 - eat_progress * 0.16,
+        -0.28 - swing_arc * 0.18 + eat_progress * 0.10 + chew,
+    )
 }
 
 fn push_color2d(vertices: &mut Vec<[f32; 5]>, x0: f32, y0: f32, x1: f32, y1: f32, color: [f32; 3]) {
@@ -1609,6 +1985,9 @@ impl Graphics {
             contents: bytemuck::cast_slice(&[CameraUniform {
                 view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
                 lighting: [1.0, 0.0, 0.0, 0.0],
+                eye: [0.0; 4],
+                fog_color: [0.0; 4],
+                fog_params: [0.0; 4],
             }]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -1626,6 +2005,9 @@ impl Graphics {
                 contents: bytemuck::cast_slice(&[CameraUniform {
                     view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
                     lighting: [1.0, 0.0, 0.0, 0.0],
+                    eye: [0.0; 4],
+                    fog_color: [0.0; 4],
+                    fog_params: [0.0; 4],
                 }]),
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             });
@@ -1642,6 +2024,9 @@ impl Graphics {
             contents: bytemuck::cast_slice(&[CameraUniform {
                 view_proj: glam::Mat4::IDENTITY.to_cols_array_2d(),
                 lighting: [1.0, 0.0, 0.0, 0.0],
+                eye: [0.0; 4],
+                fog_color: [0.0; 4],
+                fog_params: [0.0; 4],
             }]),
             usage: wgpu::BufferUsages::UNIFORM,
         });
@@ -1902,9 +2287,13 @@ impl Graphics {
         );
     }
 
-    fn render(&mut self, camera: &crab_render::Camera, clear: [f64; 3]) {
+    fn render(&mut self, camera: &crab_render::Camera, clear: [f64; 3], underwater: bool) {
         let light = (clear[2] / 0.92).clamp(0.08, 1.0) as f32;
-        let uniform = CameraUniform::with_light(camera, light);
+        let uniform = if underwater {
+            CameraUniform::with_fog(camera, light, [0.015, 0.12, 0.22], 1.5, 24.0)
+        } else {
+            CameraUniform::with_light(camera, light)
+        };
         self.queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[uniform]));
 
@@ -2214,6 +2603,7 @@ struct App {
     hand_swing_time: f32,
     was_attacking: bool,
     was_using_item: bool,
+    item_use_time: f32,
     /// Selected hotbar slot (0..=8), driven by number keys / scroll.
     selected_slot: u8,
     last_named_slot: u8,
@@ -2250,6 +2640,11 @@ struct App {
     entity_anim: HashMap<i32, EntityAnim>,
     /// Smoothed camera eye position (eases toward the player's stepped pos).
     render_eye: Option<Vec3>,
+    /// Smoothed camera height prevents the swim pose from snapping the camera
+    /// across the water surface and toggling underwater fog every other frame.
+    render_eye_height: f32,
+    camera_underwater: bool,
+    camera_underwater_transition: f32,
     /// Destroy-stage overlay atlas (`(rgba, w, h)`), uploaded in `Graphics::new`.
     crack: Option<(Vec<u8>, u32, u32)>,
 }
@@ -2384,6 +2779,7 @@ impl App {
             hand_swing_time: 0.0,
             was_attacking: false,
             was_using_item: false,
+            item_use_time: 0.0,
             selected_slot: 0,
             last_named_slot: 0,
             selected_name_time: 0.0,
@@ -2410,6 +2806,9 @@ impl App {
             anvil_name: String::new(),
             entity_anim: HashMap::new(),
             render_eye: None,
+            render_eye_height: EYE_HEIGHT,
+            camera_underwater: false,
+            camera_underwater_transition: 0.0,
         }
     }
 
@@ -2521,7 +2920,7 @@ impl App {
             if let Some(item_id) = e.item {
                 if let Some(name) = u32::try_from(item_id)
                     .ok()
-                    .and_then(crab_registry::item_name)
+                    .and_then(|id| self.shared.context.registries.item_name(id))
                 {
                     if let Some(vertices) = item_model_mesh(
                         &self.item_atlas,
@@ -2606,38 +3005,38 @@ impl App {
                 }
             }
             if let Some(item_id) = e.equipment[0] {
-                if let Some(uv) = u32::try_from(item_id)
+                if let Some(name) = u32::try_from(item_id)
                     .ok()
-                    .and_then(crab_registry::item_name)
-                    .and_then(|name| self.item_atlas.icon(name))
+                    .and_then(|id| self.shared.context.registries.item_name(id))
                 {
-                    push_item_billboard(
+                    append_entity_held_item(
+                        &mut box_v,
                         &mut item_v,
-                        [
-                            a.pos[0] + e.half_width,
-                            a.pos[1] + e.height * 0.65,
-                            a.pos[2],
-                        ],
-                        uv,
-                        self.yaw,
+                        &self.atlas,
+                        &self.item_atlas,
+                        name,
+                        a.pos,
+                        e.height,
+                        a.yaw,
+                        false,
                     );
                 }
             }
             if let Some(item_id) = e.equipment[1] {
-                if let Some(uv) = u32::try_from(item_id)
+                if let Some(name) = u32::try_from(item_id)
                     .ok()
-                    .and_then(crab_registry::item_name)
-                    .and_then(|name| self.item_atlas.icon(name))
+                    .and_then(|id| self.shared.context.registries.item_name(id))
                 {
-                    push_item_billboard(
+                    append_entity_held_item(
+                        &mut box_v,
                         &mut item_v,
-                        [
-                            a.pos[0] - e.half_width,
-                            a.pos[1] + e.height * 0.65,
-                            a.pos[2],
-                        ],
-                        uv,
-                        self.yaw,
+                        &self.atlas,
+                        &self.item_atlas,
+                        name,
+                        a.pos,
+                        e.height,
+                        a.yaw,
+                        true,
                     );
                 }
             }
@@ -2652,7 +3051,7 @@ impl App {
                 };
                 let Some(name) = u32::try_from(item_id)
                     .ok()
-                    .and_then(crab_registry::item_name)
+                    .and_then(|id| self.shared.context.registries.item_name(id))
                 else {
                     continue;
                 };
@@ -2767,7 +3166,7 @@ impl App {
             .flatten();
         let Some(name) = item
             .and_then(|item| u32::try_from(item.item_id).ok())
-            .and_then(crab_registry::item_name)
+            .and_then(|id| self.shared.context.registries.item_name(id))
             .filter(|name| matches!(*name, "writable_book" | "written_book"))
         else {
             return false;
@@ -3970,6 +4369,15 @@ impl ApplicationHandler for App {
                 let now = Instant::now();
                 let dt = (now - self.last_frame).as_secs_f32().min(0.1);
                 self.last_frame = now;
+                let target_eye_height = if player.swimming || player.gliding {
+                    0.4
+                } else if player.sneaking {
+                    1.27
+                } else {
+                    EYE_HEIGHT
+                };
+                self.render_eye_height =
+                    smoothed_eye_height(self.render_eye_height, target_eye_height, dt);
                 let instant_fps = 1.0 / dt.max(0.001);
                 self.smoothed_fps += (instant_fps - self.smoothed_fps) * 0.08;
                 let target_fov = movement_fov(
@@ -4002,9 +4410,14 @@ impl ApplicationHandler for App {
                 }
                 self.was_attacking = attacking;
                 self.was_using_item = using_item;
+                self.item_use_time = if using_item {
+                    self.item_use_time + dt
+                } else {
+                    0.0
+                };
                 self.process_meshes();
 
-                let (mut box_v, mut model_v, item_v) = self.step_entities(dt);
+                let (mut box_v, mut model_v, mut item_v) = self.step_entities(dt);
                 let crack_v = self.crack_mesh();
                 let hotbar = hotbar_icons(&self.shared, &self.item_atlas);
                 let hovered_bundle = self.hovered_bundle();
@@ -4038,7 +4451,7 @@ impl ApplicationHandler for App {
                             .copied()
                             .flatten()
                             .and_then(|item| u32::try_from(item.item_id).ok())
-                            .and_then(crab_registry::item_name)
+                            .and_then(|id| self.shared.context.registries.item_name(id))
                             == Some("filled_map")
                     })
                 };
@@ -4067,7 +4480,7 @@ impl ApplicationHandler for App {
                     .and_then(|item| {
                         u32::try_from(item.item_id)
                             .ok()
-                            .and_then(crab_registry::item_name)
+                            .and_then(|id| self.shared.context.registries.item_name(id))
                             .map(pretty_item_name)
                     });
                 // Smooth the camera toward the 20 Hz-stepped player position.
@@ -4096,7 +4509,7 @@ impl ApplicationHandler for App {
                             0
                         };
                         let (body_yaw, head_yaw) = local_player_model_yaws(self.yaw);
-                        model_v.extend(entity_mesh_with_pose(
+                        model_v.extend(entity_mesh_with_look(
                             &model.geo,
                             [eye.x, eye.y, eye.z],
                             [model.atlas_x, model.atlas_y],
@@ -4109,23 +4522,29 @@ impl ApplicationHandler for App {
                             1.0,
                             body_yaw,
                             head_yaw,
+                            self.pitch,
                             hand_swing,
                             pose,
                         ));
                     }
+                    append_player_held_items(
+                        &mut box_v,
+                        &mut item_v,
+                        &self.atlas,
+                        &self.item_atlas,
+                        main_hand_name,
+                        offhand_name,
+                        [eye.x, eye.y, eye.z],
+                        1.8,
+                        self.yaw,
+                    );
                 }
                 box_v.extend(celestial_mesh(eye, environment, self.atlas.white_uv()));
                 let third_person_distance = third_person_camera_distance(
                     self.shared.context.registries,
                     &self.shared.world.lock().unwrap(),
                     eye,
-                    if player.swimming || player.gliding {
-                        0.4
-                    } else if player.sneaking {
-                        1.27
-                    } else {
-                        EYE_HEIGHT
-                    },
+                    self.render_eye_height,
                     self.yaw,
                     self.pitch,
                     self.perspective,
@@ -4159,7 +4578,7 @@ impl ApplicationHandler for App {
                              rect: HudRect| {
                                 item.filter(|item| item.count > 0)
                                     .and_then(|item| u32::try_from(item.item_id).ok())
-                                    .and_then(crab_registry::item_name)
+                                    .and_then(|id| self.shared.context.registries.item_name(id))
                                     .is_some_and(|name| {
                                         push_hud_item_model(
                                             &mut overlay_blocks,
@@ -4169,6 +4588,7 @@ impl ApplicationHandler for App {
                                             name,
                                             rect,
                                             aspect,
+                                            ItemPresentation::Slot,
                                         )
                                     })
                             };
@@ -4234,7 +4654,8 @@ impl ApplicationHandler for App {
                         }
                     }
                     if show_first_person_items && held_map.is_none() {
-                        let swing_arc = (hand_swing * std::f32::consts::PI).sin().clamp(0.0, 1.0);
+                        let eating =
+                            using_item && main_hand_name.is_some_and(crate::client::is_food_item);
                         if main_hand_name.is_some_and(|name| {
                             push_hud_item_model(
                                 &mut overlay_blocks,
@@ -4242,13 +4663,9 @@ impl ApplicationHandler for App {
                                 &self.atlas,
                                 &self.item_atlas,
                                 name,
-                                (
-                                    0.40 - swing_arc * 0.18,
-                                    -0.98 - swing_arc * 0.12,
-                                    0.98 - swing_arc * 0.10,
-                                    -0.28 - swing_arc * 0.18,
-                                ),
+                                main_hand_rect(hand_swing, self.item_use_time, eating),
                                 aspect,
+                                ItemPresentation::MainHand,
                             )
                         }) {
                             main_hand_icon = None;
@@ -4262,6 +4679,7 @@ impl ApplicationHandler for App {
                                 name,
                                 (-0.98, -0.98, -0.42, -0.30),
                                 aspect,
+                                ItemPresentation::OffHand,
                             )
                         }) {
                             offhand_icon = None;
@@ -4276,7 +4694,7 @@ impl ApplicationHandler for App {
                     let carried_modelled = carried
                         .filter(|item| item.count > 0)
                         .and_then(|item| u32::try_from(item.item_id).ok())
-                        .and_then(crab_registry::item_name)
+                        .and_then(|id| self.shared.context.registries.item_name(id))
                         .is_some_and(|name| {
                             push_hud_item_model(
                                 &mut overlay_blocks,
@@ -4286,27 +4704,43 @@ impl ApplicationHandler for App {
                                 name,
                                 carried_rect,
                                 aspect,
+                                ItemPresentation::Slot,
                             )
                         });
                     gfx.set_item_overlays(&overlay_blocks, &overlay_items);
                     gfx.set_inventory_player(&[], None, None);
-                    let eye_height = if player.swimming || player.gliding {
-                        0.4
-                    } else if player.sneaking {
-                        1.27
-                    } else {
-                        EYE_HEIGHT
-                    };
                     let camera = first_person_camera(
                         eye,
                         self.yaw,
                         self.pitch,
                         aspect,
-                        eye_height,
+                        self.render_eye_height,
                         self.rendered_fov_degrees,
                         self.perspective,
                         third_person_distance,
                     );
+                    let detected_underwater = crate::client::fluid_kind_at_point(
+                        self.shared.context.registries,
+                        &self.shared.world.lock().unwrap(),
+                        [
+                            f64::from(camera.eye.x),
+                            f64::from(camera.eye.y),
+                            f64::from(camera.eye.z),
+                        ],
+                    ) == Some(crate::client::FluidKind::Water);
+                    (self.camera_underwater, self.camera_underwater_transition) =
+                        stabilized_underwater_state(
+                            self.camera_underwater,
+                            self.camera_underwater_transition,
+                            detected_underwater,
+                            dt,
+                        );
+                    let camera_underwater = self.camera_underwater;
+                    let frame_clear = if camera_underwater {
+                        [0.015, 0.12, 0.22]
+                    } else {
+                        clear
+                    };
                     gfx.box_entity_buffer = gfx.make_vertex_buffer(&box_v);
                     gfx.model_entity_buffer = gfx.make_vertex_buffer(&model_v);
                     gfx.item_entity_buffer = gfx.make_vertex_buffer(&item_v);
@@ -4357,11 +4791,11 @@ impl ApplicationHandler for App {
                             aspect,
                         );
                         gfx.set_hud(&color, &gui_vertices, &[], &[]);
-                        gfx.render(&camera, clear);
+                        gfx.render(&camera, frame_clear, camera_underwater);
                     } else if let Some(book) = book_screen.as_ref() {
                         let (color, text) = book_geometry(gui, book, self.cursor, aspect);
                         gfx.set_hud(&color, &[], &[], &text);
-                        gfx.render(&camera, clear);
+                        gfx.render(&camera, frame_clear, camera_underwater);
                     } else if pause_open {
                         // Pause menu replaces the HUD; highlight the hovered button.
                         let option_labels = [
@@ -4428,12 +4862,13 @@ impl ApplicationHandler for App {
                             }
                         }
                         gfx.set_hud(&mc, &mg, &[], &[]);
-                        gfx.render(&camera, clear);
+                        gfx.render(&camera, frame_clear, camera_underwater);
                     } else {
                         let (mut hud_c, mut hud_g, mut hud_i) = hud_geometry(
                             gui,
                             player.health,
                             player.food,
+                            player.air_supply,
                             player.xp_bar,
                             player.xp_level,
                             selected,
@@ -5027,7 +5462,7 @@ impl ApplicationHandler for App {
                             }
                         }
                         gfx.set_hud(&hud_c, &hud_g, &hud_i, &hud_text);
-                        gfx.render(&camera, clear);
+                        gfx.render(&camera, frame_clear, camera_underwater);
                     }
                 }
 
@@ -5153,6 +5588,29 @@ mod tests {
         assert_eq!(movement_fov(70.0, true, false, false), 66.5);
         assert_eq!(movement_fov(70.0, false, true, false), 77.0);
         assert_eq!(movement_fov(110.0, false, true, false), 110.0);
+    }
+
+    #[test]
+    fn swim_eye_height_transitions_without_frame_snaps() {
+        let first = smoothed_eye_height(EYE_HEIGHT, 0.4, 1.0 / 60.0);
+        assert!(first < EYE_HEIGHT);
+        assert!(first > 0.4);
+        let settled = (0..120).fold(EYE_HEIGHT, |height, _| {
+            smoothed_eye_height(height, 0.4, 1.0 / 60.0)
+        });
+        assert!((settled - 0.4).abs() < 1e-4);
+
+        let mut state = false;
+        let mut transition = 0.0;
+        for detected in [true, false, true, false, true, false] {
+            (state, transition) =
+                stabilized_underwater_state(state, transition, detected, 1.0 / 60.0);
+            assert!(!state);
+        }
+        for _ in 0..5 {
+            (state, transition) = stabilized_underwater_state(state, transition, true, 1.0 / 60.0);
+        }
+        assert!(state);
     }
 
     #[test]
@@ -5284,6 +5742,11 @@ mod tests {
                 (min.min(value), max.max(value))
             });
         assert!(main_height.1 - main_height.0 > 0.4);
+
+        let idle = main_hand_rect(0.0, 0.0, false);
+        let eating = main_hand_rect(0.0, 0.35, true);
+        assert!(eating.1 > idle.1);
+        assert!(eating.2 < idle.2);
     }
 
     #[test]
@@ -5291,8 +5754,15 @@ mod tests {
         let atlas = Atlas::debug_uniform();
         let item_atlas = ItemAtlas::empty();
         let rect = (-0.2, -0.2, 0.2, 0.2);
-        let (source, vertices) =
-            hud_item_model(&atlas, &item_atlas, "stone", rect, 16.0 / 9.0).unwrap();
+        let (source, vertices) = hud_item_model(
+            &atlas,
+            &item_atlas,
+            "stone",
+            rect,
+            16.0 / 9.0,
+            ItemPresentation::Slot,
+        )
+        .unwrap();
         assert_eq!(source, HudModelAtlas::Blocks);
         assert_eq!(vertices.len(), 36);
         assert!(vertices.iter().all(|vertex| {
@@ -5302,6 +5772,79 @@ mod tests {
                 && vertex.position[1] <= rect.3
                 && (0.0..=1.0).contains(&vertex.position[2])
         }));
+    }
+
+    #[test]
+    fn generated_tool_mesh_has_front_and_back_depth() {
+        let mut vertices = flat_item_model([0.0, 0.0, 1.0, 1.0]);
+        rotate_item_mesh(&mut vertices, [18.0, -18.0, -38.0]);
+        assert_eq!(vertices.len(), 12);
+        let min_z = vertices
+            .iter()
+            .map(|vertex| vertex.position[2])
+            .fold(f32::INFINITY, f32::min);
+        let max_z = vertices
+            .iter()
+            .map(|vertex| vertex.position[2])
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!(max_z - min_z > 0.05);
+    }
+
+    #[test]
+    fn generated_hand_tool_extrudes_opaque_pixel_silhouette() {
+        let mut rgba = vec![0; 16 * 16 * 4];
+        rgba[(8 * 16 + 7) * 4 + 3] = 255;
+        let vertices = extruded_icon_model(&rgba, 16, 16, [0.0, 0.0, 1.0, 1.0]).unwrap();
+        assert_eq!(vertices.len(), 36);
+        assert!(vertices.iter().any(|vertex| vertex.normal[0].abs() == 1.0));
+        assert!(vertices.iter().any(|vertex| vertex.normal[1].abs() == 1.0));
+        assert!(vertices.iter().any(|vertex| vertex.normal[2].abs() == 1.0));
+    }
+
+    #[test]
+    fn remote_player_block_is_attached_as_held_geometry() {
+        let atlas = Atlas::debug_uniform();
+        let item_atlas = ItemAtlas::empty();
+        let mut blocks = Vec::new();
+        let mut items = Vec::new();
+        assert!(append_entity_held_item(
+            &mut blocks,
+            &mut items,
+            &atlas,
+            &item_atlas,
+            "stone",
+            [4.0, 5.0, 6.0],
+            1.8,
+            90.0,
+            false,
+        ));
+        assert_eq!(blocks.len(), 36);
+        assert!(items.is_empty());
+        assert!(blocks.iter().all(|vertex| vertex.position[1] > 5.5));
+    }
+
+    #[test]
+    fn local_third_person_player_emits_both_held_items() {
+        let atlas = Atlas::debug_uniform();
+        let item_atlas = ItemAtlas::empty();
+        let mut blocks = Vec::new();
+        let mut items = Vec::new();
+        assert_eq!(
+            append_player_held_items(
+                &mut blocks,
+                &mut items,
+                &atlas,
+                &item_atlas,
+                Some("stone"),
+                Some("dirt"),
+                [4.0, 5.0, 6.0],
+                1.8,
+                45.0,
+            ),
+            2
+        );
+        assert_eq!(blocks.len(), 72);
+        assert!(items.is_empty());
     }
 
     #[test]
@@ -5328,6 +5871,55 @@ mod tests {
     fn local_player_body_and_head_follow_camera_yaw() {
         assert_eq!(local_player_model_yaws(-137.5), (-137.5, -137.5));
         assert_eq!(local_player_model_yaws(42.0), (42.0, 42.0));
+
+        let geometry = crab_assets::EntityGeometry {
+            texture_width: 64.0,
+            texture_height: 64.0,
+            bones: vec![crab_assets::entity::Bone {
+                name: "body".to_string(),
+                pivot: [0.0; 3],
+                rotation: [0.0; 3],
+                cubes: vec![crab_assets::entity::Cube {
+                    origin: [2.0, 0.0, 0.0],
+                    size: [4.0, 8.0, 2.0],
+                    uv: [0.0, 0.0],
+                    mirror: false,
+                }],
+            }],
+        };
+        let yaw_zero = entity_mesh_with_pose(
+            &geometry, [0.0; 3], [0.0; 2], [64.0; 2], 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0,
+        );
+        let yaw_ninety = entity_mesh_with_pose(
+            &geometry, [0.0; 3], [0.0; 2], [64.0; 2], 0.0, 0.0, 1.0, 90.0, 90.0, 0.0, 0,
+        );
+        assert_ne!(yaw_zero[0].position, yaw_ninety[0].position);
+    }
+
+    #[test]
+    fn local_player_head_follows_camera_pitch() {
+        let geometry = crab_assets::EntityGeometry {
+            texture_width: 64.0,
+            texture_height: 64.0,
+            bones: vec![crab_assets::entity::Bone {
+                name: "head".to_string(),
+                pivot: [0.0, 8.0, 0.0],
+                rotation: [0.0; 3],
+                cubes: vec![crab_assets::entity::Cube {
+                    origin: [-4.0, 8.0, -2.0],
+                    size: [8.0, 8.0, 8.0],
+                    uv: [0.0, 0.0],
+                    mirror: false,
+                }],
+            }],
+        };
+        let level = crab_render::entity_mesh_with_look(
+            &geometry, [0.0; 3], [0.0; 2], [64.0; 2], 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0,
+        );
+        let looking_down = crab_render::entity_mesh_with_look(
+            &geometry, [0.0; 3], [0.0; 2], [64.0; 2], 0.0, 0.0, 1.0, 0.0, 0.0, 45.0, 0.0, 0,
+        );
+        assert_ne!(level[0].position, looking_down[0].position);
     }
 
     #[test]

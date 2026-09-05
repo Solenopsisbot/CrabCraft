@@ -48,6 +48,18 @@ Water, bubble columns, and lava are vanilla special renderers and therefore do
 not have ordinary block model JSON. The atlas loader explicitly maps their
 `*_still` textures to top/bottom faces and `*_flow` textures to side faces;
 water retains biome tint and the renderer's translucent opacity.
+Fluid atlas entries are explicitly excluded from opaque face-culling decisions,
+so a solid block face remains available to render behind a water volume.
+The same client jar supplies the `mineable/*` block tags used for tool
+effectiveness and the `icons.png` air-bubble sprites. Underwater visibility is
+then bounded by renderer distance fog rather than treating water as an
+unlimited clear volume.
+
+Block atlas UVs address the centers of their outer texels. This keeps nearest
+sampling inside the selected tile when small slab, stair, pane, or plant faces
+move by subpixels, avoiding adjacent-texture flicker. Directional fallback
+geometry reads generated `axis`, `facing`, and `rotation` state properties;
+resolved blockstate JSON remains the primary source of model rotations.
 
 Item models use the same parent-chain resolver. For 1.21.4 and newer assets the
 loader starts at `assets/<namespace>/items/<path>.json`, follows plain models,
@@ -57,9 +69,13 @@ texture in order instead of discarding overlays. Items with resolved element
 geometry retain their inherited `ground` display rotation, translation, and
 scale when rendered as dropped entities. The live window also fits resolved
 element and block-state meshes into depth-cleared inventory, hotbar, recipe,
-cursor, and first-person overlay passes; handheld tools receive their narrow
-vanilla-style presentation transform. Generated flat-layer items remain
-camera-facing sprites. Falling-block entities are different from dropped items:
+cursor, and first-person overlay passes. Block items take the block-state path
+before their inventory model can flatten them; generated flat-layer tools in a
+player's hand extrude the opaque 16x16 texture silhouette, including exposed
+pixel edges, and use separate main/offhand transforms. Local third-person and
+remote player equipment use the active protocol registry before attaching the
+same held-item geometry. In-world dropped generated items remain camera-facing
+sprites. Falling-block entities are different from dropped items:
 their Spawn Entity data is an exact global block-state ID, so they select that
 state's variant/multipart geometry rather than an inventory item model.
 

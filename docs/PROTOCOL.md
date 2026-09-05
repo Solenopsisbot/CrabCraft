@@ -13,7 +13,8 @@ Crabcraft defaults to protocol 763. Choose another profile with
 | 1.21.2 / 1.21.3 | 768 | Core path live-tested on 1.21.3 | Bundle-era packet maps, movement flags/velocity corrections, particle preference, split inventory updates, expanded components |
 | 1.21.4 | 769 | Core and component paths live-tested on 1.21.4 | Pale Garden registries, Player Loaded, split pick-item map, direct component slots, revised held-item/particle/player-list/vehicle payloads |
 | 1.21.5 | 770 | Core and component paths live-tested on 1.21.5 | Spring to Life registries, shifted play maps, array heightmaps, chat checksum, reorganized components |
-| Newer than 1.21.5 | 771+ | Not implemented | Requires authoritative registries and packet schemas |
+| 1.21.6 | 771 | Core path live-tested on 1.21.6 | 1.21.6 registries, fixed-length paletted chunk containers, changed game-mode insertion, component-era payload revisions |
+| Newer than 1.21.6 | 772+ | Not implemented | Requires authoritative registries and packet schemas |
 
 ## Versioning approach
 
@@ -30,7 +31,7 @@ compatibility wrappers for older presentation helpers still delegate to the
 process-default registry while those call sites migrate.
 
 Blocks, block states, items, and entities are also numeric wire registries. The
-client selects committed generated 1.20.1, 1.20.2, 1.20.3, 1.20.5, 1.21, 1.21.3, 1.21.4, or 1.21.5
+client selects committed generated 1.20.1, 1.20.2, 1.20.3, 1.20.5, 1.21, 1.21.3, 1.21.4, 1.21.5, or 1.21.6
 tables before it loads assets or decodes a world. This matters even within
 1.20.x: 1.20.2 changed
 some block-state ranges, while 1.20.3 inserted the crafter, new copper/tuff
@@ -143,6 +144,19 @@ Login, Configuration, split registries, Join Game, array-heightmap chunks,
 spawn, inventory, entities, movement/keepalive, and checksum-bearing chat. Live
 inventory passes decoded the new Blue Egg, Firefly Bush, and Mace IDs, followed
 by a custom-named enchanted Mace carrying 1.21.5 component patches.
+
+Protocol 771 changes the chunk section containers: palette bit widths still
+select single, indirect, or direct values, but the packed-long count is implied
+by the entry count and is no longer serialized. The decoder uses the exact
+fixed count for block and biome containers, while retaining bounds on heightmap
+and palette counts before allocating. Protocol 771 also inserts Change Game
+Mode at a new play-state position and selects independently generated 1.21.6
+block/state, item, and entity registries.
+
+The 771 validation fixture used a vanilla 1.21.6 server in offline mode. It
+completed Login, Configuration, registry transfer, Join Game, fixed-length
+chunk decoding, spawn, inventory, entities, movement/keepalive, and chat; the
+headless session reached its deadline without parser warnings or disconnects.
 
 ## Adding a protocol
 

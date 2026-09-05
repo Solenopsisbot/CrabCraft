@@ -41,7 +41,7 @@ fn main() {
         .unwrap_or(16.0 / 9.0);
     let height = 540u32;
     let width = (height as f32 * aspect) as u32;
-    let (color, g, item) = hud_geometry(&gui, 7.0, 13, 0.6, 30, 3, &hotbar, aspect);
+    let (color, g, item) = hud_geometry(&gui, 7.0, 13, 120, 0.6, 30, 3, &hotbar, aspect);
     let mut text = Vec::new();
     push_text(&mut text, &gui, "Crabcraft 1.20.1", -0.6, 0.9, 0.05, aspect);
     push_text(&mut text, &gui, "x64", -0.2, 0.8, 0.04, aspect);

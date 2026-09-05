@@ -18,6 +18,9 @@ use crate::mesh::{Mesh, Vertex};
 pub struct CameraUniform {
     pub view_proj: [[f32; 4]; 4],
     pub lighting: [f32; 4],
+    pub eye: [f32; 4],
+    pub fog_color: [f32; 4],
+    pub fog_params: [f32; 4],
 }
 
 impl CameraUniform {
@@ -25,6 +28,9 @@ impl CameraUniform {
         Self {
             view_proj: camera.view_proj().to_cols_array_2d(),
             lighting: [1.0, 0.0, 0.0, 0.0],
+            eye: [camera.eye.x, camera.eye.y, camera.eye.z, 0.0],
+            fog_color: [0.0; 4],
+            fog_params: [0.0; 4],
         }
     }
 
@@ -32,6 +38,21 @@ impl CameraUniform {
         Self {
             view_proj: camera.view_proj().to_cols_array_2d(),
             lighting: [light.clamp(0.08, 1.0), 0.0, 0.0, 0.0],
+            eye: [camera.eye.x, camera.eye.y, camera.eye.z, 0.0],
+            fog_color: [0.0; 4],
+            fog_params: [0.0; 4],
+        }
+    }
+
+    /// Camera uniform with linear distance fog for submerged rendering.
+    #[must_use]
+    pub fn with_fog(camera: &Camera, light: f32, color: [f32; 3], start: f32, end: f32) -> Self {
+        Self {
+            view_proj: camera.view_proj().to_cols_array_2d(),
+            lighting: [light.clamp(0.08, 1.0), 0.0, 0.0, 0.0],
+            eye: [camera.eye.x, camera.eye.y, camera.eye.z, 0.0],
+            fog_color: [color[0], color[1], color[2], 1.0],
+            fog_params: [start.max(0.0), end.max(start + 0.01), 1.0, 0.0],
         }
     }
 }
@@ -96,6 +117,7 @@ pub fn build_block_pipeline(
         &texture_bgl,
         "block pipeline",
         true,
+        wgpu::CompareFunction::Less,
     );
 
     (pipeline, camera_bgl, texture_bgl)
@@ -117,6 +139,9 @@ pub fn build_translucent_pipeline(
         texture_bgl,
         "translucent block pipeline",
         false,
+        // Transparent faces must survive a depth tie with the opaque face
+        // underneath them (water often shares the same block boundary).
+        wgpu::CompareFunction::LessEqual,
     )
 }
 
@@ -127,6 +152,7 @@ fn create_block_pipeline(
     texture_bgl: &wgpu::BindGroupLayout,
     label: &str,
     depth_write_enabled: bool,
+    depth_compare: wgpu::CompareFunction,
 ) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("block shader"),
@@ -164,7 +190,7 @@ fn create_block_pipeline(
         depth_stencil: Some(wgpu::DepthStencilState {
             format: DEPTH_FORMAT,
             depth_write_enabled,
-            depth_compare: wgpu::CompareFunction::Less,
+            depth_compare,
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),

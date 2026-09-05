@@ -130,10 +130,13 @@ pub fn step_player_with_forces_in(
     let mut pos = DVec3::from_array(feet);
     let mut v = DVec3::from_array(vel);
 
-    v.y = (v.y - gravity * dt).max(terminal_velocity);
-
-    // Y
-    let desired = v.y * dt;
+    // Vanilla moves using the current vertical velocity, then applies gravity.
+    // Preserve the existing gravity-first probe while stationary/falling so a
+    // player resting on a floor remains grounded every tick, but do not erase
+    // the first 0.42-block slice of a jump before collision is evaluated.
+    let rising = v.y > 0.0;
+    let next_vertical = (v.y - gravity * dt).max(terminal_velocity);
+    let desired = if rising { v.y * dt } else { next_vertical * dt };
     let dy = collide_y_in(
         registries,
         world,
@@ -143,6 +146,8 @@ pub fn step_player_with_forces_in(
     let on_ground = desired < 0.0 && dy > desired + EPS;
     if (dy - desired).abs() > EPS {
         v.y = 0.0;
+    } else {
+        v.y = next_vertical;
     }
     pos.y += dy;
 
@@ -708,6 +713,27 @@ mod tests {
         }
         assert!(grounded, "should be on the ground");
         assert!((pos[1] - (-59.0)).abs() < 1e-6, "rested at y={}", pos[1]);
+    }
+
+    #[test]
+    fn vanilla_jump_clears_a_full_block() {
+        let world = world_with_floor(-60);
+        let start_y = -59.0;
+        let mut pos = [8.0, start_y, 8.0];
+        let mut vel = [0.0, 8.4, 0.0];
+        let mut peak = start_y;
+        for _ in 0..40 {
+            let result = step_player(&world, pos, vel, 0.05);
+            pos = result.position;
+            vel = result.velocity;
+            peak = peak.max(pos[1]);
+            if result.on_ground && pos[1] <= start_y + EPS {
+                break;
+            }
+        }
+        let rise = peak - start_y;
+        assert!(rise >= 1.25, "jump only rose {rise} blocks");
+        assert!(rise < 1.4, "jump rose an implausible {rise} blocks");
     }
 
     #[test]

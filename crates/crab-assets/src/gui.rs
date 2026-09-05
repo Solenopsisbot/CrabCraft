@@ -329,6 +329,8 @@ pub fn load_gui_atlas(jar_path: &Path) -> Result<GuiAtlas, AssetError> {
         sprites.insert("heart_bg", uv(ix + 16, iy, 9, 9));
         sprites.insert("heart_full", uv(ix + 52, iy, 9, 9));
         sprites.insert("heart_half", uv(ix + 61, iy, 9, 9));
+        sprites.insert("air_full", uv(ix + 16, iy + 18, 9, 9));
+        sprites.insert("air_burst", uv(ix + 25, iy + 18, 9, 9));
         sprites.insert("food_bg", uv(ix + 16, iy + 27, 9, 9));
         sprites.insert("food_full", uv(ix + 52, iy + 27, 9, 9));
         sprites.insert("food_half", uv(ix + 61, iy + 27, 9, 9));
@@ -417,6 +419,13 @@ mod tests {
             image.write_to(&mut png, image::ImageFormat::Png).unwrap();
             writer.write_all(png.get_ref()).unwrap();
         }
+        writer
+            .start_file("assets/minecraft/textures/gui/icons.png", options)
+            .unwrap();
+        let image = image::RgbaImage::from_pixel(256, 256, image::Rgba([90, 150, 220, 255]));
+        let mut png = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut png, image::ImageFormat::Png).unwrap();
+        writer.write_all(png.get_ref()).unwrap();
         writer.finish().unwrap();
 
         let atlas = load_gui_atlas(&path).unwrap();
@@ -426,6 +435,8 @@ mod tests {
             "recipe_cell_hover",
             "recipe_toggle",
             "recipe_toggle_hover",
+            "air_full",
+            "air_burst",
         ] {
             assert!(atlas.sprite(sprite).is_some(), "missing {sprite}");
         }

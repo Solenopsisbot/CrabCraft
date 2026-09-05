@@ -196,6 +196,10 @@ pub struct Atlas {
     state_cubes: HashSet<u32>,
     fallback: BlockModel,
     white_uv: [f32; 4],
+    /// Whether each stitched atlas tile contains any non-opaque texel. This
+    /// lets the mesh builder route cutout/translucent models out of the depth
+    /// writing pass without rescanning PNG pixels for every vertex.
+    transparent_tiles: Vec<bool>,
     /// When true (the debug atlas), every block is treated as a full cube.
     assume_cube: bool,
     unresolved: Vec<String>,
@@ -244,6 +248,30 @@ impl Atlas {
         }
     }
 
+    /// Whether any face in the selected state model samples a texture with
+    /// transparency. Transparent full cubes (glass, leaves, …) must not hide
+    /// opaque neighbour faces during mesh culling.
+    #[must_use]
+    pub fn is_state_translucent(&self, state: u32, block_name: &str) -> bool {
+        if let Some(parts) = self.block_state_model(state) {
+            return parts.iter().any(|part| {
+                part.alternatives.iter().any(|alternative| {
+                    alternative.elements.iter().any(|element| {
+                        element
+                            .faces
+                            .iter()
+                            .flatten()
+                            .any(|face| self.uv_has_transparency(face.uv))
+                    })
+                })
+            });
+        }
+        self.model(block_name)
+            .faces
+            .iter()
+            .any(|face| self.uv_has_transparency(face.uv))
+    }
+
     /// Whether the block renders as a full cube (so it occludes neighbour faces).
     pub fn is_cube(&self, block_name: &str) -> bool {
         if self.assume_cube {
@@ -257,6 +285,21 @@ impl Atlas {
     /// entity boxes).
     pub fn white_uv(&self) -> [f32; 4] {
         self.white_uv
+    }
+
+    /// Whether the texture tile addressed by normalized atlas coordinates has
+    /// any alpha below 255. UVs may address a sub-rectangle within a tile; the
+    /// tile center is sufficient because every model texture occupies one
+    /// complete stitched tile.
+    #[must_use]
+    pub fn uv_has_transparency(&self, uv: [f32; 4]) -> bool {
+        let grid = (self.width / TILE).max(1);
+        let u = ((uv[0] + uv[2]) * 0.5).clamp(0.0, 0.999_999);
+        let v = ((uv[1] + uv[3]) * 0.5).clamp(0.0, 0.999_999);
+        let tile_x = (u * self.width as f32) as u32 / TILE;
+        let tile_y = (v * self.height as f32) as u32 / TILE;
+        let slot = tile_y.saturating_mul(grid).saturating_add(tile_x) as usize;
+        self.transparent_tiles.get(slot).copied().unwrap_or(false)
     }
 
     /// Requested registry blocks for which neither a blockstate-selected model
@@ -292,6 +335,7 @@ impl Atlas {
                 textured: false,
             },
             white_uv: [0.0, 0.0, 1.0, 1.0],
+            transparent_tiles: vec![false],
             assume_cube: true,
             unresolved: Vec::new(),
             missing_textures: Vec::new(),
@@ -921,6 +965,19 @@ pub fn load_block_atlas_with_registry(
         tex_uv.insert(path.clone(), slot_uv(slot, grid));
     }
 
+    let transparent_tiles = (0..grid.saturating_mul(grid))
+        .map(|slot| {
+            let tile_x = slot % grid;
+            let tile_y = slot / grid;
+            (0..TILE).any(|y| {
+                (0..TILE).any(|x| {
+                    let pixel = ((tile_y * TILE + y) * dim + tile_x * TILE + x) as usize * 4;
+                    rgba.get(pixel + 3).is_some_and(|alpha| *alpha < 255)
+                })
+            })
+        })
+        .collect();
+
     // Build per-block models.
     let mut blocks = HashMap::new();
     for (name, faces) in block_faces {
@@ -1053,6 +1110,7 @@ pub fn load_block_atlas_with_registry(
         state_cubes,
         fallback,
         white_uv,
+        transparent_tiles,
         assume_cube: false,
         unresolved,
         missing_textures,
@@ -1432,8 +1490,10 @@ fn blit_tile(atlas: &mut [u8], dim: u32, slot: u32, tile: &[u8]) {
 fn slot_uv(slot: u32, grid: u32) -> [f32; 4] {
     let (col, row) = (slot % grid, slot / grid);
     let step = 1.0 / grid as f32;
-    // Inset by a fraction of a texel to avoid bleeding with nearest sampling.
-    let inset = step * 0.001;
+    // Address the centers of the outer texels. Sampling exactly on a tile
+    // boundary can select an adjacent atlas tile as small faces move by a
+    // subpixel, which presents as camera-dependent texture flicker.
+    let inset = step / (TILE as f32 * 2.0);
     let u0 = col as f32 * step + inset;
     let v0 = row as f32 * step + inset;
     [u0, v0, u0 + step - 2.0 * inset, v0 + step - 2.0 * inset]
@@ -1496,6 +1556,8 @@ mod tests {
             .rgba
             .chunks_exact(4)
             .any(|pixel| pixel == [20, 40, 200, 160]));
+        assert!(atlas.uv_has_transparency(atlas.model("water").faces[2].uv));
+        assert!(!atlas.uv_has_transparency(atlas.white_uv()));
         std::fs::remove_file(path).unwrap();
     }
 
@@ -1516,6 +1578,14 @@ mod tests {
             &serde_json::json!({"AND": [{"north": "true"}, {"half": "bottom"}]}),
             &properties,
         ));
+    }
+
+    #[test]
+    fn atlas_tiles_address_outer_texel_centers() {
+        let uv = slot_uv(1, 4);
+        let atlas_pixels = (4 * TILE) as f32;
+        assert!((uv[0] * atlas_pixels - 16.5).abs() < 1e-5);
+        assert!((uv[2] * atlas_pixels - 31.5).abs() < 1e-5);
     }
 
     #[test]

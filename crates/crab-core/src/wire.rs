@@ -77,6 +77,7 @@ impl ProtocolVersion {
             Self::V1_21_2 => serverbound_768(state, canonical),
             Self::V1_21_4 => serverbound_769(state, canonical),
             Self::V1_21_5 => serverbound_770(state, canonical),
+            Self::V1_21_6 => serverbound_771(state, canonical),
         }
     }
 
@@ -91,6 +92,7 @@ impl ProtocolVersion {
             Self::V1_21_2 => Some(serverbound_768),
             Self::V1_21_4 => Some(serverbound_769),
             Self::V1_21_5 => Some(serverbound_770),
+            Self::V1_21_6 => Some(serverbound_771),
         }
     }
 
@@ -105,7 +107,7 @@ impl ProtocolVersion {
             Self::V1_20_3 => clientbound_765(wire),
             Self::V1_20_5 | Self::V1_21 => clientbound_766(wire),
             Self::V1_21_2 | Self::V1_21_4 => clientbound_768(wire),
-            Self::V1_21_5 => clientbound_770(wire),
+            Self::V1_21_5 | Self::V1_21_6 => clientbound_770(wire),
         };
         (canonical >= 0).then_some(canonical)
     }
@@ -202,6 +204,23 @@ fn serverbound_770(state: State, canonical: i32) -> i32 {
         0x39..=0x3a => mapped + 1,
         0x3b.. => mapped + 2,
         _ => mapped,
+    }
+}
+
+/// Protocol 771 inserts Change Game Mode near the play-map head and moves the
+/// Game Test action behind Spectate near the tail.
+fn serverbound_771(state: State, canonical: i32) -> i32 {
+    let mapped = serverbound_770(state, canonical);
+    if state != State::Play {
+        return mapped;
+    }
+    match mapped {
+        ..=-1 => mapped,
+        0x00..=0x03 => mapped,
+        0x04..=0x3b => mapped + 1,
+        0x3c => 0x3e,
+        0x3d => 0x3d,
+        0x3e.. => mapped + 1,
     }
 }
 
@@ -352,6 +371,14 @@ mod tests {
         assert_eq!(
             ProtocolVersion::V1_21_5.serverbound_id(State::Play, 0x32),
             0x3f
+        );
+        assert_eq!(
+            ProtocolVersion::V1_21_6.serverbound_id(State::Play, 0x04),
+            0x06
+        );
+        assert_eq!(
+            ProtocolVersion::V1_21_6.canonical_clientbound_id(0x2b),
+            Some(JOIN_GAME)
         );
     }
 }

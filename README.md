@@ -1,6 +1,6 @@
 # Crabcraft
 
-A Minecraft **Java Edition 1.20.1–1.21.5** client written from scratch in **pure Rust**.
+A Minecraft **Java Edition 1.20.1–1.21.6** client written from scratch in **pure Rust**.
 
 [![CI](https://github.com/Solenopsisbot/CrabCraft/actions/workflows/ci.yml/badge.svg)](https://github.com/Solenopsisbot/CrabCraft/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
@@ -12,8 +12,8 @@ connection like a real player, simulates physics, renders the world, and
 connection.
 
 Protocol 763 (1.20/1.20.1) is the default. Set `CRABCRAFT_PROTOCOL=764`, `765`,
-`766`, `767`, `768`, `769`, `770`, or a matching version string (`1.20.2` through
-`1.21.5`) for newer servers. Protocol 764+ includes the Configuration state, registry transfer,
+`766`, `767`, `768`, `769`, `770`, `771`, or a matching version string (`1.20.2` through
+`1.21.6`) for newer servers. Protocol 764+ includes the Configuration state, registry transfer,
 network-NBT chunk data, chunk-batch acknowledgement, and versioned packet-ID
 profiles. Protocol 765 additionally handles NBT text components, UUID-addressed
 resource packs and removal, score reset/format packets, and play-to-configuration
@@ -40,6 +40,10 @@ Protocol 770 adds the 1.21.5 Spring to Life registries, the revised chunk
 heightmap array, chat checksum, shifted game-test/play packet maps, and the
 reorganized 96-type item-component registry.
 
+Protocol 771 adds the 1.21.6 registries, the fixed-length paletted chunk
+containers, the changed game-mode packet insertion, and the 1.21.6 component
+stack layouts used by the live client path.
+
 Crabcraft is under active development. The feature inventory below distinguishes
 implemented behavior from the remaining parity work; it is not yet a drop-in
 replacement for Mojang's client.
@@ -47,7 +51,7 @@ replacement for Mojang's client.
 ## What works today
 
 The core path is verified end-to-end against vanilla 1.20.1, 1.20.4, 1.20.6,
-1.21.1, 1.21.3, 1.21.4, and 1.21.5 servers (offline mode unless noted), with protocol codecs and mappings
+1.21.1, 1.21.3, 1.21.4, 1.21.5, and 1.21.6 servers (offline mode unless noted), with protocol codecs and mappings
 tested for every supported profile:
 
 - TCP connection, handshake, and **login** (with packet compression)
@@ -58,32 +62,37 @@ tested for every supported profile:
 - **Block registry**: resolves block-state IDs to names like
   `minecraft:grass_block` (1003 blocks)
 - **Dimension extents**: reads real `min_y`/`height` from the Join Game NBT codec
-- **Physics**: AABB-vs-voxel collision + gravity; the client is physically
-  simulated and the server accepts its movement
+- **Physics**: AABB-vs-voxel collision + gravity with vanilla tick ordering;
+  the 0.42-block/tick jump reaches about 1.25 blocks and clears a full block
 - **Rendering**: a `wgpu` voxel renderer (face-culled meshing, depth, lighting)
   with **textures loaded from your client jar** (atlas-stitched cube models +
   **element models** so slabs/stairs/plants/lanterns render as real shapes +
   vanilla-derived omitted-face UVs + namespaced resource-pack references +
-  grass/foliage tint), with opaque-first and back-to-front translucent passes
-  so water/glass appearance is stable while moving the camera; offscreen mode
-  + a live windowed viewer
+  grass/foliage tint), with alpha-aware opaque/translucent passes (including
+  cutout plants and leaves) and back-to-front blending so water/glass
+  appearance is stable while moving the camera; vanilla
+  blockstate rotations, UV locking, waterlogged fluid layers, and fluid-safe
+  face culling are applied before upload; offscreen mode + a live windowed viewer
 - **Player control**: first-person WASD/jump/look in the window, driven through
   the physics sim and sent to the server, with **Control or double-tap W sprint** and
   **Shift sneak** (including crouched speed, eye height, and server pose state),
   plus reliable vanilla-style **double-Space Creative/Spectator flight**,
   Spectator noclip, and **F main/offhand swapping** with local prediction
 - **Camera perspectives**: **F5** cycles first person, third-person rear, and
-  third-person front views; third person renders the local animated player and
+  third-person front views; third person renders the local animated player with
+  body yaw and head pitch following the camera and
   hides first-person hand overlays, with camera distance pulled forward by
   nearby blocks to avoid wall clipping
-- **Advanced movement**: sprint-swimming with low pose/eye height,
-  vine/ladder climbing, speed-sensitive camera FOV, and equipped-Elytra
+- **Advanced movement**: pitch-directed sprint-swimming with low pose/eye
+  height, vine/ladder climbing, speed-sensitive camera FOV, and equipped-Elytra
   fall-flying initiation with reduced glide gravity
 - **Vehicles**: local mount/dismount tracking, camera/seat synchronization,
   server-authoritative ridden-entity movement, horse-style steering/jump input,
   and predicted boat turning, travel, and individual paddle controls
 - **Fluid movement**: water/lava and waterlogged-block detection, reduced
-  movement, buoyant gravity, terminal speed, **Space** ascent, and **Shift** descent
+  movement, buoyant gravity, terminal speed, **Space** ascent, **Shift** descent,
+  underwater distance fog, and a 300-tick air supply with bubble HUD; drowning
+  damage remains server-authoritative
 - **World ambience**: server-synchronized day/night sky brightness plus
   rain/thunder darkening from vanilla game-state events, with matching dynamic
   terrain illumination and depth-tested moving sun/moon geometry
@@ -105,7 +114,8 @@ tested for every supported profile:
   unresolved block/item models instead of silently claiming complete coverage
 - **Entity presentation**: packet-driven arm swings, hurt reactions, independent
   head rotation, metadata-driven crouch/swim/glide/sleep/death/sit poses,
-  main/offhand items, visible material-coloured armour layers,
+  attached 3D main/offhand items for remote players, visible
+  material-coloured armour layers,
   bobbing/rotating 3D per-face dropped block models with short-horizon fall
   prediction, and full-scale falling blocks selected from the server's exact
   block-state ID
@@ -125,9 +135,10 @@ tested for every supported profile:
   books support editing, pagination, saving, title entry, and signing through
   the vanilla Edit Book packet
 - **Combat**: **left-click attacks** the mob you're aiming at (within reach) via
-  a swing + InteractEntity; verified to damage and kill a mob on a live server
-- **Survival vitals**: tracks **health/food**, and on death sends a respawn
-  request automatically
+  a swing + InteractEntity; the server derives damage from the selected held
+  item, enchantments, effects, and cooldown rather than trusting client damage
+- **Survival vitals**: tracks **health/food/air**, renders vanilla air bubbles,
+  and on death sends a respawn request automatically
 - **HUD**: rendered with the **real Minecraft GUI textures** + bitmap font —
   hotbar widget (number-key/scroll selection), **hearts/hunger + XP bar & level**
   (from `icons.png`) with pixel-correct aspect, and **stack-size numbers** on
@@ -162,8 +173,12 @@ tested for every supported profile:
 - **Status effects**: authoritative add/remove/expiry tracking with Speed,
   Slowness, Haste, Mining Fatigue, Jump Boost, Levitation, and Slow Falling
   applied to local movement, mining, and gravity, plus vanilla HUD icons
+- **Mining tools**: pickaxe/axe/shovel/hoe effectiveness is loaded from the
+  selected client jar's vanilla `mineable/*` block tags, with material speeds
+  applied before Haste and Mining Fatigue
 - **Item/block use**: empty-hand interactions, doors/buttons/containers while
-  holding blocks, air-use for food/bows/buckets/shields, and release-use packets
+  holding blocks, hold-to-eat food even while aiming at ordinary blocks,
+  air-use for bows/buckets/shields, and release-use packets
 - **Pause/options menus**: **Esc** opens a menu with the vanilla button sprites,
   an in-game controls reference, and live FOV, mouse-sensitivity, and fullscreen
   settings; focus regain immediately refreshes the drawable and resets stale
@@ -417,7 +432,9 @@ Microsoft account. Using the official server jar:
 - [x] Protocol 770 / 1.21.5 Spring to Life registries, shifted packet maps,
   chunk heightmap arrays, chat checksum, reorganized components, and official-server
   core/component live validation
-- [ ] Protocol 771+ (newer than 1.21.5) registries and packet schemas
+- [x] Protocol 771 / 1.21.6 registries, shifted packet maps, fixed-length chunk
+  palettes, component payloads, and official-server core validation
+- [ ] Protocol 772+ (newer than 1.21.6) registries and packet schemas
 - [ ] (Far future, maybe) Forge mod support — see the note below
 
 ### On Forge mods
