@@ -2867,7 +2867,11 @@ where
                             if pkt.health <= 0.0 && !dead {
                                 dead = true;
                                 tracing::info!("died — respawning");
-                                conn.send(&ClientStatusCommand { action: 0 }).await?;
+                                if protocol == ProtocolVersion::V1_21_7 {
+                                    conn.send_unmapped(&play771::ClientCommand(0)).await?;
+                                } else {
+                                    conn.send(&ClientStatusCommand { action: 0 }).await?;
+                                }
                             } else if pkt.health > 0.0 {
                                 dead = false;
                             }

@@ -22,6 +22,25 @@ impl ChatCommand {
     }
 }
 
+/// Protocol 772 client status moved behind the newly registered chat packets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClientCommand(pub i32);
+
+impl Packet for ClientCommand {
+    const ID: i32 = 0x0c;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Serverbound;
+
+    fn encode<B: BufMut>(&self, dst: &mut B) -> Result<(), ProtoError> {
+        dst.put_varint(self.0);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(src: &mut B) -> Result<Self, ProtoError> {
+        Ok(Self(src.read_varint()?))
+    }
+}
+
 impl Packet for ChatCommand {
     const ID: i32 = 0x04;
     const STATE: State = State::Play;
