@@ -57,6 +57,12 @@ remains the detailed source of truth.
   tail, and paddle animation.
 - Vanilla-derived mining-tool tags from the selected client jar, including
   material speeds and status-effect modifiers for predicted break timing.
+- Protocol-backed special-entity rendering for item frames, paintings, area
+  clouds, lightning, and block/item/text Displays, including jar-sourced
+  painting textures and alpha-blended effect/text streams.
+- Bundled vanilla rest-pose entity geometry generated from decompiled Java model
+  builders; client jars now provide textures without requiring Bedrock geometry
+  assets or a separate geometry checkout.
 
 ### Changed
 
@@ -69,6 +75,11 @@ remains the detailed source of truth.
 - Replaced block-family state guesses in the primary rendering path with
   generated property schemas for every supported registry profile.
 - Creative flight uses vanilla-style double-Space toggling; `F` swaps hands.
+- Swimming now requires the player's head/eyes to be in water. Creative and
+  Spectator HUDs hide survival hearts, hunger, and oxygen bubbles.
+- Section Blocks Update packets are decoded for every supported protocol profile,
+  so mob, fluid, piston, and other multi-block server changes reach the world
+  model and invalidate the right chunk meshes.
 - The inventory screen includes a cursor-facing 3D local-player preview with an
   isolated camera/depth viewport and correct HUD layering.
 - The pause menu now includes an options screen with live FOV, mouse
@@ -79,6 +90,15 @@ remains the detailed source of truth.
 - Entity asset resolution now covers Java family texture directories, shared
   projectile and minecart geometry, and Bedrock's plain `.json` model files,
   substantially reducing generic-box fallbacks with the documented asset setup.
+  third-person views render the local animated/posed player model and shorten
+  the camera arm around walls to prevent clipping.
+- Entity asset resolution now covers Java family texture directories and shared
+  projectile/minecart texture variants, substantially reducing generic-box
+  fallbacks with the documented asset setup.
+- Entity loading now reads textures and optional custom geometry from the client
+  jar directly; the launcher no longer downloads a separate geometry checkout,
+  and vanilla models without resource geometry use deterministic registry-sized
+  generated meshes.
 - Falling-block entities retain their Spawn Entity block-state ID and render as
   full-scale textured block models instead of anonymous bounds boxes.
 - Entity Pose metadata now uses the correct serializer on component-era

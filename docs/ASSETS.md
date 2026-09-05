@@ -9,21 +9,15 @@ repository contain only names, numeric IDs, dimensions, and state metadata.
 For automatic setup, `cargo run -p crabcraft-launcher -- client` resolves the
 selected version through Mojang's version manifest, verifies downloads by their
 published SHA-1, downloads only the indexed audio objects needed by Crabcraft,
-and supplies all variables below. It also makes a sparse checkout of the entity
-model directory from Mojang's public `bedrock-samples` repository. Everything
-is stored under the gitignored `assets-cache/`; no Mojang content is copied into
-the source tree or included in builds.
+and supplies all variables below. Everything is stored under the gitignored
+`assets-cache/`; no Mojang content is copied into the source tree or included in
+builds.
 
 | Variable | Input | Used for |
 |---|---|---|
-| `CRABCRAFT_JAR` | A Java Edition client jar | Block/item textures and models, entity skins, GUI sprites, fonts, particles, and destroy stages |
-| `CRABCRAFT_ENTITY_MODELS` | Mojang `bedrock-samples/resource_pack/models/entity` | Box geometry and bone pivots for 3D entities |
+| `CRABCRAFT_JAR` | A Java Edition client jar | Block/item/entity textures and models, GUI sprites, fonts, particles, and destroy stages |
 | `CRABCRAFT_ASSETS` | A launcher `assets` directory | Indexed sound objects |
 | `CRABCRAFT_ASSET_INDEX` | Launcher asset-index name | Selects the JSON index under `assets/indexes`; defaults to `5` |
-
-The entity-model path may point at the sample repository root, its
-`resource_pack` directory, or the final `models/entity` directory. The loader
-locates the model directory without copying it into the project.
 
 ## Blockstate and model resolution
 
@@ -98,45 +92,59 @@ that every runtime variant is identical to Java Edition.
 
 ## Entity model resolution
 
-Java entity models are code-defined and are not present in a client jar. The
-renderer therefore combines Bedrock sample geometry with the corresponding Java
-texture. Direct matches use `<entity>.geo.json`; an explicit alias table handles
-shared models, versioned Bedrock filenames, Java family texture directories,
-vehicle variants, and projectiles. Both `.geo.json` and the few plain `.json`
-geometry files in the sample pack are accepted.
+Java entity meshes are code-defined rather than JSON resources in a client jar.
+The loader extracts the corresponding entity texture directly from the jar and
+ships a generated Rust rest-pose table derived from the decompiled vanilla
+model builders. If a custom/resource-pack archive contains compatible geometry
+JSON, direct matches under `assets/minecraft/models/entity/` or
+`assets/minecraft/geo/` are loaded first; otherwise the bundled vanilla table
+is used, with a deterministic registry-sized model as the last fallback.
+Player and boat models retain their built-in Java-style geometry.
+
+`crates/crab-assets/src/vanilla_models.rs` is numeric generated data extracted
+from the 1.20.1 client model-layer builders with CFR; the source jar and
+decompiler output remain outside the repository. When a supported Minecraft
+release changes model-layer builders, regenerate and review this table rather
+than checking client binaries or downloaded asset archives into the project.
 
 The atlas is keyed by the selected protocol registry's entity type ID. This is
 important because IDs move between releases even when the asset names do not.
-Missing geometry or textures are non-fatal: the entity retains its generated
-registry dimensions and renders as a coloured bounds box. Dropped items and
-falling blocks use their item/block rendering paths rather than mob geometry.
+Missing textures are non-fatal: the entity retains its generated registry
+dimensions and renders as a coloured bounds box. Missing geometry is covered by
+the registry-sized fallback. Dropped items and falling blocks use their
+item/block rendering paths rather than mob geometry.
 Humanoid equipment uses inflated copies of the matching model bones, so armour
 follows movement and authoritative pose metadata instead of remaining as
 axis-aligned boxes around the entity.
 
-The resolver covers every ordinary entity in the supported registry through a
-direct Mojang sample filename or an explicit tested alias. Java texture aliases
-also cover climate variants and relocated projectile/family textures while
-retaining older direct-path fallbacks. Because the Bedrock sample pack does not
-publish boats, Crabcraft supplies a small Java-style hull/raft geometry and
-still reads each wood/chest texture from the user's jar. Item-shaped projectiles
-use item-atlas sprites, primed TNT uses its block model, and entity bones named
-as wings, fins, tails, or paddles receive continuous procedural motion in
-addition to walk, attack, hurt, and pose animation.
+The resolver covers every ordinary entity in the supported registry through an
+explicit Java texture alias table (family folders, climate variants, shared
+textures, vehicle variants, and projectiles) while retaining direct-path
+fallbacks. Item-shaped projectiles use item-atlas sprites, primed TNT uses its
+block model, and generated entity bones still receive walk, attack, hurt, head,
+and pose animation.
 
-Entity geometry is a compatibility approximation, not Java model equivalence.
-Java Edition's entity meshes and animation controllers are code-defined rather
-than stored in the client resource pack; Bedrock sample geometry and Crabcraft's
-procedural animation therefore cannot guarantee vertex-, pose-, or timing-level
-identity. Missing source geometry continues to render as an explicit bounds box
-instead of a guessed mob model.
+The same jar supplies all 30 vanilla painting textures (`textures/painting/`),
+indexed in protocol registry order. The live renderer has dedicated
+protocol-backed paths for item frames (including framed item and eight-step
+rotation), paintings, area-effect clouds (radius, color, and waiting state),
+lightning, and block/item/text Display entities (content, transforms,
+billboards, text wrapping, background, and opacity). Interaction and marker
+entities are collision/selection volumes and intentionally have no visible
+mesh. These paths do not require Bedrock geometry assets or a second checkout.
 
-When adding an alias:
+The bundled entity geometry is a compatibility rest-pose extraction, not full
+Java model equivalence. Java Edition's animation controllers and some
+renderer-specific transforms live in compiled client code, so the table cannot
+guarantee vertex-, pose-, or timing-level identity for every model. Missing
+textures continue to render as explicit registry-sized diagnostic boxes rather
+than silently guessing a texture.
+
+When adding a texture alias:
 
 1. Confirm the entity name and ID in the matching generated registry.
-2. Confirm the geometry filename in an unmodified `bedrock-samples` checkout.
-3. Confirm the texture path inside a legitimately obtained client jar.
-4. Add a resolver test; do not add either source asset to the repository.
+2. Confirm the texture path inside a legitimately obtained client jar.
+3. Add a resolver test; do not add source assets to the repository.
 
 ## Resource packs
 
@@ -150,6 +158,6 @@ success.
 ## Repository policy
 
 Client/server jars, downloaded packs, launcher object stores, extracted textures,
-Bedrock samples, world saves, and authentication data are ignored and must never
-be committed. See [Contributing](../CONTRIBUTING.md) and
+world saves, and authentication data are ignored and must never be committed.
+See [Contributing](../CONTRIBUTING.md) and
 [Security](../SECURITY.md) for the public-repository rules.

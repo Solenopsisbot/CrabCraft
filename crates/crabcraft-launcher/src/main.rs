@@ -98,8 +98,6 @@ async fn prepare_client(version: &str, forwarded: &[String]) -> Result<Command> 
         .join(format!("{asset_index_id}.json"));
     download_verified(&Client::new(), &metadata.asset_index, &index_path).await?;
     download_audio_assets(&assets, &index_path).await?;
-    let entity_models = ensure_bedrock_models(&root)?;
-
     let mut command = Command::new("cargo");
     command
         .args(["run", "--release", "-p", "crabcraft", "--", "render"])
@@ -107,8 +105,7 @@ async fn prepare_client(version: &str, forwarded: &[String]) -> Result<Command> 
         .env("CRABCRAFT_PROTOCOL", version)
         .env("CRABCRAFT_JAR", &jar)
         .env("CRABCRAFT_ASSETS", &assets)
-        .env("CRABCRAFT_ASSET_INDEX", asset_index_id)
-        .env("CRABCRAFT_ENTITY_MODELS", entity_models);
+        .env("CRABCRAFT_ASSET_INDEX", asset_index_id);
     Ok(command)
 }
 
@@ -357,33 +354,6 @@ fn audio_objects(index: AssetIndex) -> Vec<AssetObject> {
         .collect::<BTreeMap<_, _>>()
         .into_values()
         .collect()
-}
-
-fn ensure_bedrock_models(root: &Path) -> Result<PathBuf> {
-    let checkout = root.join("bedrock-samples");
-    let models = checkout.join("resource_pack/models/entity");
-    if models.join("cow.geo.json").exists() {
-        return Ok(models);
-    }
-    eprintln!("Downloading Mojang Bedrock entity samples");
-    std::fs::create_dir_all(root)?;
-    let status = Command::new("git")
-        .args(["clone", "--depth=1", "--filter=blob:none", "--sparse"])
-        .arg("https://github.com/Mojang/bedrock-samples.git")
-        .arg(&checkout)
-        .status()
-        .context("run git to fetch Mojang bedrock-samples")?;
-    if !status.success() {
-        bail!("git could not fetch Mojang/bedrock-samples");
-    }
-    let status = Command::new("git")
-        .current_dir(&checkout)
-        .args(["sparse-checkout", "set", "resource_pack/models/entity"])
-        .status()?;
-    if !status.success() || !models.exists() {
-        bail!("Bedrock sample checkout does not contain entity models");
-    }
-    Ok(models)
 }
 
 fn eula_accepted(path: &Path) -> Result<bool> {

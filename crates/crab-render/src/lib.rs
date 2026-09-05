@@ -20,14 +20,15 @@ pub use camera::Camera;
 pub use hud::{
     build_hud_pipelines, container_geometry, container_rect, container_slot_rect,
     enchantment_option_rect, furnace_geometry, furnace_slot_rect, hotbar_slot_rect, hud_geometry,
-    inventory_geometry, inventory_rect, inventory_slot_rect, menu_button_rect, menu_geometry,
-    push_text, render_hud_to_png, simple_container_geometry, simple_container_rect,
-    simple_container_slot_rect, status_effect_geometry, HudFrame, HudPipelines,
+    hud_geometry_with_air, inventory_geometry, inventory_rect, inventory_slot_rect,
+    menu_button_rect, menu_geometry, push_text, render_hud_to_png, simple_container_geometry,
+    simple_container_rect, simple_container_slot_rect, status_effect_geometry, HudFrame,
+    HudPipelines,
 };
 pub use mesh::{
-    block_item_mesh, block_state_item_mesh, box_mesh, entity_armour_mesh, entity_mesh,
-    entity_mesh_with_look, entity_mesh_with_pose, item_model_mesh, mesh_region,
-    mesh_region_with_registry, Mesh, Vertex,
+    area_effect_cloud_mesh, block_item_mesh, block_state_item_mesh, box_mesh, entity_armour_mesh,
+    entity_mesh, entity_mesh_with_look, entity_mesh_with_pose, item_frame_mesh, item_model_mesh,
+    lightning_bolt_mesh, mesh_region, mesh_region_with_registry, painting_mesh, Mesh, Vertex,
 };
 pub use renderer::{
     build_block_pipeline, build_translucent_pipeline, render_to_png, render_to_rgba, upload_atlas,

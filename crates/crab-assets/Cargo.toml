@@ -1,6 +1,6 @@
 [package]
 name = "crab-assets"
-description = "Loads Minecraft block models/textures from a client jar and stitches a texture atlas."
+description = "Loads Minecraft block/entity models and textures from a client jar and stitches atlases."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

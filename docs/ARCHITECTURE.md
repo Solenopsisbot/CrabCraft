@@ -58,15 +58,24 @@ commands, and expected snapshot revisions. User-authored chat, command, book,
 and rename text is redacted. Replays intentionally sit above packet bytes so
 they remain useful when a protocol adapter changes.
 
-Entity assets are assembled at startup from user-provided sources: Java textures
-from the selected client jar and compatible box/bone geometry from Mojang's
-Bedrock sample pack. Name aliases bridge Java family texture directories and
-shared/versioned geometry names. The resulting atlas is keyed by the active
-protocol's generated entity IDs; unresolved entries deliberately retain a
-registry-sized diagnostic box. See [Asset pipeline](ASSETS.md).
+Entity assets are assembled at startup from the selected user-provided client
+jar. Java textures and optional custom geometry JSON are read from the archive;
+the repository also contains a generated Rust rest-pose table extracted from
+the decompiled vanilla model builders. That table is used before the
+deterministic registry-sized fallback, so ordinary entities do not require
+Bedrock geometry assets or a second checkout. Name aliases bridge Java family
+texture directories and shared texture names. The resulting atlas is keyed by
+the active protocol's generated entity IDs; unresolved textures deliberately
+retain a registry-sized diagnostic box. See [Asset pipeline](ASSETS.md).
 Special entities stay data-driven where their appearance is not a mob model:
 dropped stacks use item/block atlases, while falling blocks retain Spawn Entity's
 global block-state ID and resolve it through the active versioned block registry.
+Item frames, paintings, area-effect clouds, lightning, and the three Display
+variants are also presentation-specific meshes. Their item/variant/state,
+transform, billboard, opacity, and waiting flags are decoded from Entity
+Metadata in `Shared`; the window only consumes that snapshot and sends the
+corresponding opaque or alpha-blended vertex streams to the GPU. Interaction
+and marker entities intentionally remain invisible, matching vanilla.
 For modelled entities, interpolation, limb swing, attack/hurt reactions, head
 yaw, and Pose metadata are combined when CPU mesh vertices are rebuilt. Protocol
 766+ uses the shifted Pose metadata serializer introduced with the 1.20.5
@@ -119,6 +128,14 @@ point—not the wider player collision box—for submersion and enables blue
 distance fog; this prevents unloaded or distant geometry from remaining fully
 visible through a water volume. Pose eye-height transitions are smoothed so
 swimming at the surface cannot alternate the fog state as the pose changes.
+
+Swimming is gated separately by an eye-height water sample, so wading into
+water does not force the swimming pose until the player's head is submerged.
+The client applies both single-block and section-batch server block updates;
+the latter is the normal path for mob growth, fluids, pistons, and other
+multi-block world changes, and each update invalidates its chunk mesh. Legacy
+profiles' explosion offset records are also applied as server-authoritative air
+updates; modern profiles rely on their section updates for the same result.
 
 Camera perspective is also window-local. F5 cycles first person and two
 third-person orbit directions; third-person views append the local humanoid to

@@ -224,56 +224,36 @@ fn load_gui_atlas() -> crab_assets::GuiAtlas {
     }
 }
 
-/// Loads 3D entity models + textures: geometry from `CRABCRAFT_ENTITY_MODELS`
-/// (a bedrock-samples `models/entity` dir) and textures from `CRABCRAFT_JAR`.
-/// Returns an empty atlas (entities render as boxes) if either is unset.
+/// Loads entity textures and optional geometry JSON from `CRABCRAFT_JAR`.
+/// Vanilla Java geometry is compiled into the client rather than stored as a
+/// resource, so crab-assets synthesizes a textured hitbox model when no custom
+/// geometry is present. Returns an empty atlas if the jar is unset/unreadable.
 fn load_entity_atlas(registries: crab_registry::RegistrySet) -> crab_assets::EntityAtlas {
     let empty =
         || crab_assets::load_entity_atlas(std::path::Path::new(""), std::path::Path::new(""), &[]);
-    let (Ok(jar), Ok(dir)) = (
-        std::env::var("CRABCRAFT_JAR"),
-        std::env::var("CRABCRAFT_ENTITY_MODELS"),
-    ) else {
-        tracing::info!(
-            "set CRABCRAFT_ENTITY_MODELS=<bedrock-samples .../resource_pack/models/entity> \
-             for 3D entity models; using boxes"
-        );
+    let Ok(jar) = std::env::var("CRABCRAFT_JAR") else {
+        tracing::info!("set CRABCRAFT_JAR=<client jar> for textured entity models; using boxes");
         return empty();
     };
-
-    // Be forgiving: accept the entity dir, or a bedrock-samples root/resource_pack.
-    let mut dir = std::path::PathBuf::from(&dir);
-    if !dir.join("cow.geo.json").exists() {
-        for sub in ["resource_pack/models/entity", "models/entity", "entity"] {
-            if dir.join(sub).join("cow.geo.json").exists() {
-                dir = dir.join(sub);
-                break;
-            }
-        }
-    }
-    let geo_count = std::fs::read_dir(&dir)
-        .map(|rd| {
-            rd.filter_map(Result::ok)
-                .filter(|e| e.file_name().to_string_lossy().ends_with(".geo.json"))
-                .count()
-        })
-        .unwrap_or(0);
 
     let types: Vec<(i32, String)> = registries
         .entities()
         .iter()
         .map(|e| (e.id as i32, e.name.to_string()))
         .collect();
-    let atlas = crab_assets::load_entity_atlas(std::path::Path::new(&jar), &dir, &types);
+    let atlas = crab_assets::load_entity_atlas_from_jar_with_registry(
+        std::path::Path::new(&jar),
+        registries,
+        &types,
+    );
 
     if atlas.models.is_empty() {
-        tracing::warn!(
-            "no entity models loaded from {dir:?} ({geo_count} .geo.json files found) \u{2014} \
-             entities render as boxes. Point CRABCRAFT_ENTITY_MODELS at \
-             bedrock-samples/resource_pack/models/entity"
-        );
+        tracing::warn!("no entity textures loaded from {jar:?}; entities render as boxes");
     } else {
-        tracing::info!("loaded {} entity models from {dir:?}", atlas.models.len());
+        tracing::info!(
+            "loaded {} jar entity models from {jar:?}",
+            atlas.models.len()
+        );
     }
     atlas
 }

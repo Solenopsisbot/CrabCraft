@@ -13,6 +13,7 @@ const SPAWN_ENTITY: i32 = 0x01;
 const ENTITY_ANIMATION: i32 = 0x04;
 const BLOCK_ENTITY_DATA: i32 = 0x08;
 const BLOCK_CHANGE: i32 = 0x0a;
+const SECTION_BLOCKS_UPDATE: i32 = 0x43;
 const BOSS_BAR: i32 = 0x0b;
 const CLEAR_TITLES: i32 = 0x0e;
 const CONTAINER_CONTENT: i32 = 0x12;
@@ -277,6 +278,7 @@ fn clientbound_768(wire: i32) -> i32 {
         0x01 => SPAWN_ENTITY,
         0x07 => BLOCK_ENTITY_DATA,
         0x09 => BLOCK_CHANGE,
+        0x4e => SECTION_BLOCKS_UPDATE,
         0x0a => BOSS_BAR,
         0x0f => CLEAR_TITLES,
         0x13 => CONTAINER_CONTENT,
@@ -339,6 +341,7 @@ const ENTITY_DESTROY: i32 = 0x3e;
 
 fn clientbound_770(wire: i32) -> i32 {
     match wire {
+        0x4d => SECTION_BLOCKS_UPDATE,
         0x00..=0x01 => clientbound_768(wire),
         0x02..=0x76 => clientbound_768(wire + 1),
         0x77 => -1,
@@ -380,5 +383,39 @@ mod tests {
             ProtocolVersion::V1_21_6.canonical_clientbound_id(0x2b),
             Some(JOIN_GAME)
         );
+    }
+
+    #[test]
+    fn section_block_updates_map_to_the_canonical_id() {
+        for (profile, wire) in [
+            (ProtocolVersion::V1_20_1, 0x43),
+            (ProtocolVersion::V1_20_2, 0x45),
+            (ProtocolVersion::V1_20_3, 0x47),
+            (ProtocolVersion::V1_20_5, 0x49),
+            (ProtocolVersion::V1_21, 0x49),
+            (ProtocolVersion::V1_21_2, 0x4e),
+            (ProtocolVersion::V1_21_4, 0x4e),
+            (ProtocolVersion::V1_21_5, 0x4d),
+        ] {
+            assert_eq!(
+                profile.canonical_clientbound_id(wire),
+                Some(SECTION_BLOCKS_UPDATE),
+                "profile {:?} wire id {wire:#x}",
+                profile
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_explosion_packets_retain_the_canonical_id() {
+        for (profile, wire) in [
+            (ProtocolVersion::V1_20_1, 0x1d),
+            (ProtocolVersion::V1_20_2, 0x1e),
+            (ProtocolVersion::V1_20_3, 0x1e),
+            (ProtocolVersion::V1_20_5, 0x20),
+            (ProtocolVersion::V1_21, 0x20),
+        ] {
+            assert_eq!(profile.canonical_clientbound_id(wire), Some(0x1d));
+        }
     }
 }

@@ -1,8 +1,11 @@
 //! # crab-assets
 //!
 //! Loads Minecraft block **models** and **textures** straight from a client jar
-//! (your own install — assets are never bundled with Crabcraft) and stitches a
-//! texture atlas for the renderer.
+//! (your own install — assets are never bundled with Crabcraft) and stitches
+//! texture atlases for the renderer. Entity textures and optional custom model
+//! JSON are read from that same archive; vanilla Java entity models are
+//! synthesized from registry hitboxes because the client compiles them into
+//! code instead of shipping them as resource files.
 //!
 //! Scope: **full-cube** blocks resolve to per-face atlas textures. Blocks with
 //! `elements` (slabs, stairs, plants, lanterns, …) resolve to element geometry
@@ -26,8 +29,10 @@ use model::{resolve, ElementJson, Resolved};
 
 pub mod entity;
 pub use entity::{
-    boat_geometry, load_entity_atlas, load_entity_texture, load_geometry, parse_geometry,
-    player_geometry, Bone, Cube, EntityAtlas, EntityGeometry, EntityModelEntry,
+    boat_geometry, generated_entity_geometry, load_entity_atlas, load_entity_atlas_from_jar,
+    load_entity_atlas_from_jar_with_registry, load_entity_texture, load_geometry,
+    load_geometry_from_jar, painting_texture_name, parse_geometry, player_geometry, Bone, Cube,
+    EntityAtlas, EntityGeometry, EntityModelEntry, PaintingAtlasEntry,
 };
 
 pub mod gui;
@@ -56,10 +61,14 @@ pub struct ResourceSet {
 
 /// Loads every CPU-side resource derived from one validated archive. Callers
 /// can perform this on a worker and commit the returned set atomically.
+///
+/// The third argument is retained for source compatibility with older callers;
+/// entity geometry is now resolved from the archive itself and the argument is
+/// intentionally ignored.
 pub fn load_resource_set(
     archive: &Path,
     registries: crab_registry::RegistrySet,
-    entity_models: Option<&Path>,
+    _entity_models: Option<&Path>,
 ) -> Result<ResourceSet, AssetError> {
     let block_names: Vec<String> = registries
         .blocks()
@@ -71,14 +80,18 @@ pub fn load_resource_set(
         .iter()
         .map(|item| item.name.to_owned())
         .collect();
-    let entities = entity_models.map(|models| {
-        let types: Vec<(i32, String)> = registries
-            .entities()
-            .iter()
-            .map(|entity| (entity.id as i32, entity.name.to_owned()))
-            .collect();
-        load_entity_atlas(archive, models, &types)
-    });
+    let types: Vec<(i32, String)> = registries
+        .entities()
+        .iter()
+        .map(|entity| (entity.id as i32, entity.name.to_owned()))
+        .collect();
+    // Java entity models are compiled into the client and are not present as
+    // resource files. The jar/resource-pack archive supplies textures and may
+    // optionally contain custom geometry JSON; the loader synthesizes a
+    // hitbox-sized textured model for everything else.
+    let entities = Some(load_entity_atlas_from_jar_with_registry(
+        archive, registries, &types,
+    ));
     Ok(ResourceSet {
         blocks: load_block_atlas_with_registry(archive, &block_names, registries)?,
         items: load_item_atlas(archive, &item_names)?,
