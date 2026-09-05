@@ -2595,9 +2595,13 @@ impl Graphics {
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.camera_bind_group, &[]);
             pass.set_bind_group(1, &self.atlas_bind_group, &[]);
-            let mut opaque_chunks: Vec<_> = self.chunk_meshes.iter().collect();
-            opaque_chunks.sort_by_key(|(coord, _)| **coord);
-            for (_, chunk) in opaque_chunks {
+            // Opaque terrain is depth-tested, so hashmap iteration order is
+            // irrelevant. Avoid sorting every loaded chunk on every frame.
+            for (_coord, chunk) in self.chunk_meshes.iter().filter(|(coord, _)| {
+                let x = coord.0 as f32 * 16.0 + 8.0 - camera.eye.x;
+                let z = coord.1 as f32 * 16.0 + 8.0 - camera.eye.z;
+                x * x + z * z <= 384.0 * 384.0
+            }) {
                 if let Some((buffer, count)) = &chunk.opaque {
                     pass.set_vertex_buffer(0, buffer.slice(..));
                     pass.draw(0..*count, 0..1);
@@ -2636,6 +2640,11 @@ impl Graphics {
             let mut translucent_chunks: Vec<_> = self
                 .chunk_meshes
                 .iter()
+                .filter(|(coord, _)| {
+                    let x = coord.0 as f32 * 16.0 + 8.0 - camera.eye.x;
+                    let z = coord.1 as f32 * 16.0 + 8.0 - camera.eye.z;
+                    x * x + z * z <= 256.0 * 256.0
+                })
                 .filter(|(_, chunk)| chunk.translucent.is_some())
                 .collect();
             translucent_chunks.sort_by(|(a, _), (b, _)| {
