@@ -1,14 +1,13 @@
-//! Builds an entity atlas (cow/pig/creeper) and renders all three from it, to
-//! verify the shared-atlas UV offsetting + multi-model path.
+//! Builds a jar-only entity atlas (cow/pig/creeper) and renders all three from
+//! it, to verify shared-atlas UV offsetting + multi-model path.
 //!
-//! Usage: cargo run -p crab-render --example entities -- MODELS_DIR CLIENT.jar [out.png]
+//! Usage: cargo run -p crab-render --example entities -- CLIENT.jar [out.png]
 
 use crab_render::{entity_mesh, render_to_png, Camera, Mesh};
 use glam::Vec3;
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let models_dir = args.next().expect("models dir");
     let jar = args.next().expect("jar path");
     let out = args
         .next()
@@ -20,16 +19,17 @@ fn main() {
         .iter()
         .map(|e| (e.id as i32, e.name.to_string()))
         .collect();
-    let atlas = crab_assets::load_entity_atlas(
+    let atlas = crab_assets::load_entity_atlas_from_jar_with_registry(
         std::path::Path::new(&jar),
-        std::path::Path::new(&models_dir),
+        crab_registry::RegistrySet::for_protocol(763),
         &types,
     );
     eprintln!(
-        "entity atlas {}x{}, {} models loaded",
+        "entity atlas {}x{}, {} models and {} paintings loaded",
         atlas.width,
         atlas.height,
-        atlas.models.len()
+        atlas.models.len(),
+        atlas.paintings.len()
     );
 
     let dims = [atlas.width as f32, atlas.height as f32];

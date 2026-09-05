@@ -55,6 +55,10 @@ const ID_JOIN_GAME: i32 = 0x28;
 const ID_MAP_CHUNK: i32 = 0x24;
 const ID_UNLOAD_CHUNK: i32 = 0x1e;
 const ID_BLOCK_CHANGE: i32 = 0x0a;
+/// Canonical 1.20.1 id for Section Blocks Update. Newer profiles are mapped
+/// to this id by `ProtocolVersion::canonical_clientbound_id`.
+const ID_SECTION_BLOCKS_UPDATE: i32 = 0x43;
+const ID_EXPLOSION: i32 = 0x1d;
 const ID_BLOCK_ENTITY_DATA: i32 = 0x08;
 const ID_SPAWN_ENTITY: i32 = 0x01;
 const ID_SPAWN_PLAYER: i32 = 0x03;
@@ -400,7 +404,7 @@ pub struct SignState {
 type PositionedSign = ((i32, i32, i32), SignState);
 
 /// A tracked non-self entity (other player, mob, item, …) for rendering.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Entity {
     pub x: f64,
     pub y: f64,
@@ -426,6 +430,43 @@ pub struct Entity {
     pub hurt_sequence: u64,
     /// For dropped-item entities: the contained item id (for icon rendering).
     pub item: Option<i32>,
+    /// For item-frame entities: the framed item id (separate from dropped items).
+    pub frame_item: Option<i32>,
+    /// Item-frame rotation, in vanilla's eight-step 45-degree units.
+    pub frame_rotation: u8,
+    /// For item-display entities: the displayed item id.
+    pub display_item: Option<i32>,
+    /// For block-display entities: the global block-state id.
+    pub display_block_state: Option<u32>,
+    /// For text-display entities: the flattened text component.
+    pub display_text: Option<String>,
+    /// Text-display line width in pixels (vanilla default is 200).
+    pub display_line_width: i32,
+    /// Text-display background ARGB value.
+    pub display_background: i32,
+    /// Text-display style flags (shadow, see-through, alignment).
+    pub display_flags: u8,
+    /// Text-display opacity byte (0 is fully transparent, 255 opaque).
+    pub display_text_opacity: u8,
+    /// Display billboard constraint: fixed (0), vertical (1), horizontal (2),
+    /// or center (3), as sent by the Display metadata byte.
+    pub display_billboard: u8,
+    /// Display translation/scale from the metadata transformation.
+    pub display_translation: [f32; 3],
+    pub display_scale: [f32; 3],
+    /// Display left/right quaternion rotations, in (x, y, z, w) order.
+    pub display_left_rotation: [f32; 4],
+    pub display_right_rotation: [f32; 4],
+    /// Painting variant registry id, when supplied by metadata.
+    pub painting_variant: Option<u32>,
+    /// Area-effect-cloud radius and packed color.
+    pub effect_radius: f32,
+    pub effect_color: [f32; 3],
+    /// Area-effect clouds suppress their visual while waiting to expand.
+    pub effect_waiting: bool,
+    /// Spawn Entity's overloaded object-data field. Paintings use this for
+    /// their attached-face direction; falling blocks use `block_state`.
+    pub object_data: i32,
     /// For falling-block entities: the exact protocol block-state ID carried by
     /// Spawn Entity's object-data field.
     pub block_state: Option<u32>,
@@ -448,6 +489,8 @@ pub struct PlayerState {
     /// Current health (0..=20) and food (0..=20).
     pub health: f32,
     pub food: i32,
+    /// Remaining air supply (vanilla maximum is 300 ticks).
+    pub air: i32,
     /// Selected hotbar slot (0..=8).
     pub selected_slot: u8,
     /// Game mode: 0 = survival, 1 = creative, 2 = adventure, 3 = spectator.
@@ -481,6 +524,7 @@ impl Default for PlayerState {
             vel: [0.0; 3],
             health: 20.0,
             food: 20,
+            air: 300,
             selected_slot: 0,
             gamemode: 0,
             xp_bar: 0.0,
@@ -638,7 +682,7 @@ fn fluid_kind_at(
                 };
                 match registries.block_name(state) {
                     Some("minecraft:lava") => return Some(FluidKind::Lava),
-                    Some("minecraft:water") => water = true,
+                    Some("minecraft:water" | "minecraft:bubble_column") => water = true,
                     _ if registries.block_state_property(state, "waterlogged") == Some("true") => {
                         water = true;
                     }
@@ -648,6 +692,28 @@ fn fluid_kind_at(
         }
     }
     water.then_some(FluidKind::Water)
+}
+
+/// Returns whether the player's eye/head is actually inside a water block.
+/// Being merely waist-deep is not enough to enter the swimming pose; this is
+/// the distinction vanilla makes between wading and swimming.
+fn head_in_water(registries: crab_registry::RegistrySet, world: &World, feet: [f64; 3]) -> bool {
+    let x0 = (feet[0] - crab_physics::PLAYER_HALF_WIDTH).floor() as i32;
+    let x1 = (feet[0] + crab_physics::PLAYER_HALF_WIDTH - 1e-7).floor() as i32;
+    let y = (feet[1] + 1.62).floor() as i32;
+    let z0 = (feet[2] - crab_physics::PLAYER_HALF_WIDTH).floor() as i32;
+    let z1 = (feet[2] + crab_physics::PLAYER_HALF_WIDTH - 1e-7).floor() as i32;
+    (x0..=x1).any(|x| {
+        (z0..=z1).any(|z| {
+            let Some(state) = world.block_state(x, y, z) else {
+                return false;
+            };
+            matches!(
+                registries.block_name(state),
+                Some("minecraft:water" | "minecraft:bubble_column")
+            ) || registries.block_state_property(state, "waterlogged") == Some("true")
+        })
+    })
 }
 
 fn touching_climbable(
@@ -2259,13 +2325,17 @@ where
                         let mut body = raw.body.clone();
                         if let (Ok((bx, by, bz)), Ok(s)) = (body.read_position(), body.read_varint()) {
                             tracing::debug!("server block_change ({bx},{by},{bz}) -> state {s}");
-                            shared.world.lock().unwrap().set_block_state(bx, by, bz, s as u32);
-                            if !crab_registry::block_name(s as u32)
-                                .is_some_and(|name| name.ends_with("_sign"))
-                            {
-                                shared.signs.lock().unwrap().remove(&(bx, by, bz));
-                            }
-                            mark_dirty(shared, bx >> 4, bz >> 4);
+                            apply_server_block_state(shared, bx, by, bz, s);
+                        }
+                    }
+                    id if id == ID_SECTION_BLOCKS_UPDATE => {
+                        if let Err(error) = handle_section_blocks_update(&raw, shared) {
+                            tracing::warn!(%error, "section block update parse failed");
+                        }
+                    }
+                    id if id == ID_EXPLOSION => {
+                        if let Err(error) = handle_explosion_block_updates(&raw, shared) {
+                            tracing::warn!(%error, "explosion block update parse failed");
                         }
                     }
                     id if id == ID_BLOCK_ENTITY_DATA => {
@@ -2683,18 +2753,23 @@ where
                         let mut inventory = shared.inventory.lock().unwrap();
                         swap_selected_with_offhand(&mut inventory, controls.selected_slot);
                     }
-                    let in_water = {
+                    let (in_water, head_water) = {
                         let world = shared.world.lock().unwrap();
-                        fluid_kind_at(
-                            shared.context.registries,
-                            &world,
-                            [snapshot.x, snapshot.y, snapshot.z],
-                            1.8,
+                        (
+                            fluid_kind_at(
+                                shared.context.registries,
+                                &world,
+                                [snapshot.x, snapshot.y, snapshot.z],
+                                1.8,
+                            ) == Some(FluidKind::Water),
+                            head_in_water(
+                                shared.context.registries,
+                                &world,
+                                [snapshot.x, snapshot.y, snapshot.z],
+                            ),
                         )
-                            == Some(FluidKind::Water)
                     };
-                    snapshot.swimming = in_water
-                        && snapshot.sprinting
+                    snapshot.swimming = head_water && snapshot.sprinting
                         && controls.forward > 0.0
                         && !snapshot.sneaking;
                     let wearing_elytra = shared.inventory.lock().unwrap().get(6).is_some_and(|slot| {
@@ -3817,6 +3892,25 @@ fn handle_spawn_object(raw: &crab_net::RawPacket, shared: &Arc<Shared>) -> Resul
             swing_sequence: 0,
             hurt_sequence: 0,
             item: None,
+            frame_item: None,
+            frame_rotation: 0,
+            display_item: None,
+            display_block_state: None,
+            display_text: None,
+            display_line_width: 200,
+            display_background: 0x40000000,
+            display_flags: 0,
+            display_text_opacity: 255,
+            display_billboard: 0,
+            display_translation: [0.0; 3],
+            display_scale: [1.0; 3],
+            display_left_rotation: [0.0, 0.0, 0.0, 1.0],
+            display_right_rotation: [0.0, 0.0, 0.0, 1.0],
+            painting_variant: None,
+            effect_radius: 3.0,
+            effect_color: [1.0, 1.0, 1.0],
+            effect_waiting: false,
+            object_data: data,
             block_state,
         },
     );
@@ -3868,6 +3962,25 @@ fn handle_spawn_player(raw: &crab_net::RawPacket, shared: &Arc<Shared>) -> Resul
             swing_sequence: 0,
             hurt_sequence: 0,
             item: None,
+            frame_item: None,
+            frame_rotation: 0,
+            display_item: None,
+            display_block_state: None,
+            display_text: None,
+            display_line_width: 200,
+            display_background: 0x40000000,
+            display_flags: 0,
+            display_text_opacity: 255,
+            display_billboard: 0,
+            display_translation: [0.0; 3],
+            display_scale: [1.0; 3],
+            display_left_rotation: [0.0, 0.0, 0.0, 1.0],
+            display_right_rotation: [0.0, 0.0, 0.0, 1.0],
+            painting_variant: None,
+            effect_radius: 3.0,
+            effect_color: [1.0, 1.0, 1.0],
+            effect_waiting: false,
+            object_data: 0,
             block_state: None,
         },
     );
@@ -3993,9 +4106,11 @@ fn handle_vehicle_move(raw: &crab_net::RawPacket, shared: &Arc<Shared>) -> Resul
     Ok(())
 }
 
-/// Parses Set Entity Metadata, extracting the fields we render: slime/magma
-/// cube `size` (index 16, VarInt) and the dropped-item stack (index 8, Slot).
-/// Other fields are skipped by type; parsing stops at an unsupported type.
+/// Parses Set Entity Metadata for the presentation state consumed by the
+/// renderer. The indices are vanilla's 1.20 metadata layout; the serializer
+/// ids for Pose and Painting Variant shift with the component-era protocols.
+/// Unknown particle payloads remain a safe boundary: the packet is ignored
+/// after the unsupported value rather than guessing its wire shape.
 fn handle_entity_metadata(
     raw: &crab_net::RawPacket,
     shared: &Arc<Shared>,
@@ -4003,15 +4118,14 @@ fn handle_entity_metadata(
 ) -> Result<()> {
     let mut b = raw.body.clone();
     let id = b.read_varint()?;
-    let is_sizable = {
+    let (entity_kind, is_sizable) = {
         let entities = shared.entities.lock().unwrap();
-        entities.get(&id).is_some_and(|e| {
-            matches!(
-                crab_registry::entity_name(e.type_id as u32),
-                Some("slime" | "magma_cube")
-            )
-        })
+        let kind = entities
+            .get(&id)
+            .and_then(|e| crab_registry::entity_name(e.type_id as u32));
+        (kind, matches!(kind, Some("slime" | "magma_cube")))
     };
+    let is_local_player = shared.player.lock().unwrap().entity_id == id;
     loop {
         let index = b.read_u8()?;
         if index == 0xff {
@@ -4027,24 +4141,84 @@ fn handle_entity_metadata(
                         entity.glowing = value & 0x40 != 0;
                     }
                 }
+                if entity_kind == Some("text_display") && index == TEXT_FLAGS_INDEX {
+                    if let Some(entity) = shared.entities.lock().unwrap().get_mut(&id) {
+                        entity.display_flags = value;
+                    }
+                }
+                if entity_kind == Some("text_display") && index == TEXT_OPACITY_INDEX {
+                    if let Some(entity) = shared.entities.lock().unwrap().get_mut(&id) {
+                        entity.display_text_opacity = value;
+                    }
+                }
+                if matches!(
+                    entity_kind,
+                    Some("block_display" | "item_display" | "text_display")
+                ) && index == DISPLAY_BILLBOARD_INDEX
+                {
+                    if let Some(entity) = shared.entities.lock().unwrap().get_mut(&id) {
+                        entity.display_billboard = value & 0x03;
+                    }
+                }
             }
             1 => {
                 let v = b.read_varint()?;
+                if is_local_player && index == 1 {
+                    shared.player.lock().unwrap().air = v.clamp(0, 300);
+                }
                 if index == 16 && is_sizable && v > 0 {
                     set_entity_size(shared, id, v as f32);
+                }
+                if let Some(entity) = shared.entities.lock().unwrap().get_mut(&id) {
+                    if matches!(entity_kind, Some("item_frame" | "glow_item_frame")) && index == 9 {
+                        entity.frame_rotation = v.rem_euclid(8) as u8;
+                    }
+                    if entity_kind == Some("area_effect_cloud") && index == 9 {
+                        entity.effect_color = rgb_from_packed_color(v);
+                    }
+                    if entity_kind == Some("text_display") && index == TEXT_LINE_WIDTH_INDEX {
+                        entity.display_line_width = v.max(1);
+                    }
+                    if entity_kind == Some("text_display") && index == TEXT_BACKGROUND_INDEX {
+                        entity.display_background = v;
+                    }
                 }
             }
             2 => {
                 b.read_varlong()?;
             }
             3 => {
-                b.read_f32()?;
+                let value = b.read_f32()?;
+                if let Some(entity) = shared.entities.lock().unwrap().get_mut(&id) {
+                    if entity_kind == Some("area_effect_cloud") && index == 8 {
+                        entity.effect_radius = value.max(0.0);
+                    }
+                    if matches!(
+                        entity_kind,
+                        Some("block_display" | "item_display" | "text_display")
+                    ) && index == DISPLAY_WIDTH_INDEX
+                    {
+                        entity.half_width = (value * 0.5).max(0.0);
+                    }
+                    if matches!(
+                        entity_kind,
+                        Some("block_display" | "item_display" | "text_display")
+                    ) && index == DISPLAY_HEIGHT_INDEX
+                    {
+                        entity.height = value.max(0.0);
+                    }
+                }
             }
             4 => {
                 b.read_string(32767)?;
             }
             5 => {
-                let _ = read_text_component(&mut b, protocol)?;
+                let text = read_text_component(&mut b, protocol)?;
+                if entity_kind == Some("text_display") && index == DISPLAY_SUBTYPE_INDEX {
+                    if let Some(entity) = shared.entities.lock().unwrap().get_mut(&id) {
+                        entity.display_text = Some(text);
+                    }
+                }
             }
             6 => {
                 if b.read_bool()? {
@@ -4053,19 +4227,29 @@ fn handle_entity_metadata(
             }
             7 => {
                 let item = read_slot_item(&mut b, protocol)?;
-                if index == 8 {
-                    if let Some(e) = shared.entities.lock().unwrap().get_mut(&id) {
-                        e.item = item;
+                if let Some(e) = shared.entities.lock().unwrap().get_mut(&id) {
+                    match entity_kind {
+                        Some("item") if index == 8 => e.item = item,
+                        Some("item_frame" | "glow_item_frame") if index == 8 => {
+                            e.frame_item = item;
+                        }
+                        Some("item_display") if index == DISPLAY_SUBTYPE_INDEX => {
+                            e.display_item = item
+                        }
+                        _ => {}
                     }
                 }
             }
             8 => {
-                b.read_bool()?;
+                let value = b.read_bool()?;
+                if entity_kind == Some("area_effect_cloud") && index == 10 {
+                    if let Some(entity) = shared.entities.lock().unwrap().get_mut(&id) {
+                        entity.effect_waiting = value;
+                    }
+                }
             }
             9 => {
-                b.read_f32()?;
-                b.read_f32()?;
-                b.read_f32()?;
+                let _ = (b.read_f32()?, b.read_f32()?, b.read_f32()?);
             }
             10 => {
                 b.read_position()?;
@@ -4077,6 +4261,17 @@ fn handle_entity_metadata(
             }
             12 | 14 | 15 | 19 | 20 | 21 | 22 => {
                 let value = b.read_varint()?;
+                if entity_kind == Some("block_display") && index == DISPLAY_SUBTYPE_INDEX {
+                    if let Some(entity) = shared.entities.lock().unwrap().get_mut(&id) {
+                        entity.display_block_state = if mtype == 15 {
+                            u32::try_from(value)
+                                .ok()
+                                .and_then(|value| value.checked_sub(1))
+                        } else {
+                            Some(value as u32)
+                        };
+                    }
+                }
                 if mtype == pose_metadata_type(protocol) && index == 6 {
                     if let Some(entity) = shared.entities.lock().unwrap().get_mut(&id) {
                         entity.pose = value;
@@ -4108,11 +4303,65 @@ fn handle_entity_metadata(
                 b.read_varint()?;
                 b.read_varint()?;
             }
+            23 => {
+                if b.read_bool()? {
+                    b.read_position()?;
+                    b.read_string(32767)?;
+                }
+            }
+            24 | 25 => {
+                let value = b.read_varint()?;
+                if entity_kind == Some("painting")
+                    && index == 8
+                    && mtype == painting_variant_type(protocol)
+                {
+                    if let Some(entity) = shared.entities.lock().unwrap().get_mut(&id) {
+                        entity.painting_variant = u32::try_from(value).ok();
+                    }
+                }
+            }
+            26 => {
+                let value = [b.read_f32()?, b.read_f32()?, b.read_f32()?];
+                if let Some(entity) = shared.entities.lock().unwrap().get_mut(&id) {
+                    match index {
+                        DISPLAY_TRANSLATION_INDEX => entity.display_translation = value,
+                        DISPLAY_SCALE_INDEX => entity.display_scale = value,
+                        _ => {}
+                    }
+                }
+            }
+            27 => {
+                let value = [b.read_f32()?, b.read_f32()?, b.read_f32()?, b.read_f32()?];
+                if let Some(entity) = shared.entities.lock().unwrap().get_mut(&id) {
+                    match index {
+                        DISPLAY_LEFT_ROTATION_INDEX => entity.display_left_rotation = value,
+                        DISPLAY_RIGHT_ROTATION_INDEX => entity.display_right_rotation = value,
+                        _ => {}
+                    }
+                }
+            }
             _ => break, // unsupported type; stop scanning this packet
         }
     }
     Ok(())
 }
+
+// Entity metadata indices are stable across the supported protocol versions;
+// serializer ids changed when components were introduced, but the Display
+// data slots did not. Keeping the indices named prevents an off-by-one here
+// from silently turning a transform into a width or subtype field.
+const DISPLAY_TRANSLATION_INDEX: u8 = 10;
+const DISPLAY_SCALE_INDEX: u8 = 11;
+const DISPLAY_LEFT_ROTATION_INDEX: u8 = 12;
+const DISPLAY_RIGHT_ROTATION_INDEX: u8 = 13;
+const DISPLAY_BILLBOARD_INDEX: u8 = 14;
+const DISPLAY_WIDTH_INDEX: u8 = 19;
+const DISPLAY_HEIGHT_INDEX: u8 = 20;
+const DISPLAY_SUBTYPE_INDEX: u8 = 22;
+const TEXT_LINE_WIDTH_INDEX: u8 = 23;
+const TEXT_BACKGROUND_INDEX: u8 = 24;
+const TEXT_OPACITY_INDEX: u8 = 25;
+const TEXT_FLAGS_INDEX: u8 = 26;
 
 /// Entity metadata serializer IDs gained the particle-list serializer in
 /// 1.20.5, shifting Pose and every following serializer up by one.
@@ -4122,6 +4371,24 @@ fn pose_metadata_type(protocol: ProtocolVersion) -> i32 {
     } else {
         20
     }
+}
+
+/// Painting's registry-holder serializer shifted with the particle-list
+/// insertion in protocol 1.20.5, just like Pose and the following serializers.
+fn painting_variant_type(protocol: ProtocolVersion) -> i32 {
+    if protocol.uses_data_components() {
+        25
+    } else {
+        24
+    }
+}
+
+fn rgb_from_packed_color(value: i32) -> [f32; 3] {
+    [
+        ((value >> 16) & 0xff) as f32 / 255.0,
+        ((value >> 8) & 0xff) as f32 / 255.0,
+        (value & 0xff) as f32 / 255.0,
+    ]
 }
 
 /// Reads a metadata Slot, returning the contained item id (or None if empty).
@@ -6013,6 +6280,85 @@ fn break_block_local(shared: &Arc<Shared>, block: [i32; 3]) {
     mark_dirty(shared, block[0] >> 4, block[2] >> 4);
 }
 
+/// Applies one server-authoritative block state and invalidates the affected
+/// chunk. This is shared by the single-block and section-batch packets; mob
+/// growth, fluids, pistons, and explosions commonly arrive in the latter.
+fn apply_server_block_state(shared: &Arc<Shared>, x: i32, y: i32, z: i32, state: i32) {
+    let Ok(state) = u32::try_from(state) else {
+        tracing::warn!(x, y, z, state, "server sent a negative block state");
+        return;
+    };
+    shared.world.lock().unwrap().set_block_state(x, y, z, state);
+    if !shared
+        .context
+        .registries
+        .block_name(state)
+        .is_some_and(|name| name.ends_with("_sign"))
+    {
+        shared.signs.lock().unwrap().remove(&(x, y, z));
+    }
+    mark_dirty(shared, x >> 4, z >> 4);
+}
+
+/// Decodes `Section Blocks Update` (the packet used when a tick changes two or
+/// more blocks in one 16³ section). Each record is `(state_id << 12) | local
+/// block position`, where the local position stores x/z/y in four-bit fields.
+fn handle_section_blocks_update(raw: &crab_net::RawPacket, shared: &Arc<Shared>) -> Result<()> {
+    let mut body = raw.body.clone();
+    let packed_section = body.read_i64()? as u64;
+    let section_x = sign_extend((packed_section >> 42) & ((1 << 22) - 1), 22);
+    let section_z = sign_extend((packed_section >> 20) & ((1 << 22) - 1), 22);
+    let section_y = sign_extend(packed_section & ((1 << 20) - 1), 20);
+    let count = body.read_varint()?;
+    if !(0..=4096).contains(&count) {
+        bail!("invalid section block-update count {count}");
+    }
+    for _ in 0..count {
+        let record = u32::try_from(body.read_varint()?)
+            .map_err(|_| anyhow::anyhow!("negative section block-update record"))?;
+        let local = record & 0x0fff;
+        let x = section_x * 16 + ((local >> 8) & 0x0f) as i32;
+        let z = section_z * 16 + ((local >> 4) & 0x0f) as i32;
+        let y = section_y * 16 + (local & 0x0f) as i32;
+        let state = (record >> 12) as i32;
+        apply_server_block_state(shared, x, y, z, state);
+    }
+    Ok(())
+}
+
+/// Older profiles include affected block offsets directly in Explosion. The
+/// newer 1.21.2+ packet removed that list in favour of Section Blocks Update,
+/// so this handler is reached only for the profiles whose body still contains
+/// the offsets.
+fn handle_explosion_block_updates(raw: &crab_net::RawPacket, shared: &Arc<Shared>) -> Result<()> {
+    let mut body = raw.body.clone();
+    let origin = [body.read_f64()?, body.read_f64()?, body.read_f64()?];
+    let _radius = body.read_f32()?;
+    let count = body.read_varint()?;
+    if !(0..=1_000_000).contains(&count) {
+        bail!("invalid explosion block count {count}");
+    }
+    let base = [
+        origin[0].floor() as i32,
+        origin[1].floor() as i32,
+        origin[2].floor() as i32,
+    ];
+    for _ in 0..count {
+        let block = [
+            base[0] + i32::from(body.read_i8()?),
+            base[1] + i32::from(body.read_i8()?),
+            base[2] + i32::from(body.read_i8()?),
+        ];
+        apply_server_block_state(shared, block[0], block[1], block[2], 0);
+    }
+    Ok(())
+}
+
+fn sign_extend(value: u64, bits: u32) -> i32 {
+    let shift = 64 - bits;
+    ((value << shift) as i64 >> shift) as i32
+}
+
 /// Sends a "cancel dig" (status 1) for any in-progress dig and returns `None`.
 async fn cancel_dig<S>(
     conn: &mut Connection<S>,
@@ -6244,6 +6590,7 @@ fn split_host_port(addr: &str) -> (String, u16) {
 mod tests {
     use super::*;
     use bytes::BufMut;
+    use bytes::Bytes;
     use crab_protocol::BufMutExt;
 
     fn slot(item_id: i32, count: i8) -> Option<SlotItem> {
@@ -6537,6 +6884,35 @@ mod tests {
     }
 
     #[test]
+    fn display_metadata_slots_match_vanilla_data_definition() {
+        assert_eq!(
+            (
+                DISPLAY_TRANSLATION_INDEX,
+                DISPLAY_SCALE_INDEX,
+                DISPLAY_LEFT_ROTATION_INDEX,
+                DISPLAY_RIGHT_ROTATION_INDEX,
+            ),
+            (10, 11, 12, 13)
+        );
+        assert_eq!(
+            (
+                DISPLAY_SUBTYPE_INDEX,
+                TEXT_LINE_WIDTH_INDEX,
+                TEXT_BACKGROUND_INDEX,
+                TEXT_OPACITY_INDEX,
+                TEXT_FLAGS_INDEX,
+            ),
+            (22, 23, 24, 25, 26)
+        );
+        assert_eq!(painting_variant_type(ProtocolVersion::V1_20_1), 24);
+        assert_eq!(painting_variant_type(ProtocolVersion::V1_20_5), 25);
+        assert_eq!(
+            rgb_from_packed_color(0x123456),
+            [18.0_f32 / 255.0, 52.0_f32 / 255.0, 86.0_f32 / 255.0]
+        );
+    }
+
+    #[test]
     fn passenger_updates_mount_and_dismount_the_local_player() {
         let shared = Arc::new(Shared::new());
         shared.player.lock().unwrap().entity_id = 42;
@@ -6561,6 +6937,25 @@ mod tests {
                 swing_sequence: 0,
                 hurt_sequence: 0,
                 item: None,
+                frame_item: None,
+                frame_rotation: 0,
+                display_item: None,
+                display_block_state: None,
+                display_text: None,
+                display_line_width: 200,
+                display_background: 0x40000000,
+                display_flags: 0,
+                display_text_opacity: 255,
+                display_billboard: 0,
+                display_translation: [0.0; 3],
+                display_scale: [1.0; 3],
+                display_left_rotation: [0.0, 0.0, 0.0, 1.0],
+                display_right_rotation: [0.0, 0.0, 0.0, 1.0],
+                painting_variant: None,
+                effect_radius: 3.0,
+                effect_color: [1.0, 1.0, 1.0],
+                effect_waiting: false,
+                object_data: 0,
                 block_state: None,
             },
         );
@@ -7068,6 +7463,17 @@ mod tests {
             ),
             Some(FluidKind::Water)
         );
+        assert!(!head_in_water(
+            crab_registry::RegistrySet::global(),
+            &world,
+            [8.5, -59.0, 8.5]
+        ));
+        world.set_block_state(8, -58, 8, water);
+        assert!(head_in_water(
+            crab_registry::RegistrySet::global(),
+            &world,
+            [8.5, -59.0, 8.5]
+        ));
         let lava = crab_registry::block_by_name("lava").unwrap().default_state;
         world.set_block_state(8, -59, 8, lava);
         assert_eq!(
@@ -7108,6 +7514,88 @@ mod tests {
             [8.5, -59.0, 8.5],
             1.8
         ));
+    }
+
+    #[test]
+    fn section_block_updates_apply_signed_section_coordinates() {
+        use crab_protocol::BufMutExt;
+        use crab_world::{Biomes, BlockStates, Section};
+
+        let shared = Arc::new(Shared::new());
+        shared.world.lock().unwrap().load_chunk(Chunk {
+            x: -2,
+            z: 3,
+            sections: (0..24)
+                .map(|_| Section {
+                    block_count: 0,
+                    blocks: BlockStates::Uniform(0),
+                    biomes: Biomes::Uniform(0),
+                })
+                .collect(),
+        });
+        let state = crab_registry::block_by_name("stone").unwrap().default_state;
+        let section_x = -2_i64;
+        let section_y = -4_i64;
+        let section_z = 3_i64;
+        let packed = (((section_x as u64) & ((1 << 22) - 1)) << 42)
+            | (((section_z as u64) & ((1 << 22) - 1)) << 20)
+            | ((section_y as u64) & ((1 << 20) - 1));
+        let local = (4_u32 << 8) | (5_u32 << 4) | 6;
+        let mut body = Vec::new();
+        body.put_i64(packed as i64);
+        body.put_varint(1);
+        body.put_varint((state << 12 | local) as i32);
+        handle_section_blocks_update(
+            &crab_net::RawPacket {
+                id: ID_SECTION_BLOCKS_UPDATE,
+                body: Bytes::from(body),
+            },
+            &shared,
+        )
+        .unwrap();
+        assert_eq!(
+            shared.world.lock().unwrap().block_state(-28, -58, 53),
+            Some(state)
+        );
+    }
+
+    #[test]
+    fn legacy_explosion_offsets_clear_server_blocks() {
+        use crab_protocol::BufMutExt;
+        use crab_world::{Biomes, BlockStates, Section};
+
+        let shared = Arc::new(Shared::new());
+        shared.world.lock().unwrap().load_chunk(Chunk {
+            x: 0,
+            z: 0,
+            sections: (0..24)
+                .map(|_| Section {
+                    block_count: 0,
+                    blocks: BlockStates::Uniform(0),
+                    biomes: Biomes::Uniform(0),
+                })
+                .collect(),
+        });
+        let stone = crab_registry::block_by_name("stone").unwrap().default_state;
+        shared.world.lock().unwrap().set_block_state(8, 5, 9, stone);
+        let mut body = Vec::new();
+        body.put_f64(8.5);
+        body.put_f64(5.5);
+        body.put_f64(9.5);
+        body.put_f32(4.0);
+        body.put_varint(1);
+        body.put_i8(0);
+        body.put_i8(0);
+        body.put_i8(0);
+        handle_explosion_block_updates(
+            &crab_net::RawPacket {
+                id: ID_EXPLOSION,
+                body: Bytes::from(body),
+            },
+            &shared,
+        )
+        .unwrap();
+        assert_eq!(shared.world.lock().unwrap().block_state(8, 5, 9), Some(0));
     }
 
     #[test]

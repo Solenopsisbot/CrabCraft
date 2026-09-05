@@ -329,6 +329,8 @@ pub fn load_gui_atlas(jar_path: &Path) -> Result<GuiAtlas, AssetError> {
         sprites.insert("heart_bg", uv(ix + 16, iy, 9, 9));
         sprites.insert("heart_full", uv(ix + 52, iy, 9, 9));
         sprites.insert("heart_half", uv(ix + 61, iy, 9, 9));
+        sprites.insert("bubble_full", uv(ix + 16, iy + 18, 9, 9));
+        sprites.insert("bubble_pop", uv(ix + 25, iy + 18, 9, 9));
         sprites.insert("food_bg", uv(ix + 16, iy + 27, 9, 9));
         sprites.insert("food_full", uv(ix + 52, iy + 27, 9, 9));
         sprites.insert("food_half", uv(ix + 61, iy + 27, 9, 9));

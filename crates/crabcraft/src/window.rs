@@ -15,11 +15,12 @@ use std::time::{Duration, Instant};
 use crab_assets::{Atlas, EntityAtlas, GuiAtlas, ItemAtlas};
 use crab_core::{ClientCommand, ConnectionPhase, RecipeKey, ScreenStack, UiScreen};
 use crab_render::{
-    block_item_mesh, block_state_item_mesh, box_mesh, build_block_pipeline, build_hud_pipelines,
-    build_translucent_pipeline, container_geometry, entity_armour_mesh, entity_mesh,
-    entity_mesh_with_pose, furnace_geometry, hud_geometry, inventory_geometry, item_model_mesh,
-    mesh_region_with_registry, simple_container_geometry, status_effect_geometry, upload_atlas,
-    upload_texture, CameraUniform, HudPipelines, Vertex, DEPTH_FORMAT,
+    area_effect_cloud_mesh, block_item_mesh, block_state_item_mesh, box_mesh, build_block_pipeline,
+    build_hud_pipelines, build_translucent_pipeline, container_geometry, entity_armour_mesh,
+    entity_mesh, entity_mesh_with_pose, furnace_geometry, hud_geometry_with_air,
+    inventory_geometry, item_frame_mesh, item_model_mesh, lightning_bolt_mesh,
+    mesh_region_with_registry, painting_mesh, simple_container_geometry, status_effect_geometry,
+    upload_atlas, upload_texture, CameraUniform, HudPipelines, Vertex, DEPTH_FORMAT,
 };
 use crab_world::WorldSnapshot;
 use glam::Vec3;
@@ -268,10 +269,31 @@ impl Perspective {
 
 /// A camera-facing quad (billboard) of an item icon at `pos`, for dropped items.
 fn push_item_billboard(out: &mut Vec<Vertex>, pos: [f32; 3], uv: [f32; 4], yaw_deg: f32) {
+    push_item_billboard_rotated(out, pos, uv, yaw_deg, 0.0);
+}
+
+fn push_item_billboard_rotated(
+    out: &mut Vec<Vertex>,
+    pos: [f32; 3],
+    uv: [f32; 4],
+    yaw_deg: f32,
+    roll_deg: f32,
+) {
     let s = 0.2;
     let yr = yaw_deg.to_radians();
-    let r = [yr.cos() * s, 0.0, yr.sin() * s];
-    let up = [0.0, s, 0.0];
+    let (sin_roll, cos_roll) = roll_deg.to_radians().sin_cos();
+    let base_right = [yr.cos() * s, 0.0, yr.sin() * s];
+    let base_up = [0.0, s, 0.0];
+    let r = [
+        base_right[0] * cos_roll + base_up[0] * sin_roll,
+        base_right[1] * cos_roll + base_up[1] * sin_roll,
+        base_right[2] * cos_roll + base_up[2] * sin_roll,
+    ];
+    let up = [
+        -base_right[0] * sin_roll + base_up[0] * cos_roll,
+        -base_right[1] * sin_roll + base_up[1] * cos_roll,
+        -base_right[2] * sin_roll + base_up[2] * cos_roll,
+    ];
     let c = [pos[0], pos[1] + 0.25, pos[2]];
     let n = [yr.sin(), 0.4, -yr.cos()];
     let [u0, v0, u1, v1] = uv;
@@ -300,6 +322,137 @@ fn push_item_billboard(out: &mut Vec<Vertex>, pos: [f32; 3], uv: [f32; 4], yaw_d
     }
 }
 
+/// Resolves a Display entity's billboard constraint to the horizontal angle
+/// available to our world meshes. Vertical and center billboards face the
+/// camera around Y; fixed and horizontal billboards retain the entity yaw.
+fn display_yaw(entity_yaw: f32, billboard: u8, camera_yaw: f32) -> f32 {
+    match billboard & 0x03 {
+        1 | 3 => camera_yaw,
+        _ => entity_yaw,
+    }
+}
+
+/// Item-frame contents use the normal item model at half scale, with a small
+/// offset toward the viewer so it sits in front of the wooden backing.
+fn fit_item_frame_contents(vertices: &mut [Vertex], center: [f32; 3], yaw_degrees: f32) {
+    let (sin_yaw, cos_yaw) = yaw_degrees.to_radians().sin_cos();
+    for vertex in vertices {
+        for (axis, &coordinate) in center.iter().enumerate() {
+            vertex.position[axis] = coordinate + (vertex.position[axis] - coordinate) * 0.5;
+        }
+        vertex.position[0] += sin_yaw * 0.09;
+        vertex.position[2] += cos_yaw * 0.09;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn display_text_mesh(
+    out: &mut Vec<Vertex>,
+    text: &str,
+    gui: &GuiAtlas,
+    center: [f32; 3],
+    yaw_deg: f32,
+    line_width: i32,
+    flags: u8,
+    opacity: u8,
+) {
+    let max_width = line_width.max(1) as f32;
+    let mut lines = Vec::<String>::new();
+    for source_line in text.lines() {
+        let mut line = String::new();
+        let mut width = 0.0;
+        for ch in source_line.chars() {
+            let advance = gui.glyph(ch).advance;
+            if !line.is_empty() && width + advance > max_width {
+                lines.push(std::mem::take(&mut line));
+                width = 0.0;
+            }
+            line.push(ch);
+            width += advance;
+        }
+        lines.push(line);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+
+    let pixel_scale = 0.025;
+    let line_height = 8.0 * pixel_scale;
+    let total_height = lines.len() as f32 * line_height;
+    let (sin_yaw, cos_yaw) = yaw_deg.to_radians().sin_cos();
+    let right = [cos_yaw * pixel_scale, 0.0, sin_yaw * pixel_scale];
+    let up = [0.0, pixel_scale, 0.0];
+    let normal = [sin_yaw, 0.0, -cos_yaw];
+    let alpha = f32::from(opacity) / 255.0;
+    for (line_index, line) in lines.iter().enumerate() {
+        let line_width = gui.text_width(line).min(max_width) * pixel_scale;
+        let x_start = if flags & 0x08 != 0 {
+            -max_width * pixel_scale * 0.5
+        } else if flags & 0x10 != 0 {
+            max_width * pixel_scale * 0.5 - line_width
+        } else {
+            -line_width * 0.5
+        };
+        let y_top = total_height * 0.5 - line_index as f32 * line_height;
+        let mut cursor = x_start;
+        for ch in line.chars() {
+            let glyph = gui.glyph(ch);
+            let glyph_width = glyph.width * pixel_scale;
+            let glyph_advance = glyph.advance * pixel_scale;
+            if glyph.width > 0.0 {
+                let corners = [
+                    (cursor, y_top),
+                    (cursor + glyph_width, y_top),
+                    (cursor + glyph_width, y_top - line_height),
+                    (cursor, y_top - line_height),
+                ];
+                let uv = glyph.uv;
+                let tex = [
+                    [uv[0], uv[1]],
+                    [uv[2], uv[1]],
+                    [uv[2], uv[3]],
+                    [uv[0], uv[3]],
+                ];
+                for index in [0usize, 1, 2, 0, 2, 3] {
+                    let (x, y) = corners[index];
+                    out.push(Vertex {
+                        position: [
+                            center[0] + right[0] * x + up[0] * y,
+                            center[1] + right[1] * x + up[1] * y,
+                            center[2] + right[2] * x + up[2] * y,
+                        ],
+                        normal,
+                        uv: tex[index],
+                        tint: [1.0, 1.0, 1.0],
+                        opacity: alpha,
+                    });
+                }
+            }
+            cursor += glyph_advance;
+        }
+    }
+}
+
+fn display_text_line_count(text: &str, gui: &GuiAtlas, line_width: i32) -> usize {
+    let max_width = line_width.max(1) as f32;
+    text.lines()
+        .map(|source_line| {
+            let mut width = 0.0;
+            let mut lines = 1usize;
+            for ch in source_line.chars() {
+                let advance = gui.glyph(ch).advance;
+                if width > 0.0 && width + advance > max_width {
+                    lines += 1;
+                    width = 0.0;
+                }
+                width += advance;
+            }
+            lines
+        })
+        .sum::<usize>()
+        .max(1)
+}
+
 fn box_color(type_id: i32) -> [f32; 3] {
     let h = (type_id as u32).wrapping_mul(2_654_435_761);
     [
@@ -307,6 +460,71 @@ fn box_color(type_id: i32) -> [f32; 3] {
         0.4 + ((h >> 8) & 0xff) as f32 / 255.0 * 0.5,
         0.4 + (h & 0xff) as f32 / 255.0 * 0.5,
     ]
+}
+
+fn argb_color(value: i32) -> [f32; 3] {
+    [
+        ((value >> 16) & 0xff) as f32 / 255.0,
+        ((value >> 8) & 0xff) as f32 / 255.0,
+        (value & 0xff) as f32 / 255.0,
+    ]
+}
+
+fn argb_alpha(value: i32) -> f32 {
+    ((value as u32 >> 24) & 0xff) as f32 / 255.0
+}
+
+fn quat_rotate(quaternion: [f32; 4], vector: [f32; 3]) -> [f32; 3] {
+    let [qx, qy, qz, qw] = quaternion;
+    let uv = [
+        qy * vector[2] - qz * vector[1],
+        qz * vector[0] - qx * vector[2],
+        qx * vector[1] - qy * vector[0],
+    ];
+    let uuv = [
+        qy * uv[2] - qz * uv[1],
+        qz * uv[0] - qx * uv[2],
+        qx * uv[1] - qy * uv[0],
+    ];
+    [
+        vector[0] + 2.0 * (qw * uv[0] + uuv[0]),
+        vector[1] + 2.0 * (qw * uv[1] + uuv[1]),
+        vector[2] + 2.0 * (qw * uv[2] + uuv[2]),
+    ]
+}
+
+fn apply_display_transform(
+    vertices: &mut [Vertex],
+    center: [f32; 3],
+    translation: [f32; 3],
+    scale: [f32; 3],
+    left_rotation: [f32; 4],
+    right_rotation: [f32; 4],
+) {
+    let scale = scale.map(|value| value.abs().max(0.001));
+    for vertex in vertices {
+        let mut position = vertex.position;
+        for axis in 0..3 {
+            position[axis] -= center[axis];
+        }
+        position = quat_rotate(right_rotation, position);
+        for axis in 0..3 {
+            position[axis] *= scale[axis];
+        }
+        position = quat_rotate(left_rotation, position);
+        vertex.position = [
+            center[0] + translation[0] + position[0],
+            center[1] + translation[1] + position[1],
+            center[2] + translation[2] + position[2],
+        ];
+        let mut normal = quat_rotate(right_rotation, vertex.normal);
+        normal = [
+            normal[0] / scale[0],
+            normal[1] / scale[1],
+            normal[2] / scale[2],
+        ];
+        vertex.normal = quat_rotate(left_rotation, normal);
+    }
 }
 
 fn armour_color(item_name: &str) -> [f32; 3] {
@@ -335,8 +553,7 @@ fn entity_item_sprite(entity_name: &str) -> Option<&'static str> {
         "eye_of_ender" => "ender_eye",
         "fireball" | "small_fireball" => "fire_charge",
         "firework_rocket" => "firework_rocket",
-        "item_frame" => "item_frame",
-        "glow_item_frame" => "glow_item_frame",
+        "potion" => "potion",
         "lingering_potion" => "lingering_potion",
         "snowball" => "snowball",
         "splash_potion" => "splash_potion",
@@ -1503,6 +1720,8 @@ struct Graphics {
     item_atlas_bind_group: wgpu::BindGroup,
     /// GUI sprite + font atlas bound for the HUD's gui/text passes.
     gui_atlas_bind_group: wgpu::BindGroup,
+    /// GUI font atlas bound for world-space text-display glyphs.
+    gui_world_bind_group: wgpu::BindGroup,
     /// Entity texture atlas (for 3D entity models).
     entity_atlas_bind_group: wgpu::BindGroup,
     /// Item atlas bound in the *world* pass for dropped-item billboards.
@@ -1513,6 +1732,10 @@ struct Graphics {
     model_entity_buffer: Option<(wgpu::Buffer, u32)>,
     /// Per-frame dropped-item billboards (item atlas texture).
     item_entity_buffer: Option<(wgpu::Buffer, u32)>,
+    /// Per-frame text-display glyphs (GUI font atlas texture).
+    text_entity_buffer: Option<(wgpu::Buffer, u32)>,
+    /// Per-frame alpha-blended special geometry (clouds and text backgrounds).
+    effect_entity_buffer: Option<(wgpu::Buffer, u32)>,
     /// Destroy-stage (block-breaking crack) overlay atlas, if loaded.
     crack_bind_group: Option<wgpu::BindGroup>,
     /// Per-frame crack overlay cube for the block being mined.
@@ -1691,6 +1914,14 @@ impl Graphics {
             gui_atlas.width,
             gui_atlas.height,
         );
+        let gui_world_bind_group = upload_texture(
+            &device,
+            &queue,
+            &texture_bgl,
+            &gui_atlas.rgba,
+            gui_atlas.width,
+            gui_atlas.height,
+        );
 
         // Block-breaking crack overlay atlas (drawn with the world pipeline:
         // crack pixels are opaque, the rest is transparent and discarded).
@@ -1723,11 +1954,14 @@ impl Graphics {
             hud_text_buffer: None,
             item_atlas_bind_group,
             gui_atlas_bind_group,
+            gui_world_bind_group,
             entity_atlas_bind_group,
             item_world_bind_group,
             box_entity_buffer: None,
             model_entity_buffer: None,
             item_entity_buffer: None,
+            text_entity_buffer: None,
+            effect_entity_buffer: None,
             crack_bind_group,
             crack_buffer: None,
             inventory_player_buffer: None,
@@ -1775,6 +2009,14 @@ impl Graphics {
             &self.device,
             &self.queue,
             &self.hud.atlas_layout,
+            &gui_atlas.rgba,
+            gui_atlas.width,
+            gui_atlas.height,
+        );
+        self.gui_world_bind_group = upload_texture(
+            &self.device,
+            &self.queue,
+            &self.texture_layout,
             &gui_atlas.rgba,
             gui_atlas.width,
             gui_atlas.height,
@@ -2023,6 +2265,22 @@ impl Graphics {
                     pass.set_vertex_buffer(0, buffer.slice(..));
                     pass.draw(0..*count, 0..1);
                 }
+            }
+            // Entity effects use the same alpha pipeline as water/glass. They
+            // deliberately draw after opaque entities and chunks so their
+            // radius and text-display backgrounds blend instead of writing a
+            // depth layer that hides geometry behind them.
+            if let Some((buffer, count)) = &self.effect_entity_buffer {
+                pass.set_bind_group(1, &self.atlas_bind_group, &[]);
+                pass.set_vertex_buffer(0, buffer.slice(..));
+                pass.draw(0..*count, 0..1);
+            }
+            // Text-display glyphs use the GUI font atlas and the same
+            // alpha-blended world pipeline.
+            if let Some((buffer, count)) = &self.text_entity_buffer {
+                pass.set_bind_group(1, &self.gui_world_bind_group, &[]);
+                pass.set_vertex_buffer(0, buffer.slice(..));
+                pass.draw(0..*count, 0..1);
             }
             // HUD backgrounds and GUI sprites are drawn before the inventory
             // player preview so the 3D model appears inside the panel cutout.
@@ -2327,6 +2585,14 @@ struct MeshOutput {
     vertices: Vec<Vertex>,
 }
 
+type EntityGeometryStreams = (
+    Vec<Vertex>,
+    Vec<Vertex>,
+    Vec<Vertex>,
+    Vec<Vertex>,
+    Vec<Vertex>,
+);
+
 struct AppResources {
     atlas_slot: Arc<RwLock<AtlasGeneration>>,
     entity_atlas: Arc<EntityAtlas>,
@@ -2414,8 +2680,8 @@ impl App {
     }
 
     /// Advances per-entity interpolation + walk animation by `dt` and builds the
-    /// entity meshes: `(box, model, item-billboard)`.
-    fn step_entities(&mut self, dt: f32) -> (Vec<Vertex>, Vec<Vertex>, Vec<Vertex>) {
+    /// entity meshes: `(box, model, item-billboard, display-text, effects)`.
+    fn step_entities(&mut self, dt: f32) -> EntityGeometryStreams {
         let entities = self.shared.entities.lock().unwrap();
         let ease = 1.0 - (-dt * 12.0).exp();
         let mut alive = HashSet::new();
@@ -2501,7 +2767,8 @@ impl App {
             self.entity_atlas.width as f32,
             self.entity_atlas.height as f32,
         ];
-        let (mut box_v, mut model_v, mut item_v) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut box_v, mut model_v, mut item_v, mut text_v, mut effect_v) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
         for (&id, e) in entities.iter() {
             let a = self.entity_anim[&id];
             // Falling Block's Spawn Entity data is a global block-state ID.
@@ -2559,6 +2826,202 @@ impl App {
             let entity_name = u32::try_from(e.type_id)
                 .ok()
                 .and_then(crab_registry::entity_name);
+            match entity_name {
+                // These two entity types are collision/selection volumes only;
+                // vanilla deliberately gives them no visible renderer.
+                Some("interaction" | "marker") => continue,
+                Some("item") => {
+                    // A metadata-less item entity is not renderable. Do not
+                    // turn it into a misleading diagnostic box.
+                    if e.item.is_none() {
+                        continue;
+                    }
+                }
+                Some("item_frame" | "glow_item_frame") => {
+                    let frame_center = [a.pos[0], a.pos[1], a.pos[2]];
+                    let frame_yaw = a.yaw;
+                    let item_yaw = frame_yaw + f32::from(e.frame_rotation) * 45.0;
+                    box_v.extend(item_frame_mesh(
+                        frame_center,
+                        frame_yaw,
+                        entity_name == Some("glow_item_frame"),
+                        white,
+                    ));
+                    if let Some(item_id) = e.frame_item {
+                        if let Some(name) = u32::try_from(item_id)
+                            .ok()
+                            .and_then(crab_registry::item_name)
+                        {
+                            let item_center = [frame_center[0], frame_center[1], frame_center[2]];
+                            if let Some(vertices) =
+                                item_model_mesh(&self.item_atlas, name, item_center, item_yaw)
+                            {
+                                let mut vertices = vertices;
+                                fit_item_frame_contents(&mut vertices, item_center, frame_yaw);
+                                item_v.extend(vertices);
+                            } else if let Some(uv) = self.item_atlas.icon(name) {
+                                push_item_billboard_rotated(
+                                    &mut item_v,
+                                    item_center,
+                                    uv,
+                                    frame_yaw,
+                                    f32::from(e.frame_rotation) * 45.0,
+                                );
+                            }
+                        }
+                    }
+                    continue;
+                }
+                Some("painting") => {
+                    let variant = e.painting_variant.unwrap_or(0);
+                    if let Some(painting) = self.entity_atlas.paintings.get(&variant) {
+                        let uv = [
+                            painting.atlas_x / dims[0],
+                            painting.atlas_y / dims[1],
+                            (painting.atlas_x + painting.width as f32) / dims[0],
+                            (painting.atlas_y + painting.height as f32) / dims[1],
+                        ];
+                        model_v.extend(painting_mesh(
+                            a.pos,
+                            painting.width as f32 / 16.0,
+                            painting.height as f32 / 16.0,
+                            e.object_data.rem_euclid(4) as f32 * 90.0,
+                            uv,
+                        ));
+                    }
+                    continue;
+                }
+                Some("area_effect_cloud") => {
+                    if !e.effect_waiting {
+                        effect_v.extend(area_effect_cloud_mesh(
+                            a.pos,
+                            e.effect_radius,
+                            e.effect_color,
+                            white,
+                        ));
+                    }
+                    continue;
+                }
+                Some("lightning_bolt") => {
+                    box_v.extend(lightning_bolt_mesh(a.pos, a.age, white));
+                    continue;
+                }
+                Some("block_display") => {
+                    if let Some(state) = e.display_block_state {
+                        let center = a.pos;
+                        let display_yaw = display_yaw(a.yaw, e.display_billboard, self.yaw);
+                        let mut vertices =
+                            block_state_item_mesh(&self.atlas, state, center, 1.0, display_yaw);
+                        apply_display_transform(
+                            &mut vertices,
+                            center,
+                            e.display_translation,
+                            e.display_scale,
+                            e.display_left_rotation,
+                            e.display_right_rotation,
+                        );
+                        box_v.extend(vertices);
+                    }
+                    continue;
+                }
+                Some("item_display") => {
+                    if let Some(item_id) = e.display_item {
+                        if let Some(name) = u32::try_from(item_id)
+                            .ok()
+                            .and_then(crab_registry::item_name)
+                        {
+                            let center = a.pos;
+                            let display_yaw = display_yaw(a.yaw, e.display_billboard, self.yaw);
+                            if let Some(mut vertices) =
+                                item_model_mesh(&self.item_atlas, name, center, display_yaw)
+                            {
+                                apply_display_transform(
+                                    &mut vertices,
+                                    center,
+                                    e.display_translation,
+                                    e.display_scale,
+                                    e.display_left_rotation,
+                                    e.display_right_rotation,
+                                );
+                                item_v.extend(vertices);
+                            } else if let Some(uv) = self.item_atlas.icon(name) {
+                                let start = item_v.len();
+                                push_item_billboard(&mut item_v, center, uv, display_yaw);
+                                apply_display_transform(
+                                    &mut item_v[start..],
+                                    center,
+                                    e.display_translation,
+                                    e.display_scale,
+                                    e.display_left_rotation,
+                                    e.display_right_rotation,
+                                );
+                            }
+                        }
+                    }
+                    continue;
+                }
+                Some("text_display") => {
+                    // Text itself is emitted by the GUI-font world pass below;
+                    // the background is still a correctly-sized display plane.
+                    if let Some(text) = e.display_text.as_deref() {
+                        let width = (e.display_line_width.max(1) as f32 * 0.025).min(64.0);
+                        let height =
+                            display_text_line_count(text, &self.gui_atlas, e.display_line_width)
+                                as f32
+                                * 0.2;
+                        let tint = argb_color(e.display_background);
+                        let mut panel = box_mesh(
+                            [
+                                a.pos[0] - width * 0.5,
+                                a.pos[1] - height * 0.5,
+                                a.pos[2] - 0.01,
+                            ],
+                            [
+                                a.pos[0] + width * 0.5,
+                                a.pos[1] + height * 0.5,
+                                a.pos[2] + 0.01,
+                            ],
+                            white,
+                            tint,
+                        );
+                        let panel_opacity = argb_alpha(e.display_background);
+                        for vertex in &mut panel {
+                            vertex.opacity = panel_opacity;
+                        }
+                        apply_display_transform(
+                            &mut panel,
+                            a.pos,
+                            e.display_translation,
+                            e.display_scale,
+                            e.display_left_rotation,
+                            e.display_right_rotation,
+                        );
+                        effect_v.extend(panel);
+                        let text_start = text_v.len();
+                        let display_yaw = display_yaw(a.yaw, e.display_billboard, self.yaw);
+                        display_text_mesh(
+                            &mut text_v,
+                            text,
+                            &self.gui_atlas,
+                            a.pos,
+                            display_yaw,
+                            e.display_line_width,
+                            e.display_flags,
+                            e.display_text_opacity,
+                        );
+                        apply_display_transform(
+                            &mut text_v[text_start..],
+                            a.pos,
+                            e.display_translation,
+                            e.display_scale,
+                            e.display_left_rotation,
+                            e.display_right_rotation,
+                        );
+                    }
+                    continue;
+                }
+                _ => {}
+            }
             if entity_name == Some("tnt") {
                 if let Some(tnt) = crab_registry::block_by_name("tnt") {
                     box_v.extend(block_state_item_mesh(
@@ -2702,7 +3165,7 @@ impl App {
         for particle in self.shared.particles.lock().unwrap().iter() {
             box_v.extend(particle_mesh(particle, white));
         }
-        (box_v, model_v, item_v)
+        (box_v, model_v, item_v, text_v, effect_v)
     }
 
     /// Builds the destroy-stage crack overlay cube for the block currently being
@@ -4004,7 +4467,7 @@ impl ApplicationHandler for App {
                 self.was_using_item = using_item;
                 self.process_meshes();
 
-                let (mut box_v, mut model_v, item_v) = self.step_entities(dt);
+                let (mut box_v, mut model_v, item_v, text_v, effect_v) = self.step_entities(dt);
                 let crack_v = self.crack_mesh();
                 let hotbar = hotbar_icons(&self.shared, &self.item_atlas);
                 let hovered_bundle = self.hovered_bundle();
@@ -4310,6 +4773,8 @@ impl ApplicationHandler for App {
                     gfx.box_entity_buffer = gfx.make_vertex_buffer(&box_v);
                     gfx.model_entity_buffer = gfx.make_vertex_buffer(&model_v);
                     gfx.item_entity_buffer = gfx.make_vertex_buffer(&item_v);
+                    gfx.text_entity_buffer = gfx.make_vertex_buffer(&text_v);
+                    gfx.effect_entity_buffer = gfx.make_vertex_buffer(&effect_v);
                     gfx.crack_buffer = gfx.make_vertex_buffer(&crack_v);
                     let gui = &self.gui_atlas;
                     if let Some(request) = resource_pack_prompt.as_ref() {
@@ -4430,10 +4895,12 @@ impl ApplicationHandler for App {
                         gfx.set_hud(&mc, &mg, &[], &[]);
                         gfx.render(&camera, clear);
                     } else {
-                        let (mut hud_c, mut hud_g, mut hud_i) = hud_geometry(
+                        let (mut hud_c, mut hud_g, mut hud_i) = hud_geometry_with_air(
                             gui,
                             player.health,
                             player.food,
+                            player.air,
+                            player.gamemode != 1 && player.gamemode != 3,
                             player.xp_bar,
                             player.xp_level,
                             selected,
@@ -5084,8 +5551,9 @@ pub fn run(
     let entity_atlas = Arc::new(entity_atlas);
     let item_atlas = Arc::new(item_atlas);
     let gui_atlas = Arc::new(gui_atlas);
-    let entity_models = std::env::var_os("CRABCRAFT_ENTITY_MODELS").map(PathBuf::from);
-    let resource_manager = ResourceManager::new(shared.context.registries, entity_models);
+    // Entity textures and any custom geometry are read from the layered jar by
+    // crab-assets; no separate geometry checkout is required.
+    let resource_manager = ResourceManager::new(shared.context.registries);
     // Spawn the background mesher.
     let (mesh_tx, mesh_rx) = std::sync::mpsc::sync_channel(64);
     {

@@ -1,4 +1,4 @@
-//! Renders one entity 3D model (Bedrock geometry + jar texture) to a PNG, to
+//! Renders one entity 3D model (custom geometry + jar texture) to a PNG, to
 //! verify the geometry parser + box-UV mapping.
 //!
 //! Usage: cargo run -p crab-render --example entity -- GEO.geo.json CLIENT.jar [name] [out.png]

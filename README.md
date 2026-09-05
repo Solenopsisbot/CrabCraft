@@ -94,12 +94,14 @@ tested for every supported profile:
    with the server, with the **destroy-stage crack overlay** animating on the
    block you're mining
 - **Entities**: tracks other players/mobs (spawn, relative move + rotation,
-   teleport, metadata, destroy) and renders them as **3D models** (Bedrock
-   geometry incl. bone rest rotations + jar textures, falling back to boxes),
-   **smoothly interpolated** with a **procedural walk animation** and **facing
-   their body yaw plus independent server-driven head yaw**; shared-model/variant mobs are aliased to the right geo+skin so
-   far fewer render as boxes; slimes/magma cubes scale to their size and
-   **dropped items show their item icon**
+  teleport, metadata, destroy) and renders them as **3D models** (jar textures
+  plus bundled vanilla rest-pose geometry, optional custom geometry, and a
+  registry-sized fallback),
+  **smoothly interpolated** with a **procedural walk animation** and **facing
+  their body yaw plus independent server-driven head yaw**; shared-model/variant mobs are aliased to the right texture so
+  far fewer render as boxes; slimes/magma cubes scale to their size and
+  **dropped items show their item icon**; item frames, paintings, clouds,
+  lightning, and Display entities use protocol-backed special renderers
 - **Item assets**: resolves legacy models and 1.21.4+ `items/*.json` default
   branches, alpha-composes generated-model texture layers, and reports
   unresolved block/item models instead of silently claiming complete coverage
@@ -107,8 +109,9 @@ tested for every supported profile:
   head rotation, metadata-driven crouch/swim/glide/sleep/death/sit poses,
   main/offhand items, visible material-coloured armour layers,
   bobbing/rotating 3D per-face dropped block models with short-horizon fall
-  prediction, and full-scale falling blocks selected from the server's exact
-  block-state ID
+  prediction, full-scale falling blocks selected from the server's exact
+  block-state ID, and protocol-backed item-frame, painting, cloud, lightning,
+  and Display metadata (interaction/marker volumes remain invisible)
 - **First-person presentation**: resolved 3D block/item models in both hands,
   tool-specific transforms, and attack/use swing motion, including immediate
   feedback when swapping hands
@@ -205,7 +208,7 @@ side-by-side rather than by rewriting the core.
 | `crab-registry` | Data-driven registries (generated block/item/entity tables, break times) |
 | `crab-physics` | AABB-vs-voxel collision and gravity |
 | `crab-render` | `wgpu` renderer: chunk meshing, entity models, offscreen + windowed |
-| `crab-assets` | Loads block + entity models/textures (jar + bedrock geometry); atlases |
+| `crab-assets` | Loads block/entity models and textures from the jar; atlases |
 | `crab-auth` | Session crypto (server hash, RSA) and Microsoft account login |
 | `crab-audio` | Loads sounds from the launcher asset store; `rodio` playback |
 | `crabcraft` | The client binary that wires it all together |
@@ -222,8 +225,8 @@ Requires a recent stable Rust toolchain.
 
 The easiest way to launch a fully textured client with sounds and 3D entity
 models is the asset-aware launcher. On its first run it downloads the selected
-official client jar and sound objects plus Mojang's public Bedrock samples into
-the ignored `assets-cache/` directory; later runs reuse SHA-1-verified files.
+official client jar and sound objects into the ignored `assets-cache/` directory;
+later runs reuse SHA-1-verified files.
 
 ```sh
 cargo run -p crabcraft-launcher -- client
@@ -269,23 +272,25 @@ cargo run -p crabcraft -- render online [ADDR]         # online + windowed
 # offline defaults: 127.0.0.1:25565  Ferris  35
 ```
 
-For **textures** in windowed mode, point `CRABCRAFT_JAR` at your 1.20.1 client
-jar, and (optionally) `CRABCRAFT_ENTITY_MODELS` at a local
-[`bedrock-samples`](https://github.com/Mojang/bedrock-samples)
-`resource_pack/models/entity` directory for **3D entity models** (assets are
-loaded from your own copies, never bundled — both are Mojang/EULA content):
+For **textures and entity models** in windowed mode, point `CRABCRAFT_JAR` at
+your client jar (assets are loaded from your own copy and never bundled):
 
 ```sh
 CRABCRAFT_JAR=/path/to/1.20.1.jar \
-CRABCRAFT_ENTITY_MODELS=/path/to/bedrock-samples/resource_pack/models/entity \
   cargo run --release -p crabcraft -- render 127.0.0.1:25565
 ```
 
-Entity geometry is parsed from Bedrock `.geo.json`/`.json` and textured with the
-Java textures from your jar. Family-folder skins, shared mob models, projectile
-models, and minecart variants are resolved explicitly; entities without both a
-loaded model and texture render as coloured registry-sized boxes. See the
-[asset pipeline](docs/ASSETS.md) for resolution and licensing details.
+Entity textures and all 30 vanilla painting textures are extracted from the jar.
+Vanilla mob rest-pose geometry is bundled as a generated Rust table extracted
+from the decompiled Java model builders, so ordinary entities no longer depend
+on Bedrock geometry or a second asset checkout. If a custom/resource-pack
+archive contains compatible geometry JSON, it is preferred; otherwise the
+bundled model table is used, with a deterministic registry-sized model as the
+last fallback. Family-folder skins, shared mob models, projectile models, and
+minecart variants are resolved explicitly. Entities without a texture still
+render as coloured registry-sized boxes, except for vanilla-invisible
+interaction/marker volumes. See the [asset pipeline](docs/ASSETS.md) for the
+resolution boundary.
 
 Windowed controls: **WASD** move · **Control / double-tap W** sprint · **Space** jump / double-tap to fly when allowed
 · **F** swap main/offhand
@@ -348,10 +353,11 @@ Microsoft account. Using the official server jar:
 - [x] Server-driven day/night and rain/thunder sky ambience
 - [x] Block breaking + placing (raycast) with a crosshair
 - [x] Per-chunk mesh caching (only dirty chunks rebuild)
-- [x] Entity tracking + 3D models (Bedrock geometry + jar textures)
+- [x] Entity tracking + 3D models (jar textures + bundled vanilla rest-pose geometry)
 - [x] Background chunk meshing (smooth frames)
 - [x] Melee combat (attack mobs), health/food tracking + death-respawn
-- [x] Minimal HUD (crosshair, hotbar outline, health/food bars)
+- [x] Minimal HUD (crosshair, hotbar outline, health/food/air bars; survival
+  bars hidden in Creative/Spectator)
 - [x] Element block models (slabs/stairs/plants/lanterns render as real shapes)
  - [x] Entity bone rest rotations + interpolation + procedural walk animation
  - [x] Version-correct entity pose metadata with crouch/swim/glide/sleep/death transforms
@@ -363,7 +369,8 @@ Microsoft account. Using the official server jar:
 - [x] Chat + commands (send/receive, on-screen log)
  - [x] Sounds: per-block break / place / mining-hit / footstep / hurt / attack via `sounds.json`
  - [x] Crafting (2×2) + armour via the full inventory window; left/right clicks
- - [x] Real HUD (hearts / hunger / XP+level); pause menu with vanilla buttons
+ - [x] Real HUD (hearts / hunger / air / XP+level, with survival bars hidden in
+   Creative/Spectator); pause menu with vanilla buttons
  - [x] In-game options for FOV, mouse sensitivity, and fullscreen mode
  - [x] F5 first/rear/front camera cycling with an animated local-player model
  - [x] Player model (humanoid + default skin) for other players
@@ -389,8 +396,9 @@ Microsoft account. Using the official server jar:
  - [x] Cursor-facing 3D player preview in the inventory screen
  - [x] Server-driven spatial mob ambient sounds with range/volume attenuation
  - [x] Java-family texture aliases plus shared projectile and minecart geometry
- - [x] Registry-complete mob/vehicle geometry resolution with generated hitbox
-   dimensions, built-in textured boats/rafts, and item/block-shaped entities
+ - [x] Registry-complete mob/vehicle geometry resolution with bundled vanilla
+   rest-pose layers, generated hitbox fallback dimensions, built-in textured
+   boats/rafts, and item/block-shaped entities
 - [x] Precise generated per-state collision shapes for every supported registry
   - [x] Empty shapes: fluids, plants, rails, torches, redstone, signs, and similar blocks
   - [x] State-aware top/bottom/double slabs and full stair variants + 0.6-block auto-step
