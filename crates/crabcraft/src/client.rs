@@ -2069,10 +2069,11 @@ where
                                     | ProtocolVersion::V1_21_4
                                     | ProtocolVersion::V1_21_5
                                     | ProtocolVersion::V1_21_6
+                                    | ProtocolVersion::V1_21_7
                             ) {
                                 let information =
                                     configuration768::ClientInformation::sensible_defaults();
-                                if protocol == ProtocolVersion::V1_21_6 {
+                                if matches!(protocol, ProtocolVersion::V1_21_6 | ProtocolVersion::V1_21_7) {
                                     conn.send_unmapped(&play771::ClientInformation(
                                         play768::ClientInformation(information),
                                     ))
@@ -2086,8 +2087,9 @@ where
                                     ProtocolVersion::V1_21_4
                                         | ProtocolVersion::V1_21_5
                                         | ProtocolVersion::V1_21_6
+                                        | ProtocolVersion::V1_21_7
                                 ) {
-                                    if protocol == ProtocolVersion::V1_21_6 {
+                                    if matches!(protocol, ProtocolVersion::V1_21_6 | ProtocolVersion::V1_21_7) {
                                         conn.send_unmapped(&play771::PlayerLoaded(
                                             play769::PlayerLoaded,
                                         ))
