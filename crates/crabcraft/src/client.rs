@@ -2105,7 +2105,7 @@ where
                         if !greeted {
                             greeted = true;
                             let msg = format!("{username} here via Crabcraft (pure Rust).");
-                            if protocol == ProtocolVersion::V1_21_6 {
+                            if matches!(protocol, ProtocolVersion::V1_21_6 | ProtocolVersion::V1_21_7) {
                                 conn.send_unmapped(&play771::ClientChatMessage::unsigned(msg))
                                     .await?;
                             } else if protocol == ProtocolVersion::V1_21_5 {
@@ -3787,6 +3787,12 @@ where
                 conn.send(&ChatCommand::new(command.to_owned())).await?;
             } else if protocol == ProtocolVersion::V1_21_5 {
                 conn.send_unmapped(&play770::ClientChatMessage::unsigned(message.clone()))
+                    .await?;
+            } else if matches!(
+                protocol,
+                ProtocolVersion::V1_21_6 | ProtocolVersion::V1_21_7
+            ) {
+                conn.send_unmapped(&play771::ClientChatMessage::unsigned(message.clone()))
                     .await?;
             } else {
                 conn.send(&ClientChatMessage::unsigned(message.clone()))
