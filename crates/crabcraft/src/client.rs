@@ -3796,7 +3796,12 @@ where
         }
         ClientCommand::SendChat(message) => {
             if let Some(command) = message.strip_prefix('/') {
-                conn.send(&ChatCommand::new(command.to_owned())).await?;
+                if matches!(protocol, ProtocolVersion::V1_21_7) {
+                    conn.send_unmapped(&play771::ChatCommand::new(command.to_owned()))
+                        .await?;
+                } else {
+                    conn.send(&ChatCommand::new(command.to_owned())).await?;
+                }
             } else if protocol == ProtocolVersion::V1_21_5 {
                 conn.send_unmapped(&play770::ClientChatMessage::unsigned(message.clone()))
                     .await?;

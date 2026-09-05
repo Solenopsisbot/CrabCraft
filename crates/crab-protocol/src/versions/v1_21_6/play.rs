@@ -3,12 +3,39 @@
 use bytes::{Buf, BufMut};
 
 use crate::error::ProtoError;
+use crate::io::{BufExt, BufMutExt};
 use crate::packet::{Bound, Packet, State};
 use crate::versions::v1_20_5::play as play766;
 use crate::versions::v1_20_5::play::ComponentSlot;
 use crate::versions::v1_21_2::play as play768;
 use crate::versions::v1_21_4::play as play769;
 use crate::versions::v1_21_5::play as play770;
+
+/// Protocol 772's command packet contains only the command text. The
+/// signature/timestamp trailer used by older play versions was removed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChatCommand(pub String);
+
+impl ChatCommand {
+    pub fn new(command: String) -> Self {
+        Self(command)
+    }
+}
+
+impl Packet for ChatCommand {
+    const ID: i32 = 0x04;
+    const STATE: State = State::Play;
+    const BOUND: Bound = Bound::Serverbound;
+
+    fn encode<B: BufMut>(&self, dst: &mut B) -> Result<(), ProtoError> {
+        dst.put_string(&self.0);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(src: &mut B) -> Result<Self, ProtoError> {
+        Ok(Self(src.read_string(256)?))
+    }
+}
 
 macro_rules! shifted_packet {
     ($(#[$meta:meta])* $name:ident($inner:path), $id:expr) => {
