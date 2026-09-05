@@ -744,7 +744,10 @@ fn climb_velocity(current: f64, jump: bool, sneak: bool) -> f64 {
     } else if jump {
         3.0
     } else {
-        current.max(-3.0)
+        // Climbing is input-driven. Stop an upward climb as soon as jump is
+        // released instead of carrying the previous +3 blocks/s forever;
+        // retain only the bounded downward slide from an existing fall.
+        current.clamp(-3.0, 0.0)
     }
 }
 
@@ -7093,6 +7096,7 @@ mod tests {
     fn climbables_require_explicit_vertical_input() {
         assert_eq!(climb_velocity(0.0, false, false), 0.0);
         assert_eq!(climb_velocity(-8.0, false, false), -3.0);
+        assert_eq!(climb_velocity(8.0, false, false), 0.0);
         assert_eq!(climb_velocity(0.0, true, false), 3.0);
         assert_eq!(climb_velocity(-1.0, false, true), 0.0);
     }

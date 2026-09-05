@@ -68,8 +68,9 @@ tested for every supported profile:
   with **textures loaded from your client jar** (atlas-stitched cube models +
   **element models** so slabs/stairs/plants/lanterns render as real shapes +
   vanilla-derived omitted-face UVs + namespaced resource-pack references +
-  grass/foliage tint), with opaque-first and back-to-front translucent passes
-  so water/glass appearance is stable while moving the camera; vanilla
+  grass/foliage tint), with alpha-aware opaque/translucent passes (including
+  cutout plants and leaves) and back-to-front blending so water/glass
+  appearance is stable while moving the camera; vanilla
   blockstate rotations, UV locking, waterlogged fluid layers, and fluid-safe
   face culling are applied before upload; offscreen mode + a live windowed viewer
 - **Player control**: first-person WASD/jump/look in the window, driven through

@@ -104,7 +104,9 @@ fn occludes(registries: crab_registry::RegistrySet, atlas: &Atlas, state: u32) -
     ) {
         return false;
     }
-    !registries.is_air(state) && atlas.is_state_cube(state, name)
+    !registries.is_air(state)
+        && atlas.is_state_cube(state, name)
+        && !atlas.is_state_translucent(state, name)
 }
 
 fn block_model_seed(cell: [i32; 3], part: usize) -> u64 {
@@ -812,6 +814,11 @@ pub fn mesh_region_with_registry(
                     }
                     let tex = model.faces[fi];
                     let [u0, v0, u1, v1] = tex.uv;
+                    let opacity = if atlas.uv_has_transparency(tex.uv) {
+                        0.998
+                    } else {
+                        1.0
+                    };
                     // two triangles: (0,1,2) and (0,2,3)
                     for &ci in &[0usize, 1, 2, 0, 2, 3] {
                         let c = rotate_model(face.corners[ci], rotation, true);
@@ -821,13 +828,7 @@ pub fn mesh_region_with_registry(
                             normal,
                             uv: [u0 + cu * (u1 - u0), v0 + cv * (v1 - v0)],
                             tint: biome_tint(world, name, [x, y, z], tex.tint),
-                            opacity: if name == "minecraft:water" {
-                                0.58
-                            } else if name == "minecraft:lava" {
-                                0.88
-                            } else {
-                                1.0
-                            },
+                            opacity,
                         });
                     }
                 }
@@ -957,6 +958,14 @@ fn emit_elements_tinted(
                 }
             }
             let [su0, sv0, su1, sv1] = ef.uv;
+            // Keep alpha/cutout textures out of the depth-writing pass. The
+            // shader still samples the real alpha; this marker only selects
+            // the stable, depth-tested translucent pipeline.
+            let opacity = if atlas.uv_has_transparency(ef.uv) {
+                0.998
+            } else {
+                1.0
+            };
             let mut normal = face.normal;
             if let Some(rotation) = &el.rotation {
                 normal = rotate_element_normal(normal, rotation);
@@ -986,7 +995,7 @@ fn emit_elements_tinted(
                     uv: [su0 + cu * (su1 - su0), sv0 + cv * (sv1 - sv0)],
                     tint: tint_override
                         .unwrap_or_else(|| biome_tint(world, block_name, cell, ef.tint)),
-                    opacity: 1.0,
+                    opacity,
                 });
             }
         }
@@ -1858,7 +1867,18 @@ mod tests {
             .unwrap();
         world.set_block_state(5, -60, 5, waterlogged);
         let mesh = mesh_region_with_registry(&world, &atlas, [5, -60, 5], [5, -60, 5], registries);
-        assert!(mesh.vertices.iter().any(|vertex| vertex.opacity < 1.0));
+        let fluid_vertices: Vec<_> = mesh
+            .vertices
+            .iter()
+            .filter(|vertex| vertex.opacity < 1.0)
+            .collect();
+        assert!(!fluid_vertices.is_empty());
+        assert!(fluid_vertices
+            .iter()
+            .all(|vertex| vertex.position[0] > 5.0 && vertex.position[0] < 6.0));
+        assert!(fluid_vertices
+            .iter()
+            .all(|vertex| vertex.position[2] > 5.0 && vertex.position[2] < 6.0));
         assert!(mesh.vertices.iter().any(|vertex| vertex.opacity == 1.0));
     }
 

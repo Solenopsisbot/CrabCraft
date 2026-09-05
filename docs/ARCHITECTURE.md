@@ -72,13 +72,17 @@ yaw, and Pose metadata are combined when CPU mesh vertices are rebuilt. Protocol
 766+ uses the shifted Pose metadata serializer introduced with the 1.20.5
 particle-list insertion; older profiles retain the preceding serializer ID.
 
-The window renderer partitions each chunk's triangles by vertex opacity. Opaque
-chunks and entities write depth first; translucent chunks are then sorted
-back-to-front and depth-tested without writing depth. The translucent pipeline
-allows equal-depth interfaces so a water surface can blend over the solid face
-at its boundary, while fluid atlas fallback entries never participate in solid
-face occlusion. This prevents hash-map iteration or camera motion from changing
-overlapping water/glass results. The
+The window renderer partitions each chunk's triangles by vertex opacity. Atlas
+tiles with alpha (including cutout plants and leaves) are marked while the
+resource pack is loaded, so model faces use the same stable translucent path as
+water and glass instead of writing conflicting depth. Opaque chunks and
+entities write depth first; translucent chunks are then sorted back-to-front
+and depth-tested without writing depth. The translucent pipeline allows
+equal-depth interfaces so a water surface can blend over the solid face at its
+boundary, while fluid atlas fallback entries never participate in solid face
+occlusion. Transparent full cubes likewise do not hide opaque neighbour faces.
+This prevents hash-map iteration or camera motion from changing overlapping
+water/glass results. The
 rest of the frame is HUD backgrounds, depth-cleared 3D block/item overlays and
 the inventory player viewport, then HUD item/text foregrounds.
 The preview reuses the entity atlas and humanoid mesh but owns a separate camera
@@ -101,7 +105,9 @@ registry, including the explicit `waterlogged` state property. Movement intent
 still crosses into the network thread through `Controls`; the window owns the
 double-tap-W timing latch, while the simulation owns sprint eligibility and
 vine/ladder vertical velocity. Climbables limit falling while touched, but
-upward movement requires explicit jump input rather than forward movement.
+upward movement requires explicit jump input rather than forward movement;
+releasing jump immediately stops the upward velocity instead of carrying it to
+the top of the vine.
 Rising collision is evaluated before gravity,
 matching vanilla's tick order so the initial 0.42-block jump impulse is not
 shortened. Sprint-swimming projects forward velocity through camera pitch.
