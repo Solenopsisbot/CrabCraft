@@ -36,7 +36,7 @@ use crate::client::{ContainerState, CraftingRecipe, EnvironmentState, Particle, 
 use crate::resource::ResourceManager;
 
 /// Max chunk columns re-meshed per frame (bounds per-frame CPU during loads).
-const REMESH_BUDGET: usize = 4;
+const REMESH_BUDGET: usize = 16;
 const LOOK_SPEED: f32 = 110.0; // degrees/sec (arrow-key look)
 const EYE_HEIGHT: f32 = 1.62;
 type HudRect = (f32, f32, f32, f32);

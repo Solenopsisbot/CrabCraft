@@ -603,7 +603,7 @@ impl DirtyChunks {
         if pending.is_empty() {
             let (next, _) = self
                 .ready
-                .wait_timeout(pending, Duration::from_millis(100))
+                .wait_timeout(pending, Duration::from_millis(5))
                 .unwrap();
             pending = next;
         }
