@@ -1,6 +1,6 @@
 # Crabcraft
 
-A Minecraft **Java Edition 1.20.1–1.21.6** client written from scratch in **pure Rust**.
+A Minecraft **Java Edition 1.20.1–1.21.8** client written from scratch in **pure Rust**.
 
 [![CI](https://github.com/Solenopsisbot/CrabCraft/actions/workflows/ci.yml/badge.svg)](https://github.com/Solenopsisbot/CrabCraft/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
@@ -442,7 +442,8 @@ Microsoft account. Using the official server jar:
   core/component live validation
 - [x] Protocol 771 / 1.21.6 registries, shifted packet maps, fixed-length chunk
   palettes, component payloads, and official-server core validation
-- [ ] Protocol 772+ (newer than 1.21.6) registries and packet schemas
+- [x] Protocol 772 / 1.21.7–1.21.8 registries, packet audit, and live vanilla smoke validation
+- [ ] Protocol 773+ (newer than 1.21.8) registries and packet schemas
 - [ ] (Far future, maybe) Forge mod support — see the note below
 
 ### On Forge mods

@@ -17,11 +17,12 @@ pub enum ProtocolVersion {
     V1_21_4,
     V1_21_5,
     V1_21_6,
+    V1_21_7,
 }
 
 impl ProtocolVersion {
     /// All supported profiles in ascending wire-version order.
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::V1_20_1,
         Self::V1_20_2,
         Self::V1_20_3,
@@ -31,6 +32,7 @@ impl ProtocolVersion {
         Self::V1_21_4,
         Self::V1_21_5,
         Self::V1_21_6,
+        Self::V1_21_7,
     ];
 
     /// Numeric protocol identifier carried in the handshake.
@@ -46,6 +48,7 @@ impl ProtocolVersion {
             Self::V1_21_4 => 769,
             Self::V1_21_5 => 770,
             Self::V1_21_6 => 771,
+            Self::V1_21_7 => 772,
         }
     }
 
@@ -88,6 +91,7 @@ impl FromStr for ProtocolVersion {
             "769" | "1.21.4" => Ok(Self::V1_21_4),
             "770" | "1.21.5" => Ok(Self::V1_21_5),
             "771" | "1.21.6" => Ok(Self::V1_21_6),
+            "772" | "1.21.7" | "1.21.8" => Ok(Self::V1_21_7),
             _ => Err(ProtocolParseError(value.to_owned())),
         }
     }
@@ -95,7 +99,7 @@ impl FromStr for ProtocolVersion {
 
 /// An unsupported protocol number or version label.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
-#[error("unsupported protocol {0}; expected 763..=771 or a supported version label")]
+#[error("unsupported protocol {0}; expected 763..=772 or a supported version label")]
 pub struct ProtocolParseError(pub String);
 
 /// Immutable context shared by all adapters belonging to one session.
@@ -127,5 +131,18 @@ mod tests {
         assert_eq!(modern.protocol.number(), 770);
         assert!(legacy.registries.block_by_name("pale_oak_log").is_none());
         assert!(modern.registries.block_by_name("pale_oak_log").is_some());
+    }
+
+    #[test]
+    fn protocol_772_has_its_own_identity_and_generated_registries() {
+        let profile: ProtocolVersion = "1.21.8".parse().unwrap();
+        assert_eq!(profile, ProtocolVersion::V1_21_7);
+        assert_eq!(profile.number(), 772);
+        assert!(profile.registries().block_by_name("oak_log").is_some());
+        assert!(profile
+            .registries()
+            .items()
+            .iter()
+            .any(|item| item.name == "music_disc_lava_chicken"));
     }
 }

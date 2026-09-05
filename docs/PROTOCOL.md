@@ -14,7 +14,8 @@ Crabcraft defaults to protocol 763. Choose another profile with
 | 1.21.4 | 769 | Core and component paths live-tested on 1.21.4 | Pale Garden registries, Player Loaded, split pick-item map, direct component slots, revised held-item/particle/player-list/vehicle payloads |
 | 1.21.5 | 770 | Core and component paths live-tested on 1.21.5 | Spring to Life registries, shifted play maps, array heightmaps, chat checksum, reorganized components |
 | 1.21.6 | 771 | Core path live-tested on 1.21.6 | 1.21.6 registries, fixed-length paletted chunk containers, changed game-mode insertion, component-era payload revisions |
-| Newer than 1.21.6 | 772+ | Not implemented | Requires authoritative registries and packet schemas |
+| 1.21.7 / 1.21.8 | 772 | Core path live-tested on 1.21.8 | Generated 1.21.8 block/item/entity registries; packet map matches 1.21.6, with modern client-information particle status |
+| Newer than 1.21.8 | 773+ | Not implemented | Requires authoritative registries and packet schemas |
 
 ## Versioning approach
 

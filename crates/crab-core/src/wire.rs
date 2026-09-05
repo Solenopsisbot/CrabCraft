@@ -78,7 +78,7 @@ impl ProtocolVersion {
             Self::V1_21_2 => serverbound_768(state, canonical),
             Self::V1_21_4 => serverbound_769(state, canonical),
             Self::V1_21_5 => serverbound_770(state, canonical),
-            Self::V1_21_6 => serverbound_771(state, canonical),
+            Self::V1_21_6 | Self::V1_21_7 => serverbound_771(state, canonical),
         }
     }
 
@@ -93,7 +93,7 @@ impl ProtocolVersion {
             Self::V1_21_2 => Some(serverbound_768),
             Self::V1_21_4 => Some(serverbound_769),
             Self::V1_21_5 => Some(serverbound_770),
-            Self::V1_21_6 => Some(serverbound_771),
+            Self::V1_21_6 | Self::V1_21_7 => Some(serverbound_771),
         }
     }
 
@@ -108,7 +108,7 @@ impl ProtocolVersion {
             Self::V1_20_3 => clientbound_765(wire),
             Self::V1_20_5 | Self::V1_21 => clientbound_766(wire),
             Self::V1_21_2 | Self::V1_21_4 => clientbound_768(wire),
-            Self::V1_21_5 | Self::V1_21_6 => clientbound_770(wire),
+            Self::V1_21_5 | Self::V1_21_6 | Self::V1_21_7 => clientbound_770(wire),
         };
         (canonical >= 0).then_some(canonical)
     }

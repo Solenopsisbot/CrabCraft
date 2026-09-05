@@ -23,6 +23,7 @@ mod blocks_1_21_3;
 mod blocks_1_21_4;
 mod blocks_1_21_5;
 mod blocks_1_21_6;
+mod blocks_1_21_7;
 mod collision_generated;
 mod entities_1_20_1;
 mod entities_1_20_3;
@@ -31,6 +32,7 @@ mod entities_1_21_3;
 mod entities_1_21_4;
 mod entities_1_21_5;
 mod entities_1_21_6;
+mod entities_1_21_7;
 mod items_1_20_1;
 mod items_1_20_3;
 mod items_1_20_5;
@@ -39,6 +41,7 @@ mod items_1_21_3;
 mod items_1_21_4;
 mod items_1_21_5;
 mod items_1_21_6;
+mod items_1_21_7;
 
 pub use blocks_1_20_1::BLOCKS_1_20_1;
 pub use blocks_1_20_2::BLOCKS_1_20_2;
@@ -49,6 +52,7 @@ pub use blocks_1_21_3::BLOCKS_1_21_3;
 pub use blocks_1_21_4::BLOCKS_1_21_4;
 pub use blocks_1_21_5::BLOCKS_1_21_5;
 pub use blocks_1_21_6::BLOCKS_1_21_6;
+pub use blocks_1_21_7::BLOCKS_1_21_7;
 pub use entities_1_20_1::ENTITIES_1_20_1;
 pub use entities_1_20_3::ENTITIES_1_20_3;
 pub use entities_1_20_5::ENTITIES_1_20_5;
@@ -56,6 +60,7 @@ pub use entities_1_21_3::ENTITIES_1_21_3;
 pub use entities_1_21_4::ENTITIES_1_21_4;
 pub use entities_1_21_5::ENTITIES_1_21_5;
 pub use entities_1_21_6::ENTITIES_1_21_6;
+pub use entities_1_21_7::ENTITIES_1_21_7;
 pub use items_1_20_1::ITEMS_1_20_1;
 pub use items_1_20_3::ITEMS_1_20_3;
 pub use items_1_20_5::ITEMS_1_20_5;
@@ -64,6 +69,7 @@ pub use items_1_21_3::ITEMS_1_21_3;
 pub use items_1_21_4::ITEMS_1_21_4;
 pub use items_1_21_5::ITEMS_1_21_5;
 pub use items_1_21_6::ITEMS_1_21_6;
+pub use items_1_21_7::ITEMS_1_21_7;
 
 static REGISTRY_PROFILE: AtomicU8 = AtomicU8::new(0);
 
@@ -93,6 +99,9 @@ impl RegistrySet {
                 769 => 6,
                 770 => 7,
                 771 => 8,
+                // 1.21.7/1.21.8 (772) retain the 1.21.6 wire registries;
+                // content additions are presentation-only until generated data is added.
+                772 => 9,
                 _ => 0,
             },
         }
@@ -119,6 +128,7 @@ impl RegistrySet {
             6 => BLOCKS_1_21_4,
             7 => BLOCKS_1_21_5,
             8 => BLOCKS_1_21_6,
+            9 => BLOCKS_1_21_7,
             _ => BLOCKS_1_20_1,
         }
     }
@@ -134,6 +144,7 @@ impl RegistrySet {
             6 => ITEMS_1_21_4,
             7 => ITEMS_1_21_5,
             8 => ITEMS_1_21_6,
+            9 => ITEMS_1_21_7,
             _ => ITEMS_1_20_1,
         }
     }
@@ -148,6 +159,7 @@ impl RegistrySet {
             6 => ENTITIES_1_21_4,
             7 => ENTITIES_1_21_5,
             8 => ENTITIES_1_21_6,
+            9 => ENTITIES_1_21_7,
             _ => ENTITIES_1_20_1,
         }
     }

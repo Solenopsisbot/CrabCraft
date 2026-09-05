@@ -13,6 +13,11 @@ pub mod v1_21_2;
 pub mod v1_21_4;
 pub mod v1_21_5;
 pub mod v1_21_6;
+/// Protocol 772 (1.21.7/1.21.8) has the same packet map and field schemas as
+/// 1.21.6; this module keeps the version boundary explicit for callers.
+pub mod v1_21_7 {
+    pub use super::v1_21_6::*;
+}
 
 /// Protocol number for Minecraft 1.20 and 1.20.1.
 pub const PROTOCOL_1_20_1: i32 = 763;
@@ -32,3 +37,5 @@ pub const PROTOCOL_1_21_4: i32 = 769;
 pub const PROTOCOL_1_21_5: i32 = 770;
 /// Java Edition 1.21.6.
 pub const PROTOCOL_1_21_6: i32 = 771;
+/// Java Edition 1.21.7/1.21.8.
+pub const PROTOCOL_1_21_7: i32 = 772;

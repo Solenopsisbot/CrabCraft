@@ -1341,6 +1341,7 @@ where
             | ProtocolVersion::V1_21_4
             | ProtocolVersion::V1_21_5
             | ProtocolVersion::V1_21_6
+            | ProtocolVersion::V1_21_7
     ) {
         conn.send_unmapped(&configuration768::ClientInformation::sensible_defaults())
             .await?;
@@ -1368,6 +1369,14 @@ where
                             let mut body = raw.body.clone();
                             let reason = read_text_component(&mut body, protocol)?;
                             bail!("configuration refused: {reason}");
+                        }
+                        0x01 => {
+                            let packet: configuration766::CustomPayload = raw.decode()?;
+                            tracing::debug!(channel = %packet.channel, bytes = packet.data.len(), "configuration custom payload");
+                        }
+                        0x0c => {
+                            let packet: configuration766::FeatureFlags = raw.decode()?;
+                            tracing::debug!(count = packet.0.len(), "configuration feature flags");
                         }
                         0x03 => {
                             conn.send(&FinishConfiguration).await?;
@@ -1398,7 +1407,12 @@ where
                             );
                         }
                         0x0e => {
-                            conn.send_unmapped(&configuration766::SelectKnownPacks).await?;
+                            let mut body = raw.body.clone();
+                            let count = body.read_varint()?;
+                            if !(0..=1024).contains(&count) { bail!("invalid known-pack count {count}"); }
+                            let mut packs = Vec::with_capacity(count as usize);
+                            for _ in 0..count { packs.push((body.read_string(32767)?, body.read_string(32767)?, body.read_string(32767)?)); }
+                            conn.send_unmapped(&configuration766::SelectKnownPacksResponse(packs)).await?;
                         }
                         _ => {}
                     }
@@ -1517,7 +1531,8 @@ where
         | ProtocolVersion::V1_21_2
         | ProtocolVersion::V1_21_4
         | ProtocolVersion::V1_21_5
-        | ProtocolVersion::V1_21_6 => {
+        | ProtocolVersion::V1_21_6
+        | ProtocolVersion::V1_21_7 => {
             let uuid = shared
                 .resource_pack_request
                 .lock()
@@ -1602,7 +1617,8 @@ async fn run_inner(
         | ProtocolVersion::V1_21_2
         | ProtocolVersion::V1_21_4
         | ProtocolVersion::V1_21_5
-        | ProtocolVersion::V1_21_6 => {
+        | ProtocolVersion::V1_21_6
+        | ProtocolVersion::V1_21_7 => {
             conn.send(&LoginStart764 {
                 name: name.clone(),
                 uuid: uuid.unwrap_or_else(|| offline_uuid(&name)),
@@ -4040,7 +4056,8 @@ fn handle_join_game(
         | ProtocolVersion::V1_21_2
         | ProtocolVersion::V1_21_4
         | ProtocolVersion::V1_21_5
-        | ProtocolVersion::V1_21_6 => {
+        | ProtocolVersion::V1_21_6
+        | ProtocolVersion::V1_21_7 => {
             let world_count = b.read_varint()?.max(0);
             for _ in 0..world_count {
                 let _ = b.read_string(32767)?;
