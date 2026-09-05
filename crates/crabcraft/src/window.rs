@@ -1091,13 +1091,10 @@ fn recipe_book_geometry(
 
 /// Builds the 9 hotbar item-icon UVs from the player's inventory (slots 36..44).
 fn flat_item_icon(item_atlas: &ItemAtlas, name: &str) -> Option<[f32; 4]> {
-    // Every resolved block, element item, and generated icon now has a mesh in
-    // the depth-cleared overlay pass. Returning its flat quad here would draw
-    // over that mesh in the HUD foreground and make it appear 2D again.
-    let _resolved = crab_registry::block_by_name(name).is_some()
-        || item_atlas.model(name).is_some()
-        || item_atlas.icon(name).is_some();
-    None
+    // The hotbar is a 2D HUD surface. The selected item also gets a 3D
+    // first-person model, but that model is drawn in world space and does not
+    // replace the inventory icon in the vanilla bar.
+    item_atlas.icon(name)
 }
 
 fn hotbar_icons(shared: &Shared, item_atlas: &ItemAtlas) -> Vec<Option<[f32; 4]>> {
