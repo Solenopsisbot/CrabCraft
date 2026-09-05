@@ -471,8 +471,10 @@ pub fn mesh_region_with_registry(
                 }
 
                 if let Some(parts) = atlas.block_state_model(state) {
+                    let mut selected_any = false;
                     for (part_index, part) in parts.iter().enumerate() {
                         if let Some(model) = select_state_alternative(part, [x, y, z], part_index) {
+                            selected_any = true;
                             emit_state_elements(
                                 &mut vertices,
                                 world,
@@ -486,7 +488,14 @@ pub fn mesh_region_with_registry(
                             );
                         }
                     }
-                    continue;
+                    // A state model can legitimately have no matching
+                    // multipart alternative when a resource pack omits a
+                    // property variant. Keep the block visible using the
+                    // ordinary registry/model fallback instead of silently
+                    // dropping it from the mesh.
+                    if selected_any {
+                        continue;
+                    }
                 }
 
                 if name.ends_with("_wall") {
