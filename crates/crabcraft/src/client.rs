@@ -2595,11 +2595,7 @@ where
                         }
                     }
                     id if id == ID_UNLOAD_CHUNK => {
-                        let mut body = raw.body.clone();
-                        if let (Ok(cx), Ok(cz)) = (body.read_i32(), body.read_i32()) {
-                            shared.world.lock().unwrap().unload_chunk(cx, cz);
-                            mark_dirty(shared, cx, cz);
-                        }
+                        handle_unload_chunk(&raw, shared, protocol)?;
                     }
                     id if id == ID_BLOCK_CHANGE => {
                         let mut body = raw.body.clone();
@@ -6836,6 +6832,27 @@ where
 /// Applies one server-authoritative block state and invalidates the affected
 /// chunk. This is shared by the single-block and section-batch packets; mob
 /// growth, fluids, pistons, and explosions commonly arrive in the latter.
+fn handle_unload_chunk(
+    raw: &crab_net::RawPacket,
+    shared: &Arc<Shared>,
+    protocol: ProtocolVersion,
+) -> Result<()> {
+    let mut body = raw.body.clone();
+    let first = body.read_i32()?;
+    let second = body.read_i32()?;
+    // Since 1.20.2, ChunkPos is a packed long (X in the low word),
+    // hence big-endian wire order is Z then X. 1.20.1 used X then Z.
+    let (cx, cz) = if protocol == ProtocolVersion::V1_20_1 {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    shared.world.lock().unwrap().unload_chunk(cx, cz);
+    replace_chunk_signs(shared, (cx, cz), Vec::new());
+    mark_dirty(shared, cx, cz);
+    Ok(())
+}
+
 fn apply_server_block_state(shared: &Arc<Shared>, x: i32, y: i32, z: i32, state: i32) {
     let Ok(state) = u32::try_from(state) else {
         tracing::warn!(x, y, z, state, "server sent a negative block state");
@@ -8283,6 +8300,42 @@ mod tests {
             [8.5, -59.0, 8.5],
             1.8
         ));
+    }
+
+    #[test]
+    fn unload_packets_preserve_the_player_chunk_and_its_movement_data() {
+        for protocol in ProtocolVersion::ALL {
+            let shared = Arc::new(Shared::new());
+            for (x, z) in [(-2, 3), (3, -2)] {
+                shared.world.lock().unwrap().load_chunk(Chunk {
+                    x,
+                    z,
+                    sections: Vec::new(),
+                });
+            }
+            // The mirrored coordinate represents the player's chunk. The
+            // old decoder unloaded it, freezing physics at is_loaded().
+            let (first, second): (i32, i32) = if protocol == ProtocolVersion::V1_20_1 {
+                (-2, 3)
+            } else {
+                (3, -2)
+            };
+            let body = [first.to_be_bytes(), second.to_be_bytes()].concat();
+            handle_unload_chunk(
+                &crab_net::RawPacket {
+                    id: ID_UNLOAD_CHUNK,
+                    body: body.into(),
+                },
+                &shared,
+                protocol,
+            )
+            .unwrap();
+            let world = shared.world.lock().unwrap();
+            assert!(!world.is_loaded(-32, 48), "{protocol:?}");
+            assert!(world.is_loaded(48, -32), "{protocol:?}");
+            drop(world);
+            assert!(shared.dirty_chunks.take_batch_wait(10).contains(&(-2, 3)));
+        }
     }
 
     #[test]

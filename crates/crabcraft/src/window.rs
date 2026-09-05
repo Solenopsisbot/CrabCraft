@@ -2986,6 +2986,19 @@ struct MeshOutput {
     vertices: Vec<Vertex>,
 }
 
+impl MeshOutput {
+    fn ready_for_upload(&self, shared: &Shared, asset_generation: u64) -> bool {
+        let current = self.asset_generation == asset_generation
+            && self.world.is_current(&shared.world.lock().unwrap());
+        if !current {
+            // A neighbour may change after the worker drained our marker.
+            // Reject stale geometry, but always schedule its replacement.
+            shared.dirty_chunks.extend([self.coord]);
+        }
+        current
+    }
+}
+
 type EntityGeometryStreams = (
     Vec<Vertex>,
     Vec<Vertex>,
@@ -4232,9 +4245,7 @@ impl App {
         for _ in 0..REMESH_BUDGET {
             match self.mesh_rx.try_recv() {
                 Ok(output) => {
-                    let current = output.asset_generation == self.asset_generation
-                        && output.world.is_current(&self.shared.world.lock().unwrap());
-                    if current {
+                    if output.ready_for_upload(&self.shared, self.asset_generation) {
                         gfx.upload_chunk(output.coord, &output.vertices);
                     }
                 }
@@ -6019,6 +6030,45 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_mesh_jobs_are_requeued_and_unloads_cannot_erase_reloaded_chunks() {
+        let shared = Shared::new();
+        let chunk = |x, z| crab_world::Chunk {
+            x,
+            z,
+            sections: Vec::new(),
+        };
+        shared.world.lock().unwrap().load_chunk(chunk(0, 0));
+        let output = MeshOutput {
+            coord: (0, 0),
+            world: shared.world.lock().unwrap().snapshot_region(0, 0),
+            asset_generation: 1,
+            vertices: Vec::new(),
+        };
+        assert!(output.ready_for_upload(&shared, 1));
+        // Diagonal chunks are snapshot dependencies, but their cardinal
+        // invalidation markers do not cover this chunk.
+        shared.world.lock().unwrap().load_chunk(chunk(1, 1));
+        assert!(!output.ready_for_upload(&shared, 1));
+        assert_eq!(shared.dirty_chunks.take_batch_wait(8), vec![(0, 0)]);
+        shared.world.lock().unwrap().unload_chunk(0, 0);
+        let unload = MeshOutput {
+            world: shared.world.lock().unwrap().snapshot_region(0, 0),
+            ..output
+        };
+        assert!(unload.ready_for_upload(&shared, 1));
+        shared.world.lock().unwrap().load_chunk(chunk(0, 0));
+        assert!(!unload.ready_for_upload(&shared, 1));
+        assert_eq!(shared.dirty_chunks.take_batch_wait(8), vec![(0, 0)]);
+        let fresh = MeshOutput {
+            world: shared.world.lock().unwrap().snapshot_region(0, 0),
+            ..unload
+        };
+        assert!(fresh.ready_for_upload(&shared, 1));
+        assert!(!fresh.ready_for_upload(&shared, 2));
+        assert_eq!(shared.dirty_chunks.take_batch_wait(8), vec![(0, 0)]);
+    }
 
     #[test]
     fn options_cycle_and_camera_apply_selected_fov() {
